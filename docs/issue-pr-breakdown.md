@@ -9,6 +9,7 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 3. [ISSUE-003 #3](https://github.com/hellsoul86/remote-llm-cli/issues/3): Audit/run history and terminal TUI mode.
 4. [ISSUE-004 #5](https://github.com/hellsoul86/remote-llm-cli/issues/5): Runtime adapter SDK for `claude`/`gemini` follow-up.
 5. [ISSUE-005 #7](https://github.com/hellsoul86/remote-llm-cli/issues/7): Codex runtime deepening.
+6. [ISSUE-007 #12](https://github.com/hellsoul86/remote-llm-cli/issues/12): Deep remote operations (`sync`, retry policy, shell attach).
 
 ## Planned PR Sequence
 
@@ -17,6 +18,7 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 3. PR-003 -> ISSUE-003 (audit storage + query endpoint + web + TUI history panes)
 4. PR-004 -> ISSUE-004 #5 (runtime adapter extension points)
 5. PR-005 -> ISSUE-005 #7 (codex deep runtime support)
+6. PR-006 -> ISSUE-007 #12 (sync + retry + shell attach)
 
 ## Branch Targets
 

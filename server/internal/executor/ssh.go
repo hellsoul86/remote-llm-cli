@@ -100,6 +100,13 @@ func renderRemoteCommand(spec runtime.CommandSpec, workdir string) string {
 }
 
 func buildSSHArgs(h model.Host, remoteCommand string) []string {
+	args := buildSSHTransportArgs(h)
+	target := hostTarget(h)
+	args = append(args, target, "--", "sh", "-lc", remoteCommand)
+	return args
+}
+
+func buildSSHTransportArgs(h model.Host) []string {
 	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}
 	if h.Port > 0 {
 		args = append(args, "-p", fmt.Sprintf("%d", h.Port))
@@ -107,12 +114,14 @@ func buildSSHArgs(h model.Host, remoteCommand string) []string {
 	if h.IdentityFile != "" {
 		args = append(args, "-i", h.IdentityFile)
 	}
-	target := h.Host
-	if h.User != "" {
-		target = h.User + "@" + h.Host
-	}
-	args = append(args, target, "--", "sh", "-lc", remoteCommand)
 	return args
+}
+
+func hostTarget(h model.Host) string {
+	if strings.TrimSpace(h.User) == "" {
+		return h.Host
+	}
+	return h.User + "@" + h.Host
 }
 
 func shellQuote(v string) string {

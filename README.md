@@ -64,6 +64,8 @@ Default API URL is `http://localhost:8080`.
 - Host CRUD API (JSON file persistence)
 - Host probe (`ssh` + codex diagnostics)
 - Multi-host fanout execution (`POST /v1/run` with `host_ids` or `all_hosts`)
+- Multi-host file sync over rsync (`POST /v1/sync`)
+- Retry policy for run/sync (`retry_count`, `retry_backoff_ms`)
 - Safe output capture limit (`max_output_kb`, includes truncation metadata in response)
 - Run history API (`GET /v1/runs`)
 - Audit event API (`GET /v1/audit`)
@@ -83,6 +85,8 @@ Default API URL is `http://localhost:8080`.
 - `w`: edit workdir override
 - `+` / `-`: adjust fanout
 - `[` / `]`: decrease/increase max output KB
+- `.` / `,`: increase/decrease retry count
+- `n` / `b`: increase/decrease retry backoff ms
 - `t`: cycle codex mode (`exec`/`resume`/`review`)
 - `m`: edit codex model
 - `x`: cycle codex sandbox
@@ -91,6 +95,7 @@ Default API URL is `http://localhost:8080`.
 - `e`: toggle `--ephemeral`
 - `l`: toggle resume `--last`
 - `s`: edit resume session id (when `resume_last=false`)
+- `o`: open interactive SSH shell on current host (with workspace cd)
 
 ## Fanout API example
 
@@ -126,6 +131,25 @@ curl -X POST http://localhost:8080/v1/run \
       "ephemeral": false,
       "skip_git_repo_check": true
     }
+  }'
+```
+
+## Sync API example
+
+```bash
+curl -X POST http://localhost:8080/v1/sync \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "all_hosts": true,
+    "fanout": 3,
+    "src": "./",
+    "dst": "workspace",
+    "delete": false,
+    "excludes": [".git", "node_modules"],
+    "max_output_kb": 256,
+    "retry_count": 1,
+    "retry_backoff_ms": 1000
   }'
 ```
 
