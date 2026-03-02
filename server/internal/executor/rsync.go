@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 	"strings"
 	"time"
@@ -53,10 +52,10 @@ func RunRsyncViaSSH(
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		res.ExitCode = exitErr.ExitCode()
-		return res, fmt.Errorf("rsync command failed: %w", err)
+		return res, classifyRsyncRunError(err, res.ExitCode, res.Stderr)
 	}
 	res.ExitCode = -1
-	return res, fmt.Errorf("rsync execution failed: %w", err)
+	return res, classifyRsyncRunError(err, res.ExitCode, res.Stderr)
 }
 
 func buildRsyncArgs(h model.Host, src string, dst string, opts SyncOptions) []string {

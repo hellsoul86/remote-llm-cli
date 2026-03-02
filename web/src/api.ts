@@ -7,6 +7,11 @@ export type Host = {
   identity_file?: string;
   workspace?: string;
   tags?: string[];
+  ssh_proxy_jump?: string;
+  ssh_connect_timeout_sec?: number;
+  ssh_server_alive_interval_sec?: number;
+  ssh_server_alive_count_max?: number;
+  ssh_host_key_policy?: "accept-new" | "strict" | "insecure-ignore";
 };
 
 export type RuntimeInfo = {
@@ -79,6 +84,8 @@ export type RunTargetResult = {
   };
   ok: boolean;
   error?: string | null;
+  error_class?: string;
+  error_hint?: string;
   attempts?: number;
   codex?: {
     jsonl: boolean;
@@ -157,6 +164,7 @@ export type RunRecord = {
     exit_code: number;
     duration_ms: number;
     error?: string;
+    error_class?: string;
   }>;
 };
 

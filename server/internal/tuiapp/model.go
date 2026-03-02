@@ -693,6 +693,14 @@ func (m Model) viewControlPane(b *strings.Builder) {
 			if strings.TrimSpace(t.Error) != "" {
 				errText = " err=" + strings.TrimSpace(t.Error)
 			}
+			classText := ""
+			if strings.TrimSpace(t.ErrorClass) != "" {
+				classText = " class=" + strings.TrimSpace(t.ErrorClass)
+			}
+			hintText := ""
+			if strings.TrimSpace(t.ErrorHint) != "" {
+				hintText = " hint=" + clamp(strings.TrimSpace(t.ErrorHint), 60)
+			}
 			codexText := ""
 			if t.Codex != nil {
 				codexText = fmt.Sprintf(" codex_events=%d invalid_json=%d", t.Codex.EventCount, t.Codex.InvalidLines)
@@ -707,7 +715,7 @@ func (m Model) viewControlPane(b *strings.Builder) {
 				t.Result.StderrBytes,
 				truncText(t.Result.StdoutTruncated, " stdout_truncated"),
 				truncText(t.Result.StderrTruncated, " stderr_truncated"),
-				codexText+errText,
+				codexText+classText+hintText+errText,
 			))
 		}
 	}
@@ -983,12 +991,30 @@ func (m Model) openShellCmd(host Host) tea.Cmd {
 			return shellDoneMsg{host: host, err: fmt.Errorf("invalid host target")}
 		}
 	}
-	sshArgs := []string{"-t", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}
+	hostKeyPolicy := normalizeHostKeyPolicy(host.SSHHostKeyPolicy)
+	sshArgs := []string{
+		"-t",
+		"-o", "BatchMode=yes",
+		"-o", fmt.Sprintf("ConnectTimeout=%d", clampInt(host.SSHConnectTimeoutSec, 10, 1, 300)),
+		"-o", fmt.Sprintf("ServerAliveInterval=%d", clampInt(host.SSHServerAliveIntervalSec, 30, 1, 300)),
+		"-o", fmt.Sprintf("ServerAliveCountMax=%d", clampInt(host.SSHServerAliveCountMax, 3, 1, 10)),
+	}
+	switch hostKeyPolicy {
+	case "strict":
+		sshArgs = append(sshArgs, "-o", "StrictHostKeyChecking=yes")
+	case "insecure-ignore":
+		sshArgs = append(sshArgs, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null")
+	default:
+		sshArgs = append(sshArgs, "-o", "StrictHostKeyChecking=accept-new")
+	}
 	if host.Port > 0 {
 		sshArgs = append(sshArgs, "-p", strconv.Itoa(host.Port))
 	}
+	if strings.TrimSpace(host.SSHProxyJump) != "" {
+		sshArgs = append(sshArgs, "-J", strings.TrimSpace(host.SSHProxyJump))
+	}
 	if strings.TrimSpace(host.IdentityFile) != "" {
-		sshArgs = append(sshArgs, "-i", strings.TrimSpace(host.IdentityFile))
+		sshArgs = append(sshArgs, "-i", strings.TrimSpace(host.IdentityFile), "-o", "IdentitiesOnly=yes")
 	}
 	remoteShell := "exec ${SHELL:-bash} -l"
 	if strings.TrimSpace(host.Workspace) != "" {
@@ -1013,6 +1039,30 @@ func safePort(v int) int {
 		return 22
 	}
 	return v
+}
+
+func clampInt(v int, fallback int, min int, max int) int {
+	if v <= 0 {
+		v = fallback
+	}
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func normalizeHostKeyPolicy(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "strict":
+		return "strict"
+	case "insecure-ignore", "insecure", "off", "disabled":
+		return "insecure-ignore"
+	default:
+		return "accept-new"
+	}
 }
 
 func paneLabel(pane int) string {

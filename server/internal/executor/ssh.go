@@ -3,9 +3,12 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,6 +17,29 @@ import (
 )
 
 const defaultMaxOutputBytes = 256 * 1024
+
+type ErrorClass string
+
+const (
+	ErrorClassAuth      ErrorClass = "auth"
+	ErrorClassNetwork   ErrorClass = "network"
+	ErrorClassHostKey   ErrorClass = "host_key"
+	ErrorClassCommand   ErrorClass = "command"
+	ErrorClassToolchain ErrorClass = "toolchain"
+	ErrorClassUnknown   ErrorClass = "unknown"
+)
+
+const (
+	HostKeyPolicyAcceptNew    = "accept-new"
+	HostKeyPolicyStrict       = "strict"
+	HostKeyPolicyInsecureSkip = "insecure-ignore"
+)
+
+const (
+	defaultSSHConnectTimeoutSec      = 10
+	defaultSSHServerAliveIntervalSec = 30
+	defaultSSHServerAliveCountMax    = 3
+)
 
 type ExecOptions struct {
 	MaxStdoutBytes int
@@ -48,6 +74,61 @@ type ExecResult struct {
 	Duration   time.Duration `json:"-"`
 }
 
+type ClassifiedError struct {
+	Class   ErrorClass `json:"class"`
+	Hint    string     `json:"hint,omitempty"`
+	Message string     `json:"message"`
+	Cause   error      `json:"-"`
+}
+
+func (e *ClassifiedError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return "execution failed"
+}
+
+func (e *ClassifiedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func ErrorClassOf(err error) string {
+	var classified *ClassifiedError
+	if errors.As(err, &classified) {
+		return string(classified.Class)
+	}
+	return ""
+}
+
+func ErrorHintOf(err error) string {
+	var classified *ClassifiedError
+	if errors.As(err, &classified) {
+		return strings.TrimSpace(classified.Hint)
+	}
+	return ""
+}
+
+type PreflightCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+	Hint   string `json:"hint,omitempty"`
+}
+
+type SSHPreflightReport struct {
+	OK     bool             `json:"ok"`
+	Checks []PreflightCheck `json:"checks"`
+}
+
 func RunViaSSH(ctx context.Context, h model.Host, spec runtime.CommandSpec, workdir string, opts ExecOptions) (ExecResult, error) {
 	started := time.Now().UTC()
 	remoteCmd := renderRemoteCommand(spec, workdir)
@@ -80,10 +161,10 @@ func RunViaSSH(ctx context.Context, h model.Host, spec runtime.CommandSpec, work
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		res.ExitCode = exitErr.ExitCode()
-		return res, fmt.Errorf("remote command failed: %w", err)
+		return res, classifySSHRunError(err, res.ExitCode, res.Stderr)
 	}
 	res.ExitCode = -1
-	return res, fmt.Errorf("ssh execution failed: %w", err)
+	return res, classifySSHRunError(err, res.ExitCode, res.Stderr)
 }
 
 func renderRemoteCommand(spec runtime.CommandSpec, workdir string) string {
@@ -107,14 +188,278 @@ func buildSSHArgs(h model.Host, remoteCommand string) []string {
 }
 
 func buildSSHTransportArgs(h model.Host) []string {
-	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", fmt.Sprintf("ConnectTimeout=%d", clampInt(h.SSHConnectTimeoutSec, defaultSSHConnectTimeoutSec, 1, 300)),
+		"-o", fmt.Sprintf("ServerAliveInterval=%d", clampInt(h.SSHServerAliveIntervalSec, defaultSSHServerAliveIntervalSec, 1, 300)),
+		"-o", fmt.Sprintf("ServerAliveCountMax=%d", clampInt(h.SSHServerAliveCountMax, defaultSSHServerAliveCountMax, 1, 10)),
+	}
+	switch normalizeHostKeyPolicy(h.SSHHostKeyPolicy) {
+	case HostKeyPolicyStrict:
+		args = append(args, "-o", "StrictHostKeyChecking=yes")
+	case HostKeyPolicyInsecureSkip:
+		args = append(args, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null")
+	default:
+		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
+	}
 	if h.Port > 0 {
 		args = append(args, "-p", fmt.Sprintf("%d", h.Port))
 	}
-	if h.IdentityFile != "" {
-		args = append(args, "-i", h.IdentityFile)
+	if strings.TrimSpace(h.SSHProxyJump) != "" {
+		args = append(args, "-J", strings.TrimSpace(h.SSHProxyJump))
+	}
+	if strings.TrimSpace(h.IdentityFile) != "" {
+		args = append(args, "-i", strings.TrimSpace(h.IdentityFile), "-o", "IdentitiesOnly=yes")
 	}
 	return args
+}
+
+func normalizeHostKeyPolicy(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case HostKeyPolicyStrict:
+		return HostKeyPolicyStrict
+	case HostKeyPolicyInsecureSkip, "insecure", "off", "disabled":
+		return HostKeyPolicyInsecureSkip
+	default:
+		return HostKeyPolicyAcceptNew
+	}
+}
+
+func clampInt(v int, fallback int, min int, max int) int {
+	if v <= 0 {
+		v = fallback
+	}
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func RunSSHPreflight(h model.Host) SSHPreflightReport {
+	checks := make([]PreflightCheck, 0, 4)
+	sshPath, sshErr := exec.LookPath("ssh")
+	checks = append(checks, PreflightCheck{
+		Name:   "ssh_binary",
+		OK:     sshErr == nil,
+		Detail: toolDetail("ssh", sshPath, sshErr),
+		Hint:   toolHint("ssh", sshErr),
+	})
+	rsyncPath, rsyncErr := exec.LookPath("rsync")
+	checks = append(checks, PreflightCheck{
+		Name:   "rsync_binary",
+		OK:     rsyncErr == nil,
+		Detail: toolDetail("rsync", rsyncPath, rsyncErr),
+		Hint:   toolHint("rsync", rsyncErr),
+	})
+
+	identity := strings.TrimSpace(h.IdentityFile)
+	if identity == "" {
+		checks = append(checks, PreflightCheck{
+			Name:   "identity_file",
+			OK:     true,
+			Detail: "not configured (agent/default ssh identities may be used)",
+		})
+	} else {
+		stat, err := os.Stat(identity)
+		if err != nil {
+			checks = append(checks, PreflightCheck{
+				Name:   "identity_file",
+				OK:     false,
+				Detail: err.Error(),
+				Hint:   "set a valid local identity file path or remove identity_file to use ssh agent/default key",
+			})
+		} else {
+			mode := stat.Mode().Perm()
+			ok := mode&0o077 == 0
+			hint := ""
+			if !ok {
+				hint = "restrict key permissions with chmod 600"
+			}
+			checks = append(checks, PreflightCheck{
+				Name:   "identity_permissions",
+				OK:     ok,
+				Detail: fmt.Sprintf("%s mode=%#o", filepath.Base(identity), mode),
+				Hint:   hint,
+			})
+		}
+	}
+	policy := normalizeHostKeyPolicy(h.SSHHostKeyPolicy)
+	checks = append(checks, PreflightCheck{
+		Name:   "host_key_policy",
+		OK:     true,
+		Detail: policy,
+		Hint:   hostKeyPolicyHint(policy),
+	})
+	ok := true
+	for _, item := range checks {
+		if !item.OK {
+			ok = false
+			break
+		}
+	}
+	return SSHPreflightReport{OK: ok, Checks: checks}
+}
+
+func toolDetail(name string, path string, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return name + " found at " + path
+}
+
+func toolHint(name string, err error) string {
+	if err == nil {
+		return ""
+	}
+	return "install " + name + " in PATH on controller host"
+}
+
+func hostKeyPolicyHint(policy string) string {
+	switch policy {
+	case HostKeyPolicyStrict:
+		return "strict mode requires known_hosts entry to exist beforehand"
+	case HostKeyPolicyInsecureSkip:
+		return "insecure mode disables host-key verification; avoid in production"
+	default:
+		return "accept-new trusts first connection and enforces key pinning afterwards"
+	}
+}
+
+func classifySSHRunError(runErr error, exitCode int, stderr string) error {
+	if runErr == nil {
+		return nil
+	}
+	lower := strings.ToLower(stderr + "\n" + runErr.Error())
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		return &ClassifiedError{
+			Class:   ErrorClassNetwork,
+			Hint:    "request timed out or was canceled; verify reachability and timeout settings",
+			Message: fmt.Sprintf("ssh execution canceled: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+	var execErr *exec.Error
+	if errors.As(runErr, &execErr) {
+		return &ClassifiedError{
+			Class:   ErrorClassToolchain,
+			Hint:    "install ssh client and verify PATH on controller host",
+			Message: fmt.Sprintf("ssh binary execution failed: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+
+	if exitCode != 255 && exitCode >= 0 {
+		return &ClassifiedError{
+			Class:   ErrorClassCommand,
+			Hint:    "remote command exited non-zero; inspect stderr/stdout to debug runtime failure",
+			Message: fmt.Sprintf("remote command failed: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+
+	switch {
+	case hasAny(lower, "permission denied", "publickey", "too many authentication failures", "sign_and_send_pubkey", "no such identity", "bad permissions"):
+		return &ClassifiedError{
+			Class:   ErrorClassAuth,
+			Hint:    "verify ssh user, identity file, and authorized_keys on target",
+			Message: fmt.Sprintf("ssh authentication failed: %v", runErr),
+			Cause:   runErr,
+		}
+	case hasAny(lower, "host key verification failed", "remote host identification has changed", "offending ecdsa key", "offending rsa key", "strict host key checking"):
+		return &ClassifiedError{
+			Class:   ErrorClassHostKey,
+			Hint:    "refresh known_hosts entry or adjust ssh_host_key_policy for first-time trust",
+			Message: fmt.Sprintf("ssh host-key verification failed: %v", runErr),
+			Cause:   runErr,
+		}
+	case hasAny(lower, "could not resolve hostname", "name or service not known", "temporary failure in name resolution", "connection timed out", "connection refused", "no route to host", "network is unreachable", "operation timed out", "connection closed"):
+		return &ClassifiedError{
+			Class:   ErrorClassNetwork,
+			Hint:    "verify target host/port reachability, security group rules, and ProxyJump chain",
+			Message: fmt.Sprintf("ssh network/connectivity failure: %v", runErr),
+			Cause:   runErr,
+		}
+	default:
+		return &ClassifiedError{
+			Class:   ErrorClassUnknown,
+			Hint:    "inspect stderr and run host probe for remediation hints",
+			Message: fmt.Sprintf("ssh execution failed: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+}
+
+func classifyRsyncRunError(runErr error, exitCode int, stderr string) error {
+	if runErr == nil {
+		return nil
+	}
+	lower := strings.ToLower(stderr + "\n" + runErr.Error())
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		return &ClassifiedError{
+			Class:   ErrorClassNetwork,
+			Hint:    "request timed out or was canceled; verify reachability and timeout settings",
+			Message: fmt.Sprintf("rsync execution canceled: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+	var execErr *exec.Error
+	if errors.As(runErr, &execErr) {
+		return &ClassifiedError{
+			Class:   ErrorClassToolchain,
+			Hint:    "install rsync/ssh clients and verify PATH on controller host",
+			Message: fmt.Sprintf("rsync binary execution failed: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+	switch {
+	case hasAny(lower, "permission denied", "publickey", "authentication failed", "no such identity", "failed to authenticate"):
+		return &ClassifiedError{
+			Class:   ErrorClassAuth,
+			Hint:    "verify ssh user, identity file, and target permissions",
+			Message: fmt.Sprintf("rsync authentication failed: %v", runErr),
+			Cause:   runErr,
+		}
+	case hasAny(lower, "host key verification failed", "remote host identification has changed", "strict host key checking"):
+		return &ClassifiedError{
+			Class:   ErrorClassHostKey,
+			Hint:    "refresh known_hosts entry or adjust ssh_host_key_policy for first-time trust",
+			Message: fmt.Sprintf("rsync host-key verification failed: %v", runErr),
+			Cause:   runErr,
+		}
+	case hasAny(lower, "could not resolve hostname", "name or service not known", "connection timed out", "connection refused", "no route to host", "network is unreachable"):
+		return &ClassifiedError{
+			Class:   ErrorClassNetwork,
+			Hint:    "verify target host/port reachability and ssh proxy/jump path",
+			Message: fmt.Sprintf("rsync network/connectivity failure: %v", runErr),
+			Cause:   runErr,
+		}
+	case exitCode >= 0:
+		return &ClassifiedError{
+			Class:   ErrorClassCommand,
+			Hint:    "rsync exited non-zero; inspect stderr for transfer path/permission details",
+			Message: fmt.Sprintf("rsync command failed: %v", runErr),
+			Cause:   runErr,
+		}
+	default:
+		return &ClassifiedError{
+			Class:   ErrorClassUnknown,
+			Hint:    "inspect stderr and run host probe for remediation hints",
+			Message: fmt.Sprintf("rsync execution failed: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+}
+
+func hasAny(text string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(text, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func hostTarget(h model.Host) string {

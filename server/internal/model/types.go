@@ -6,16 +6,21 @@ import (
 )
 
 type Host struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Host         string    `json:"host"`
-	User         string    `json:"user"`
-	Port         int       `json:"port"`
-	IdentityFile string    `json:"identity_file,omitempty"`
-	Workspace    string    `json:"workspace,omitempty"`
-	Tags         []string  `json:"tags,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                        string    `json:"id"`
+	Name                      string    `json:"name"`
+	Host                      string    `json:"host"`
+	User                      string    `json:"user"`
+	Port                      int       `json:"port"`
+	IdentityFile              string    `json:"identity_file,omitempty"`
+	Workspace                 string    `json:"workspace,omitempty"`
+	Tags                      []string  `json:"tags,omitempty"`
+	SSHProxyJump              string    `json:"ssh_proxy_jump,omitempty"`
+	SSHConnectTimeoutSec      int       `json:"ssh_connect_timeout_sec,omitempty"`
+	SSHServerAliveIntervalSec int       `json:"ssh_server_alive_interval_sec,omitempty"`
+	SSHServerAliveCountMax    int       `json:"ssh_server_alive_count_max,omitempty"`
+	SSHHostKeyPolicy          string    `json:"ssh_host_key_policy,omitempty"`
+	CreatedAt                 time.Time `json:"created_at"`
+	UpdatedAt                 time.Time `json:"updated_at"`
 }
 
 type AccessKey struct {
@@ -48,6 +53,7 @@ type RunTargetSummary struct {
 	ExitCode   int    `json:"exit_code"`
 	DurationMS int64  `json:"duration_ms"`
 	Error      string `json:"error,omitempty"`
+	ErrorClass string `json:"error_class,omitempty"`
 }
 
 type RunRecord struct {

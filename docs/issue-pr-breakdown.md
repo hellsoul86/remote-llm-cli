@@ -15,6 +15,10 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 9. [ISSUE-010 #18](https://github.com/hellsoul86/remote-llm-cli/issues/18): Async sync jobs and unified multi-type scheduler.
 10. [ISSUE-011 #19](https://github.com/hellsoul86/remote-llm-cli/issues/19): Job cancellation API and cooperative timeout control.
 11. [ISSUE-012 #20](https://github.com/hellsoul86/remote-llm-cli/issues/20): Codex session lifecycle management and resume UX.
+12. [ISSUE-013 #21](https://github.com/hellsoul86/remote-llm-cli/issues/21): SSH transport hardening for production remote control.
+13. [ISSUE-014 #22](https://github.com/hellsoul86/remote-llm-cli/issues/22): Observability, retention, and operational runbook.
+14. [ISSUE-015 #23](https://github.com/hellsoul86/remote-llm-cli/issues/23): CI/e2e coverage for async job control plane.
+15. [ISSUE-016 #24](https://github.com/hellsoul86/remote-llm-cli/issues/24): Runtime adapter contract v2 and next adapters.
 
 ## Planned PR Sequence
 
@@ -29,6 +33,10 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 9. PR-009 -> ISSUE-010 #18 (async sync jobs + unified scheduler)
 10. PR-010 -> ISSUE-011 #19 (job cancellation + cooperative cancel UX)
 11. PR-011 -> ISSUE-012 #20 (codex session discover/cleanup + resume helpers)
+12. PR-012 -> ISSUE-013 #21 (ssh hardening + preflight + classified errors)
+13. PR-013 -> ISSUE-014 #22 (filters + retention + metrics + runbook)
+14. PR-014 -> ISSUE-015 #23 (integration/e2e CI coverage)
+15. PR-015 -> ISSUE-016 #24 (adapter contract v2 + next runtime adapter)
 
 ## Branch Targets
 
