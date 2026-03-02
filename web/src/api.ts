@@ -159,6 +159,27 @@ export type RunRecord = {
   }>;
 };
 
+export type RunJobRecord = {
+  id: string;
+  type: string;
+  status: "pending" | "running" | "succeeded" | "failed";
+  runtime: string;
+  prompt_preview: string;
+  created_by_key_id?: string;
+  queued_at: string;
+  started_at?: string;
+  finished_at?: string;
+  result_status?: number;
+  total_hosts?: number;
+  succeeded_hosts?: number;
+  failed_hosts?: number;
+  fanout?: number;
+  duration_ms?: number;
+  error?: string;
+  request?: RunRequest;
+  response?: RunResponse;
+};
+
 export type AuditEvent = {
   id: string;
   timestamp: string;
@@ -224,6 +245,37 @@ export async function runFanout(token: string, request: RunRequest): Promise<{ s
     throw new Error(`run failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return { status: res.status, body };
+}
+
+export async function enqueueRunJob(token: string, request: RunRequest): Promise<{ status: number; body: { job: RunJobRecord } }> {
+  const res = await fetch(`${API_BASE}/v1/jobs/run`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.job) {
+    throw new Error(`enqueue run job failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return { status: res.status, body };
+}
+
+export async function listRunJobs(token: string, limit = 30): Promise<RunJobRecord[]> {
+  const res = await fetch(`${API_BASE}/v1/jobs?limit=${encodeURIComponent(String(limit))}`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`list jobs failed: ${res.status}`);
+  const body = await res.json();
+  return body.jobs ?? [];
+}
+
+export async function getRunJob(token: string, id: string): Promise<RunJobRecord> {
+  const res = await fetch(`${API_BASE}/v1/jobs/${encodeURIComponent(id)}`, { headers: headers(token) });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`get job failed: ${res.status} ${text}`);
+  }
+  const body = await res.json();
+  if (!body?.job) throw new Error("get job failed: invalid response");
+  return body.job;
 }
 
 export async function syncHosts(token: string, request: SyncRequest): Promise<{ status: number; body: SyncResponse }> {

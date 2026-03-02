@@ -70,6 +70,9 @@ func TestInferAction(t *testing.T) {
 		{name: "host delete", method: http.MethodDelete, path: "/v1/hosts/h_1", want: "host.delete"},
 		{name: "host probe dynamic", method: http.MethodPost, path: "/v1/hosts/h_1/probe", want: "host.probe"},
 		{name: "run execute", method: http.MethodPost, path: "/v1/run", want: "run.execute"},
+		{name: "run enqueue", method: http.MethodPost, path: "/v1/jobs/run", want: "job.run.enqueue"},
+		{name: "job list", method: http.MethodGet, path: "/v1/jobs", want: "job.list"},
+		{name: "job get", method: http.MethodGet, path: "/v1/jobs/job_1", want: "job.get"},
 		{name: "sync execute", method: http.MethodPost, path: "/v1/sync", want: "sync.execute"},
 		{name: "run list", method: http.MethodGet, path: "/v1/runs", want: "run.list"},
 		{name: "audit list", method: http.MethodGet, path: "/v1/audit", want: "audit.list"},
@@ -82,6 +85,18 @@ func TestInferAction(t *testing.T) {
 				t.Fatalf("inferAction(%q,%q)=%q want=%q", tc.method, tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeFanout(t *testing.T) {
+	if got := normalizeFanout(0, 5); got != 3 {
+		t.Fatalf("normalizeFanout default=%d want=3", got)
+	}
+	if got := normalizeFanout(10, 4); got != 4 {
+		t.Fatalf("normalizeFanout cap=%d want=4", got)
+	}
+	if got := normalizeFanout(1, 0); got != 0 {
+		t.Fatalf("normalizeFanout empty hosts=%d want=0", got)
 	}
 }
 

@@ -64,6 +64,7 @@ Default API URL is `http://localhost:8080`.
 - Host CRUD API (JSON file persistence)
 - Host probe (`ssh` + codex diagnostics)
 - Multi-host fanout execution (`POST /v1/run` with `host_ids` or `all_hosts`)
+- Async run jobs with reconnectable polling (`POST /v1/jobs/run`, `GET /v1/jobs`, `GET /v1/jobs/{id}`)
 - Multi-host file sync over rsync (`POST /v1/sync`)
 - Retry policy for run/sync (`retry_count`, `retry_backoff_ms`)
 - Safe output capture limit (`max_output_kb`, includes truncation metadata in response)
@@ -77,6 +78,7 @@ Default API URL is `http://localhost:8080`.
 - `q`: quit
 - `R`: reload hosts + history
 - `r`: execute run
+- `u`: toggle run mode (`async job` / `sync request`)
 - `h`: reload run/audit history
 - `Tab`: switch pane (`control` / `runs` / `audit`)
 - `a`: toggle all-host mode
@@ -109,6 +111,29 @@ curl -X POST http://localhost:8080/v1/run \
     "fanout": 3,
     "prompt": "summarize git status and risks"
   }'
+```
+
+## Async Run Job API example
+
+```bash
+# enqueue
+curl -X POST http://localhost:8080/v1/jobs/run \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "runtime": "codex",
+    "all_hosts": true,
+    "fanout": 3,
+    "prompt": "summarize git status and blockers"
+  }'
+
+# poll list
+curl -X GET "http://localhost:8080/v1/jobs?limit=20" \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY"
+
+# poll one
+curl -X GET "http://localhost:8080/v1/jobs/job_xxx" \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY"
 ```
 
 ## Codex advanced run example

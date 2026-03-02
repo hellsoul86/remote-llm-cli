@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Host struct {
 	ID           string    `json:"id"`
@@ -61,6 +64,27 @@ type RunRecord struct {
 	StartedAt      time.Time          `json:"started_at"`
 	FinishedAt     time.Time          `json:"finished_at"`
 	Targets        []RunTargetSummary `json:"targets"`
+}
+
+type RunJobRecord struct {
+	ID             string          `json:"id"`
+	Type           string          `json:"type"`
+	Status         string          `json:"status"`
+	Runtime        string          `json:"runtime"`
+	PromptPreview  string          `json:"prompt_preview"`
+	CreatedByKeyID string          `json:"created_by_key_id,omitempty"`
+	QueuedAt       time.Time       `json:"queued_at"`
+	StartedAt      *time.Time      `json:"started_at,omitempty"`
+	FinishedAt     *time.Time      `json:"finished_at,omitempty"`
+	ResultStatus   int             `json:"result_status,omitempty"`
+	TotalHosts     int             `json:"total_hosts,omitempty"`
+	SucceededHosts int             `json:"succeeded_hosts,omitempty"`
+	FailedHosts    int             `json:"failed_hosts,omitempty"`
+	Fanout         int             `json:"fanout,omitempty"`
+	DurationMS     int64           `json:"duration_ms,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	Request        json.RawMessage `json:"request,omitempty"`
+	Response       json.RawMessage `json:"response,omitempty"`
 }
 
 type AuditEvent struct {
