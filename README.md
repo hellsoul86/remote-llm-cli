@@ -67,6 +67,7 @@ Default API URL is `http://localhost:8080`.
 - Async run jobs with reconnectable polling (`POST /v1/jobs/run`, `GET /v1/jobs`, `GET /v1/jobs/{id}`)
 - Multi-host file sync over rsync (`POST /v1/sync`)
 - Async sync jobs on the same scheduler (`POST /v1/jobs/sync`)
+- Job cancellation API (`POST /v1/jobs/{id}/cancel`)
 - Retry policy for run/sync (`retry_count`, `retry_backoff_ms`)
 - Safe output capture limit (`max_output_kb`, includes truncation metadata in response)
 - Run history API (`GET /v1/runs`)
@@ -84,6 +85,7 @@ Default API URL is `http://localhost:8080`.
 - `Tab`: switch pane (`control` / `runs` / `audit` / `jobs`)
 - `J`: reload jobs list (in `jobs` pane)
 - `Enter` / `w`: watch selected job (in `jobs` pane)
+- `c`: cancel selected running/pending job (in `jobs` pane)
 - `a`: toggle all-host mode
 - `space`: toggle selected host (when all-host mode is off)
 - `p`: edit prompt
@@ -136,6 +138,10 @@ curl -X GET "http://localhost:8080/v1/jobs?limit=20" \
 
 # poll one
 curl -X GET "http://localhost:8080/v1/jobs/job_xxx" \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY"
+
+# cancel one
+curl -X POST "http://localhost:8080/v1/jobs/job_xxx/cancel" \
   -H "Authorization: Bearer $REMOTE_LLM_KEY"
 ```
 

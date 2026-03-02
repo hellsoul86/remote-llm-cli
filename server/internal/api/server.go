@@ -25,6 +25,9 @@ type Server struct {
 	store    *store.Store
 	runtimes *runtime.Registry
 	runJobs  chan string
+	mu       sync.Mutex
+	cancels  map[string]context.CancelFunc
+	cancelRq map[string]bool
 }
 
 type authIdentity struct {
@@ -39,8 +42,10 @@ const (
 	runJobStatusRunning   = "running"
 	runJobStatusSucceeded = "succeeded"
 	runJobStatusFailed    = "failed"
+	runJobStatusCanceled  = "canceled"
 	defaultRunJobWorkers  = 3
 	runJobQueueSize       = 512
+	jobResultCanceled     = 499
 )
 
 func New(st *store.Store, rt *runtime.Registry) *Server {
@@ -48,6 +53,8 @@ func New(st *store.Store, rt *runtime.Registry) *Server {
 		store:    st,
 		runtimes: rt,
 		runJobs:  make(chan string, runJobQueueSize),
+		cancels:  map[string]context.CancelFunc{},
+		cancelRq: map[string]bool{},
 	}
 	s.startRunJobWorkers(defaultRunJobWorkers)
 	s.recoverRunJobs()
@@ -69,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/jobs/sync", s.withAuth(http.HandlerFunc(s.handleEnqueueSyncJob)))
 	mux.Handle("GET /v1/jobs", s.withAuth(http.HandlerFunc(s.handleListRunJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
+	mux.Handle("POST /v1/jobs/{id}/cancel", s.withAuth(http.HandlerFunc(s.handleCancelRunJob)))
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
 	mux.Handle("GET /v1/runs", s.withAuth(http.HandlerFunc(s.handleListRuns)))
 	mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleListAudit)))
@@ -371,6 +379,46 @@ func (s *Server) handleGetRunJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 
+func (s *Server) handleCancelRunJob(w http.ResponseWriter, r *http.Request) {
+	jobID := strings.TrimSpace(r.PathValue("id"))
+	if jobID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing job id"})
+		return
+	}
+	job, ok := s.store.GetRunJob(jobID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
+		return
+	}
+	switch job.Status {
+	case runJobStatusSucceeded, runJobStatusFailed, runJobStatusCanceled:
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "job already finished", "job": compactRunJob(job)})
+		return
+	case runJobStatusPending:
+		finished := time.Now().UTC()
+		job.Status = runJobStatusCanceled
+		job.ResultStatus = jobResultCanceled
+		job.Error = "canceled before execution"
+		job.FinishedAt = &finished
+		if err := s.store.UpdateRunJob(job); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"state": "canceled", "job": compactRunJob(job)})
+		return
+	case runJobStatusRunning:
+		s.requestJobCancel(jobID)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"state": "cancel_requested",
+			"job":   compactRunJob(job),
+		})
+		return
+	default:
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "job cannot be canceled in current state", "job": compactRunJob(job)})
+		return
+	}
+}
+
 func (s *Server) executeRunRequest(parentCtx context.Context, req runRequest, identity authIdentity) (int, runResponse, error) {
 	prepared, err := s.prepareRun(req)
 	if err != nil {
@@ -541,6 +589,36 @@ func (s *Server) enqueueStoredJob(jobID string) bool {
 	}
 }
 
+func (s *Server) registerRunningJob(jobID string, cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancels[jobID] = cancel
+}
+
+func (s *Server) unregisterRunningJob(jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cancels, jobID)
+}
+
+func (s *Server) requestJobCancel(jobID string) {
+	s.mu.Lock()
+	cancel := s.cancels[jobID]
+	s.cancelRq[jobID] = true
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Server) takeJobCancelRequested(jobID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.cancelRq[jobID]
+	delete(s.cancelRq, jobID)
+	return v
+}
+
 func (s *Server) runJobWorker() {
 	for jobID := range s.runJobs {
 		s.executeQueuedJob(jobID)
@@ -559,12 +637,15 @@ func (s *Server) executeQueuedJob(jobID string) {
 	if err := s.store.UpdateRunJob(job); err != nil {
 		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.registerRunningJob(jobID, cancel)
+	defer s.unregisterRunningJob(jobID)
 
 	switch job.Type {
 	case "run":
-		s.executeQueuedRunJob(job)
+		s.executeQueuedRunJob(ctx, job)
 	case "sync":
-		s.executeQueuedSyncJob(job)
+		s.executeQueuedSyncJob(ctx, job)
 	default:
 		finished := time.Now().UTC()
 		job.Status = runJobStatusFailed
@@ -575,7 +656,7 @@ func (s *Server) executeQueuedJob(jobID string) {
 	}
 }
 
-func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
+func (s *Server) executeQueuedRunJob(ctx context.Context, job model.RunJobRecord) {
 	var req runRequest
 	if err := json.Unmarshal(job.Request, &req); err != nil {
 		finished := time.Now().UTC()
@@ -587,11 +668,19 @@ func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
 		return
 	}
 
-	status, resp, err := s.executeRunRequest(context.Background(), req, authIdentity{KeyID: job.CreatedByKeyID})
+	status, resp, err := s.executeRunRequest(ctx, req, authIdentity{KeyID: job.CreatedByKeyID})
 	finished := time.Now().UTC()
 	job.ResultStatus = status
 	job.FinishedAt = &finished
+	canceled := s.takeJobCancelRequested(job.ID)
 	if err != nil {
+		if canceled || errors.Is(err, context.Canceled) {
+			job.Status = runJobStatusCanceled
+			job.ResultStatus = jobResultCanceled
+			job.Error = "canceled while running"
+			_ = s.store.UpdateRunJob(job)
+			return
+		}
 		var badReq apiError
 		if errors.As(err, &badReq) {
 			job.ResultStatus = badReq.StatusCode
@@ -612,8 +701,14 @@ func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
 		_ = s.store.UpdateRunJob(job)
 		return
 	}
-	job.Status = runJobStatusSucceeded
-	job.Error = ""
+	if canceled {
+		job.Status = runJobStatusCanceled
+		job.ResultStatus = jobResultCanceled
+		job.Error = "canceled while running"
+	} else {
+		job.Status = runJobStatusSucceeded
+		job.Error = ""
+	}
 	job.Response = rawResp
 	job.TotalHosts = resp.Summary.Total
 	job.SucceededHosts = resp.Summary.Succeeded
@@ -623,7 +718,7 @@ func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
 	_ = s.store.UpdateRunJob(job)
 }
 
-func (s *Server) executeQueuedSyncJob(job model.RunJobRecord) {
+func (s *Server) executeQueuedSyncJob(ctx context.Context, job model.RunJobRecord) {
 	var req syncRequest
 	if err := json.Unmarshal(job.Request, &req); err != nil {
 		finished := time.Now().UTC()
@@ -634,11 +729,19 @@ func (s *Server) executeQueuedSyncJob(job model.RunJobRecord) {
 		_ = s.store.UpdateRunJob(job)
 		return
 	}
-	status, resp, err := s.executeSyncRequest(context.Background(), req)
+	status, resp, err := s.executeSyncRequest(ctx, req)
 	finished := time.Now().UTC()
 	job.ResultStatus = status
 	job.FinishedAt = &finished
+	canceled := s.takeJobCancelRequested(job.ID)
 	if err != nil {
+		if canceled || errors.Is(err, context.Canceled) {
+			job.Status = runJobStatusCanceled
+			job.ResultStatus = jobResultCanceled
+			job.Error = "canceled while running"
+			_ = s.store.UpdateRunJob(job)
+			return
+		}
 		var badReq apiError
 		if errors.As(err, &badReq) {
 			job.ResultStatus = badReq.StatusCode
@@ -659,8 +762,14 @@ func (s *Server) executeQueuedSyncJob(job model.RunJobRecord) {
 		_ = s.store.UpdateRunJob(job)
 		return
 	}
-	job.Status = runJobStatusSucceeded
-	job.Error = ""
+	if canceled {
+		job.Status = runJobStatusCanceled
+		job.ResultStatus = jobResultCanceled
+		job.Error = "canceled while running"
+	} else {
+		job.Status = runJobStatusSucceeded
+		job.Error = ""
+	}
 	job.Response = rawResp
 	job.TotalHosts = resp.Summary.Total
 	job.SucceededHosts = resp.Summary.Succeeded
@@ -1160,6 +1269,8 @@ func inferAction(method string, path string) string {
 		return "job.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/"):
 		return "job.get"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/cancel"):
+		return "job.cancel"
 	case method == http.MethodPost && path == "/v1/sync":
 		return "sync.execute"
 	case method == http.MethodGet && path == "/v1/runs":

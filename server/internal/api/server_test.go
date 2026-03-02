@@ -74,6 +74,7 @@ func TestInferAction(t *testing.T) {
 		{name: "sync enqueue", method: http.MethodPost, path: "/v1/jobs/sync", want: "job.sync.enqueue"},
 		{name: "job list", method: http.MethodGet, path: "/v1/jobs", want: "job.list"},
 		{name: "job get", method: http.MethodGet, path: "/v1/jobs/job_1", want: "job.get"},
+		{name: "job cancel", method: http.MethodPost, path: "/v1/jobs/job_1/cancel", want: "job.cancel"},
 		{name: "sync execute", method: http.MethodPost, path: "/v1/sync", want: "sync.execute"},
 		{name: "run list", method: http.MethodGet, path: "/v1/runs", want: "run.list"},
 		{name: "audit list", method: http.MethodGet, path: "/v1/audit", want: "audit.list"},

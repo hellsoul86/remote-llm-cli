@@ -13,6 +13,7 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 7. [ISSUE-008 #15](https://github.com/hellsoul86/remote-llm-cli/issues/15): Async run jobs and reconnectable status polling.
 8. [ISSUE-009 #17](https://github.com/hellsoul86/remote-llm-cli/issues/17): TUI jobs pane and multi-job watch controls.
 9. [ISSUE-010 #18](https://github.com/hellsoul86/remote-llm-cli/issues/18): Async sync jobs and unified multi-type scheduler.
+10. [ISSUE-011 #19](https://github.com/hellsoul86/remote-llm-cli/issues/19): Job cancellation API and cooperative timeout control.
 
 ## Planned PR Sequence
 
@@ -25,6 +26,7 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 7. PR-007 -> ISSUE-008 #15 (async run jobs + polling/reconnect)
 8. PR-008 -> ISSUE-009 #17 (TUI jobs pane + multi-job watch)
 9. PR-009 -> ISSUE-010 #18 (async sync jobs + unified scheduler)
+10. PR-010 -> ISSUE-011 #19 (job cancellation + cooperative cancel UX)
 
 ## Branch Targets
 
