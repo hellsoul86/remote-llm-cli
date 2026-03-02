@@ -12,12 +12,20 @@ import (
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
 )
 
+const (
+	defaultRunRecordsMax  = 500
+	defaultRunJobsMax     = 1000
+	defaultAuditEventsMax = 5000
+	maxRetentionLimit     = 50000
+)
+
 type State struct {
-	Hosts       []model.Host         `json:"hosts"`
-	AccessKeys  []model.AccessKey    `json:"access_keys"`
-	RunRecords  []model.RunRecord    `json:"run_records"`
-	RunJobs     []model.RunJobRecord `json:"run_jobs"`
-	AuditEvents []model.AuditEvent   `json:"audit_events"`
+	Hosts           []model.Host          `json:"hosts"`
+	AccessKeys      []model.AccessKey     `json:"access_keys"`
+	RunRecords      []model.RunRecord     `json:"run_records"`
+	RunJobs         []model.RunJobRecord  `json:"run_jobs"`
+	AuditEvents     []model.AuditEvent    `json:"audit_events"`
+	RetentionPolicy model.RetentionPolicy `json:"retention_policy"`
 }
 
 type Store struct {
@@ -36,11 +44,12 @@ func Open(path string) (*Store, error) {
 	s := &Store{
 		path: path,
 		state: State{
-			Hosts:       []model.Host{},
-			AccessKeys:  []model.AccessKey{},
-			RunRecords:  []model.RunRecord{},
-			RunJobs:     []model.RunJobRecord{},
-			AuditEvents: []model.AuditEvent{},
+			Hosts:           []model.Host{},
+			AccessKeys:      []model.AccessKey{},
+			RunRecords:      []model.RunRecord{},
+			RunJobs:         []model.RunJobRecord{},
+			AuditEvents:     []model.AuditEvent{},
+			RetentionPolicy: defaultRetentionPolicy(),
 		},
 	}
 	if err := s.load(); err != nil {
@@ -80,6 +89,10 @@ func (s *Store) load() error {
 	if s.state.AuditEvents == nil {
 		s.state.AuditEvents = []model.AuditEvent{}
 	}
+	s.state.RetentionPolicy = normalizeRetentionPolicy(s.state.RetentionPolicy)
+	s.state.RunRecords = capTail(s.state.RunRecords, s.state.RetentionPolicy.RunRecordsMax)
+	s.state.RunJobs = capTail(s.state.RunJobs, s.state.RetentionPolicy.RunJobsMax)
+	s.state.AuditEvents = capTail(s.state.AuditEvents, s.state.RetentionPolicy.AuditEventsMax)
 	return nil
 }
 
@@ -232,7 +245,7 @@ func (s *Store) AddRunRecord(r model.RunRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.RunRecords = append(s.state.RunRecords, r)
-	s.state.RunRecords = capTail(s.state.RunRecords, 500)
+	s.state.RunRecords = capTail(s.state.RunRecords, s.state.RetentionPolicy.RunRecordsMax)
 	return s.saveLocked()
 }
 
@@ -240,7 +253,7 @@ func (s *Store) AddRunJob(j model.RunJobRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.RunJobs = append(s.state.RunJobs, cloneRunJob(j))
-	s.state.RunJobs = capTail(s.state.RunJobs, 1000)
+	s.state.RunJobs = capTail(s.state.RunJobs, s.state.RetentionPolicy.RunJobsMax)
 	return s.saveLocked()
 }
 
@@ -288,7 +301,7 @@ func (s *Store) AddAuditEvent(e model.AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.AuditEvents = append(s.state.AuditEvents, e)
-	s.state.AuditEvents = capTail(s.state.AuditEvents, 5000)
+	s.state.AuditEvents = capTail(s.state.AuditEvents, s.state.RetentionPolicy.AuditEventsMax)
 	return s.saveLocked()
 }
 
@@ -296,6 +309,53 @@ func (s *Store) ListAuditEvents(limit int) []model.AuditEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return copyTail(s.state.AuditEvents, limit)
+}
+
+func (s *Store) GetRetentionPolicy() model.RetentionPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.RetentionPolicy
+}
+
+func (s *Store) UpdateRetentionPolicy(next model.RetentionPolicy) (model.RetentionPolicy, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	normalized := normalizeRetentionPolicy(next)
+	s.state.RetentionPolicy = normalized
+	s.state.RunRecords = capTail(s.state.RunRecords, normalized.RunRecordsMax)
+	s.state.RunJobs = capTail(s.state.RunJobs, normalized.RunJobsMax)
+	s.state.AuditEvents = capTail(s.state.AuditEvents, normalized.AuditEventsMax)
+	return normalized, s.saveLocked()
+}
+
+func defaultRetentionPolicy() model.RetentionPolicy {
+	return model.RetentionPolicy{
+		RunRecordsMax:  defaultRunRecordsMax,
+		RunJobsMax:     defaultRunJobsMax,
+		AuditEventsMax: defaultAuditEventsMax,
+	}
+}
+
+func normalizeRetentionPolicy(in model.RetentionPolicy) model.RetentionPolicy {
+	out := in
+	def := defaultRetentionPolicy()
+	out.RunRecordsMax = normalizeRetentionLimit(out.RunRecordsMax, def.RunRecordsMax)
+	out.RunJobsMax = normalizeRetentionLimit(out.RunJobsMax, def.RunJobsMax)
+	out.AuditEventsMax = normalizeRetentionLimit(out.AuditEventsMax, def.AuditEventsMax)
+	return out
+}
+
+func normalizeRetentionLimit(v int, fallback int) int {
+	if v <= 0 {
+		v = fallback
+	}
+	if v < 100 {
+		return 100
+	}
+	if v > maxRetentionLimit {
+		return maxRetentionLimit
+	}
+	return v
 }
 
 func copyTail[T any](src []T, limit int) []T {
@@ -320,5 +380,6 @@ func cloneRunJob(j model.RunJobRecord) model.RunJobRecord {
 	out := j
 	out.Request = append([]byte(nil), j.Request...)
 	out.Response = append([]byte(nil), j.Response...)
+	out.HostIDs = append([]string(nil), j.HostIDs...)
 	return out
 }

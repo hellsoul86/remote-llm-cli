@@ -4,18 +4,23 @@ import {
   discoverCodexSessions,
   enqueueRunJob,
   enqueueSyncJob,
+  getMetrics,
+  getRetentionPolicy,
   getRunJob,
   healthz,
   listAudit,
   listHosts,
   listRunJobs,
   listRuns,
+  setRetentionPolicy,
   listRuntimes,
   runFanout,
   syncHosts,
   upsertHost,
   type AuditEvent,
   type Host,
+  type MetricsResponse,
+  type RetentionPolicy,
   type RunJobRecord,
   type RunRecord,
   type RunResponse,
@@ -53,6 +58,9 @@ export function App() {
   const [runStatus, setRunStatus] = useState<number | null>(null);
   const [runResult, setRunResult] = useState<RunResponse | null>(null);
   const [runJobs, setRunJobs] = useState<RunJobRecord[]>([]);
+  const [jobStatusFilter, setJobStatusFilter] = useState("pending,running,failed,canceled,succeeded");
+  const [jobRuntimeFilter, setJobRuntimeFilter] = useState("");
+  const [jobHostFilter, setJobHostFilter] = useState("");
   const [activeRunJobID, setActiveRunJobID] = useState("");
   const [activeRunJob, setActiveRunJob] = useState<RunJobRecord | null>(null);
   const [runJobPolling, setRunJobPolling] = useState(false);
@@ -72,6 +80,13 @@ export function App() {
   const [syncResult, setSyncResult] = useState<SyncResponse | null>(null);
   const [runHistory, setRunHistory] = useState<RunRecord[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [auditStatusFilter, setAuditStatusFilter] = useState("");
+  const [auditActionFilter, setAuditActionFilter] = useState("");
+  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
+  const [retention, setRetention] = useState<RetentionPolicy | null>(null);
+  const [retRunRecordsMax, setRetRunRecordsMax] = useState("500");
+  const [retRunJobsMax, setRetRunJobsMax] = useState("1000");
+  const [retAuditEventsMax, setRetAuditEventsMax] = useState("5000");
 
   useEffect(() => {
     healthz()
@@ -93,6 +108,13 @@ export function App() {
     return "runtime" in v && "summary" in v && "targets" in v && !("operation" in v);
   }
 
+  function parseCSV(value: string): string[] {
+    return value
+      .split(",")
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+  }
+
   async function refresh() {
     if (!token.trim()) {
       setMessage("set access key first");
@@ -101,18 +123,32 @@ export function App() {
     setLoading(true);
     setMessage("");
     try {
-      const [nextHosts, nextRuntimes, nextRuns, nextAudit, nextJobs] = await Promise.all([
+      const [nextHosts, nextRuntimes, nextRuns, nextAudit, nextJobs, nextMetrics, nextRetention] = await Promise.all([
         listHosts(token),
         listRuntimes(token),
         listRuns(token, 20),
-        listAudit(token, 80),
-        listRunJobs(token, 30)
+        listAudit(token, 80, {
+          status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
+          action: auditActionFilter.trim() || undefined
+        }),
+        listRunJobs(token, 30, {
+          status: parseCSV(jobStatusFilter),
+          runtime: parseCSV(jobRuntimeFilter),
+          host_id: jobHostFilter.trim() || undefined
+        }),
+        getMetrics(token),
+        getRetentionPolicy(token)
       ]);
       setHosts(nextHosts);
       setRuntimes(nextRuntimes);
       setRunHistory(nextRuns);
       setAuditEvents(nextAudit);
       setRunJobs(nextJobs);
+      setMetrics(nextMetrics);
+      setRetention(nextRetention);
+      setRetRunRecordsMax(String(nextRetention.run_records_max));
+      setRetRunJobsMax(String(nextRetention.run_jobs_max));
+      setRetAuditEventsMax(String(nextRetention.audit_events_max));
       setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
       setSyncSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
       const ongoing = nextJobs.find((job) => isRunJobActive(job));
@@ -121,7 +157,9 @@ export function App() {
         setActiveRunJob((prev) => (prev && prev.id === ongoing.id ? prev : ongoing));
         setRunJobPolling(true);
       }
-      setMessage(`loaded ${nextHosts.length} hosts, ${nextRuns.length} runs, ${nextAudit.length} events, ${nextJobs.length} jobs`);
+      setMessage(
+        `loaded ${nextHosts.length} hosts, ${nextRuns.length} runs, ${nextAudit.length} events, ${nextJobs.length} jobs, queue=${nextMetrics.queue.depth}`
+      );
     } catch (e) {
       setMessage(String(e));
     } finally {
@@ -136,15 +174,30 @@ export function App() {
     let canceled = false;
     const timer = window.setInterval(async () => {
       try {
-        const [job, jobs] = await Promise.all([getRunJob(token, activeRunJobID), listRunJobs(token, 30)]);
+        const [job, jobs, nextMetrics] = await Promise.all([
+          getRunJob(token, activeRunJobID),
+          listRunJobs(token, 30, {
+            status: parseCSV(jobStatusFilter),
+            runtime: parseCSV(jobRuntimeFilter),
+            host_id: jobHostFilter.trim() || undefined
+          }),
+          getMetrics(token)
+        ]);
         if (canceled) return;
         setActiveRunJob(job);
         setRunJobs(jobs);
+        setMetrics(nextMetrics);
         if (!isRunJobActive(job)) {
           setRunJobPolling(false);
           setRunStatus(job.result_status ?? null);
           if (isRunResponsePayload(job.response)) setRunResult(job.response);
-          const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
+          const [nextRuns, nextAudit] = await Promise.all([
+            listRuns(token, 20),
+            listAudit(token, 80, {
+              status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
+              action: auditActionFilter.trim() || undefined
+            })
+          ]);
           if (canceled) return;
           setRunHistory(nextRuns);
           setAuditEvents(nextAudit);
@@ -160,7 +213,7 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [runJobPolling, token, activeRunJobID]);
+  }, [runJobPolling, token, activeRunJobID, jobStatusFilter, jobRuntimeFilter, jobHostFilter, auditStatusFilter, auditActionFilter]);
 
   async function onAddHost(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -289,17 +342,37 @@ export function App() {
         setActiveRunJob(body.job);
         setRunJobPolling(isRunJobActive(body.job));
         setMessage(`run job accepted with HTTP ${status}: ${body.job.id}`);
-        const [nextJobs, nextAudit] = await Promise.all([listRunJobs(token, 30), listAudit(token, 80)]);
+        const [nextJobs, nextAudit, nextMetrics] = await Promise.all([
+          listRunJobs(token, 30, {
+            status: parseCSV(jobStatusFilter),
+            runtime: parseCSV(jobRuntimeFilter),
+            host_id: jobHostFilter.trim() || undefined
+          }),
+          listAudit(token, 80, {
+            status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
+            action: auditActionFilter.trim() || undefined
+          }),
+          getMetrics(token)
+        ]);
         setRunJobs(nextJobs);
         setAuditEvents(nextAudit);
+        setMetrics(nextMetrics);
       } else {
         const { status, body } = await runFanout(token, runRequest);
         setRunStatus(status);
         setRunResult(body);
         setMessage(`run finished with HTTP ${status}, failed=${body.summary.failed}`);
-        const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
+        const [nextRuns, nextAudit, nextMetrics] = await Promise.all([
+          listRuns(token, 20),
+          listAudit(token, 80, {
+            status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
+            action: auditActionFilter.trim() || undefined
+          }),
+          getMetrics(token)
+        ]);
         setRunHistory(nextRuns);
         setAuditEvents(nextAudit);
+        setMetrics(nextMetrics);
       }
     } catch (err) {
       setMessage(String(err));
@@ -386,17 +459,37 @@ export function App() {
         setActiveRunJob(body.job);
         setRunJobPolling(isRunJobActive(body.job));
         setMessage(`sync job accepted with HTTP ${status}: ${body.job.id}`);
-        const [nextJobs, nextAudit] = await Promise.all([listRunJobs(token, 30), listAudit(token, 80)]);
+        const [nextJobs, nextAudit, nextMetrics] = await Promise.all([
+          listRunJobs(token, 30, {
+            status: parseCSV(jobStatusFilter),
+            runtime: parseCSV(jobRuntimeFilter),
+            host_id: jobHostFilter.trim() || undefined
+          }),
+          listAudit(token, 80, {
+            status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
+            action: auditActionFilter.trim() || undefined
+          }),
+          getMetrics(token)
+        ]);
         setRunJobs(nextJobs);
         setAuditEvents(nextAudit);
+        setMetrics(nextMetrics);
       } else {
         const { status, body } = await syncHosts(token, syncRequest);
         setSyncStatus(status);
         setSyncResult(body);
         setMessage(`sync finished with HTTP ${status}, failed=${body.summary.failed}`);
-        const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
+        const [nextRuns, nextAudit, nextMetrics] = await Promise.all([
+          listRuns(token, 20),
+          listAudit(token, 80, {
+            status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
+            action: auditActionFilter.trim() || undefined
+          }),
+          getMetrics(token)
+        ]);
         setRunHistory(nextRuns);
         setAuditEvents(nextAudit);
+        setMetrics(nextMetrics);
       }
     } catch (err) {
       setMessage(String(err));
@@ -415,12 +508,47 @@ export function App() {
       setMessage(`job ${jobID}: ${state}`);
       setActiveRunJobID(jobID);
       setActiveRunJob(job);
-      const [nextJobs, nextAudit] = await Promise.all([listRunJobs(token, 30), listAudit(token, 80)]);
+      const [nextJobs, nextAudit, nextMetrics] = await Promise.all([
+        listRunJobs(token, 30, {
+          status: parseCSV(jobStatusFilter),
+          runtime: parseCSV(jobRuntimeFilter),
+          host_id: jobHostFilter.trim() || undefined
+        }),
+        listAudit(token, 80, {
+          status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
+          action: auditActionFilter.trim() || undefined
+        }),
+        getMetrics(token)
+      ]);
       setRunJobs(nextJobs);
       setAuditEvents(nextAudit);
+      setMetrics(nextMetrics);
       if (!isRunJobActive(job)) {
         setRunJobPolling(false);
       }
+    } catch (err) {
+      setMessage(String(err));
+    }
+  }
+
+  async function onApplyRetention() {
+    if (!token.trim()) {
+      setMessage("set access key first");
+      return;
+    }
+    try {
+      const next = await setRetentionPolicy(token, {
+        run_records_max: Math.max(100, Number.parseInt(retRunRecordsMax, 10) || 100),
+        run_jobs_max: Math.max(100, Number.parseInt(retRunJobsMax, 10) || 100),
+        audit_events_max: Math.max(100, Number.parseInt(retAuditEventsMax, 10) || 100)
+      });
+      setRetention(next);
+      setRetRunRecordsMax(String(next.run_records_max));
+      setRetRunJobsMax(String(next.run_jobs_max));
+      setRetAuditEventsMax(String(next.audit_events_max));
+      setMessage("retention policy updated");
+      const nextMetrics = await getMetrics(token);
+      setMetrics(nextMetrics);
     } catch (err) {
       setMessage(String(err));
     }
@@ -452,6 +580,50 @@ export function App() {
         <button onClick={refresh} disabled={loading}>
           {loading ? "Loading..." : "Refresh"}
         </button>
+      </section>
+
+      <section className="card">
+        <h2>Control Plane Metrics</h2>
+        {metrics ? (
+          <p>
+            queue_depth={metrics.queue.depth} workers={metrics.queue.workers_active}/{metrics.queue.workers_total} util=
+            {(metrics.queue.worker_utilization * 100).toFixed(1)}% success_rate={(metrics.success_rate * 100).toFixed(1)}% pending=
+            {metrics.jobs.pending} running={metrics.jobs.running} failed={metrics.jobs.failed} canceled={metrics.jobs.canceled} retry_attempts=
+            {metrics.jobs.retry_attempts}
+          </p>
+        ) : (
+          <p>no metrics loaded yet</p>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Retention Policy</h2>
+        <form
+          className="grid"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void onApplyRetention();
+          }}
+        >
+          <label>
+            run records max
+            <input value={retRunRecordsMax} onChange={(e) => setRetRunRecordsMax(e.target.value)} />
+          </label>
+          <label>
+            run jobs max
+            <input value={retRunJobsMax} onChange={(e) => setRetRunJobsMax(e.target.value)} />
+          </label>
+          <label>
+            audit events max
+            <input value={retAuditEventsMax} onChange={(e) => setRetAuditEventsMax(e.target.value)} />
+          </label>
+          <button type="submit">Apply Retention</button>
+        </form>
+        {retention ? (
+          <p>
+            current: runs={retention.run_records_max} jobs={retention.run_jobs_max} audit={retention.audit_events_max}
+          </p>
+        ) : null}
       </section>
 
       <section className="card">
@@ -649,6 +821,19 @@ export function App() {
 
       <section className="card">
         <h2>Run Jobs</h2>
+        <div className="grid">
+          <input
+            value={jobStatusFilter}
+            onChange={(e) => setJobStatusFilter(e.target.value)}
+            placeholder="status csv: pending,running,failed"
+          />
+          <input
+            value={jobRuntimeFilter}
+            onChange={(e) => setJobRuntimeFilter(e.target.value)}
+            placeholder="runtime csv: codex,sync"
+          />
+          <input value={jobHostFilter} onChange={(e) => setJobHostFilter(e.target.value)} placeholder="host id filter (optional)" />
+        </div>
         {activeRunJob ? (
           <p>
             active={activeRunJob.id} status={activeRunJob.status} runtime={activeRunJob.runtime} total=
@@ -792,6 +977,18 @@ export function App() {
 
       <section className="card">
         <h2>Audit Events</h2>
+        <div className="grid">
+          <input
+            value={auditStatusFilter}
+            onChange={(e) => setAuditStatusFilter(e.target.value)}
+            placeholder="status code filter, e.g. 200"
+          />
+          <input
+            value={auditActionFilter}
+            onChange={(e) => setAuditActionFilter(e.target.value)}
+            placeholder="action filter, e.g. job.cancel"
+          />
+        </div>
         {auditEvents.length === 0 ? (
           <p>no audit events yet</p>
         ) : (

@@ -46,6 +46,12 @@ type RuntimeInfo struct {
 	Capabilities RuntimeCapabilities `json:"capabilities"`
 }
 
+type RetentionPolicy struct {
+	RunRecordsMax  int `json:"run_records_max"`
+	RunJobsMax     int `json:"run_jobs_max"`
+	AuditEventsMax int `json:"audit_events_max"`
+}
+
 type RunTargetSummary struct {
 	HostID     string `json:"host_id"`
 	HostName   string `json:"host_name"`
@@ -78,6 +84,7 @@ type RunJobRecord struct {
 	Status         string          `json:"status"`
 	Runtime        string          `json:"runtime"`
 	PromptPreview  string          `json:"prompt_preview"`
+	HostIDs        []string        `json:"host_ids,omitempty"`
 	CreatedByKeyID string          `json:"created_by_key_id,omitempty"`
 	QueuedAt       time.Time       `json:"queued_at"`
 	StartedAt      *time.Time      `json:"started_at,omitempty"`

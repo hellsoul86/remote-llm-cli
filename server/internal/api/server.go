@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hellsoul86/remote-llm-cli/server/internal/accesskey"
@@ -23,12 +24,14 @@ import (
 )
 
 type Server struct {
-	store    *store.Store
-	runtimes *runtime.Registry
-	runJobs  chan string
-	mu       sync.Mutex
-	cancels  map[string]context.CancelFunc
-	cancelRq map[string]bool
+	store         *store.Store
+	runtimes      *runtime.Registry
+	runJobs       chan string
+	runJobWorkers int
+	activeWorkers int64
+	mu            sync.Mutex
+	cancels       map[string]context.CancelFunc
+	cancelRq      map[string]bool
 }
 
 type authIdentity struct {
@@ -81,6 +84,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
 	mux.Handle("POST /v1/codex/sessions/discover", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexSessions)))
 	mux.Handle("POST /v1/codex/sessions/cleanup", s.withAuth(http.HandlerFunc(s.handleCleanupCodexSessions)))
+	mux.Handle("GET /v1/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
+	mux.Handle("GET /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleGetRetentionPolicy)))
+	mux.Handle("POST /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleSetRetentionPolicy)))
 	mux.Handle("GET /v1/runs", s.withAuth(http.HandlerFunc(s.handleListRuns)))
 	mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleListAudit)))
 
@@ -192,8 +198,139 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
-	limit := parseLimit(r, 100, 500)
-	writeJSON(w, http.StatusOK, map[string]any{"events": s.store.ListAuditEvents(limit)})
+	limit := parseLimit(r, 100, 5000)
+	events := s.store.ListAuditEvents(0)
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+	actionFilter := strings.TrimSpace(r.URL.Query().Get("action"))
+	methodFilter := strings.TrimSpace(r.URL.Query().Get("method"))
+	pathPrefix := strings.TrimSpace(r.URL.Query().Get("path_prefix"))
+	fromTime := parseTimeQuery(r.URL.Query().Get("from"))
+	toTime := parseTimeQuery(r.URL.Query().Get("to"))
+	filtered := make([]model.AuditEvent, 0, len(events))
+	for _, evt := range events {
+		if statusFilter != "" {
+			statusValue, err := strconv.Atoi(statusFilter)
+			if err == nil && evt.StatusCode != statusValue {
+				continue
+			}
+		}
+		if actionFilter != "" && !strings.EqualFold(strings.TrimSpace(evt.Action), actionFilter) {
+			continue
+		}
+		if methodFilter != "" && !strings.EqualFold(strings.TrimSpace(evt.Method), methodFilter) {
+			continue
+		}
+		if pathPrefix != "" && !strings.HasPrefix(strings.TrimSpace(evt.Path), pathPrefix) {
+			continue
+		}
+		if !fromTime.IsZero() && evt.Timestamp.Before(fromTime) {
+			continue
+		}
+		if !toTime.IsZero() && evt.Timestamp.After(toTime) {
+			continue
+		}
+		filtered = append(filtered, evt)
+		if limit > 0 && len(filtered) >= limit {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": filtered})
+}
+
+func (s *Server) handleGetRetentionPolicy(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"retention": s.store.GetRetentionPolicy(),
+	})
+}
+
+func (s *Server) handleSetRetentionPolicy(w http.ResponseWriter, r *http.Request) {
+	var req retentionPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	next, err := s.store.UpdateRetentionPolicy(model.RetentionPolicy{
+		RunRecordsMax:  req.RunRecordsMax,
+		RunJobsMax:     req.RunJobsMax,
+		AuditEventsMax: req.AuditEventsMax,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"retention": next,
+	})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	jobs := s.store.ListRunJobs(0)
+	total := len(jobs)
+	succeeded := 0
+	failed := 0
+	canceled := 0
+	running := 0
+	pending := 0
+	retries := 0
+	for _, job := range jobs {
+		switch strings.TrimSpace(job.Status) {
+		case runJobStatusSucceeded:
+			succeeded++
+		case runJobStatusFailed:
+			failed++
+		case runJobStatusCanceled:
+			canceled++
+		case runJobStatusRunning:
+			running++
+		case runJobStatusPending:
+			pending++
+		}
+		if len(job.Response) == 0 {
+			continue
+		}
+		var out struct {
+			Targets []struct {
+				Attempts int `json:"attempts"`
+			} `json:"targets"`
+		}
+		if err := json.Unmarshal(job.Response, &out); err != nil {
+			continue
+		}
+		for _, t := range out.Targets {
+			if t.Attempts > 1 {
+				retries += t.Attempts - 1
+			}
+		}
+	}
+	terminal := succeeded + failed + canceled
+	successRate := 0.0
+	if terminal > 0 {
+		successRate = float64(succeeded) / float64(terminal)
+	}
+	workersTotal := s.runJobWorkers
+	workersActive := int(atomic.LoadInt64(&s.activeWorkers))
+	utilization := 0.0
+	if workersTotal > 0 {
+		utilization = float64(workersActive) / float64(workersTotal)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jobs": map[string]any{
+			"total":          total,
+			"pending":        pending,
+			"running":        running,
+			"succeeded":      succeeded,
+			"failed":         failed,
+			"canceled":       canceled,
+			"retry_attempts": retries,
+		},
+		"queue": map[string]any{
+			"depth":              len(s.runJobs),
+			"workers_total":      workersTotal,
+			"workers_active":     workersActive,
+			"worker_utilization": utilization,
+		},
+		"success_rate": successRate,
+	})
 }
 
 type runRequest struct {
@@ -270,6 +407,12 @@ type codexCleanupRequest struct {
 	TimeoutSec     int      `json:"timeout_sec,omitempty"`
 	OlderThanHours int      `json:"older_than_hours,omitempty"`
 	DryRun         bool     `json:"dry_run,omitempty"`
+}
+
+type retentionPolicyRequest struct {
+	RunRecordsMax  int `json:"run_records_max,omitempty"`
+	RunJobsMax     int `json:"run_jobs_max,omitempty"`
+	AuditEventsMax int `json:"audit_events_max,omitempty"`
 }
 
 type codexSessionInfo struct {
@@ -363,6 +506,7 @@ func (s *Server) handleEnqueueRunJob(w http.ResponseWriter, r *http.Request) {
 		Status:         runJobStatusPending,
 		Runtime:        prepared.Request.Runtime,
 		PromptPreview:  promptPreview(prepared.Request.Prompt),
+		HostIDs:        collectHostIDs(prepared.Hosts),
 		CreatedByKeyID: identity.KeyID,
 		QueuedAt:       now,
 		TotalHosts:     len(prepared.Hosts),
@@ -410,6 +554,7 @@ func (s *Server) handleEnqueueSyncJob(w http.ResponseWriter, r *http.Request) {
 		Status:         runJobStatusPending,
 		Runtime:        "sync",
 		PromptPreview:  syncPreview(req.Src, req.Dst),
+		HostIDs:        collectHostIDs(prepared.Hosts),
 		CreatedByKeyID: identity.KeyID,
 		QueuedAt:       now,
 		TotalHosts:     len(prepared.Hosts),
@@ -434,12 +579,40 @@ func (s *Server) handleEnqueueSyncJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListRunJobs(w http.ResponseWriter, r *http.Request) {
-	limit := parseLimit(r, 30, 500)
-	jobs := s.store.ListRunJobs(limit)
-	for i := range jobs {
-		jobs[i] = compactRunJob(jobs[i])
+	limit := parseLimit(r, 30, 5000)
+	jobs := s.store.ListRunJobs(0)
+	statusFilter := splitQueryCSV(r.URL.Query().Get("status"))
+	typeFilter := splitQueryCSV(r.URL.Query().Get("type"))
+	runtimeFilter := splitQueryCSV(r.URL.Query().Get("runtime"))
+	hostIDFilter := strings.TrimSpace(r.URL.Query().Get("host_id"))
+	fromTime := parseTimeQuery(r.URL.Query().Get("from"))
+	toTime := parseTimeQuery(r.URL.Query().Get("to"))
+	filtered := make([]model.RunJobRecord, 0, len(jobs))
+	for _, job := range jobs {
+		if len(statusFilter) > 0 && !setContains(statusFilter, strings.ToLower(strings.TrimSpace(job.Status))) {
+			continue
+		}
+		if len(typeFilter) > 0 && !setContains(typeFilter, strings.ToLower(strings.TrimSpace(job.Type))) {
+			continue
+		}
+		if len(runtimeFilter) > 0 && !setContains(runtimeFilter, strings.ToLower(strings.TrimSpace(job.Runtime))) {
+			continue
+		}
+		if hostIDFilter != "" && !jobMatchesHost(job, hostIDFilter) {
+			continue
+		}
+		if !fromTime.IsZero() && job.QueuedAt.Before(fromTime) {
+			continue
+		}
+		if !toTime.IsZero() && job.QueuedAt.After(toTime) {
+			continue
+		}
+		filtered = append(filtered, compactRunJob(job))
+		if limit > 0 && len(filtered) >= limit {
+			break
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": filtered})
 }
 
 func (s *Server) handleGetRunJob(w http.ResponseWriter, r *http.Request) {
@@ -622,6 +795,7 @@ func (s *Server) startRunJobWorkers(workers int) {
 	if workers <= 0 {
 		workers = 1
 	}
+	s.runJobWorkers = workers
 	for i := 0; i < workers; i++ {
 		go s.runJobWorker()
 	}
@@ -710,6 +884,8 @@ func (s *Server) executeQueuedJob(jobID string) {
 	if !ok || job.Status != runJobStatusPending {
 		return
 	}
+	atomic.AddInt64(&s.activeWorkers, 1)
+	defer atomic.AddInt64(&s.activeWorkers, -1)
 	started := time.Now().UTC()
 	job.Status = runJobStatusRunning
 	job.StartedAt = &started
@@ -1678,6 +1854,12 @@ func inferAction(method string, path string) string {
 		return "codex.sessions.discover"
 	case method == http.MethodPost && path == "/v1/codex/sessions/cleanup":
 		return "codex.sessions.cleanup"
+	case method == http.MethodGet && path == "/v1/metrics":
+		return "metrics.get"
+	case method == http.MethodGet && path == "/v1/admin/retention":
+		return "retention.get"
+	case method == http.MethodPost && path == "/v1/admin/retention":
+		return "retention.set"
 	case method == http.MethodGet && path == "/v1/runs":
 		return "run.list"
 	case method == http.MethodGet && path == "/v1/audit":
@@ -1697,6 +1879,18 @@ func authIdentityFromContext(ctx context.Context) (authIdentity, bool) {
 		return authIdentity{}, false
 	}
 	return identity, true
+}
+
+func collectHostIDs(hosts []model.Host) []string {
+	out := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		id := strings.TrimSpace(h.ID)
+		if id == "" {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 func toRunTargetSummaries(targets []runTargetResult) []model.RunTargetSummary {
@@ -1729,6 +1923,67 @@ func syncPreview(src string, dst string) string {
 		return preview
 	}
 	return preview[:240]
+}
+
+func parseTimeQuery(raw string) time.Time {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return time.Time{}
+	}
+	if unixSec, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return time.Unix(unixSec, 0).UTC()
+	}
+	if parsed, err := time.Parse(time.RFC3339, v); err == nil {
+		return parsed.UTC()
+	}
+	return time.Time{}
+}
+
+func splitQueryCSV(raw string) map[string]struct{} {
+	items := strings.Split(strings.TrimSpace(raw), ",")
+	out := map[string]struct{}{}
+	for _, item := range items {
+		v := strings.ToLower(strings.TrimSpace(item))
+		if v == "" {
+			continue
+		}
+		out[v] = struct{}{}
+	}
+	return out
+}
+
+func setContains(set map[string]struct{}, key string) bool {
+	_, ok := set[strings.ToLower(strings.TrimSpace(key))]
+	return ok
+}
+
+func jobMatchesHost(job model.RunJobRecord, hostID string) bool {
+	hostID = strings.TrimSpace(hostID)
+	if hostID == "" {
+		return true
+	}
+	for _, id := range job.HostIDs {
+		if strings.TrimSpace(id) == hostID {
+			return true
+		}
+	}
+	if len(job.HostIDs) == 0 {
+		var fallback struct {
+			HostID  string   `json:"host_id"`
+			HostIDs []string `json:"host_ids"`
+		}
+		if err := json.Unmarshal(job.Request, &fallback); err == nil {
+			if strings.TrimSpace(fallback.HostID) == hostID {
+				return true
+			}
+			for _, id := range fallback.HostIDs {
+				if strings.TrimSpace(id) == hostID {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func parseLimit(r *http.Request, fallback int, max int) int {

@@ -115,6 +115,7 @@ type RunJobRecord struct {
 	Status         string       `json:"status"`
 	Runtime        string       `json:"runtime"`
 	PromptPreview  string       `json:"prompt_preview"`
+	HostIDs        []string     `json:"host_ids,omitempty"`
 	QueuedAt       string       `json:"queued_at"`
 	StartedAt      string       `json:"started_at,omitempty"`
 	FinishedAt     string       `json:"finished_at,omitempty"`
