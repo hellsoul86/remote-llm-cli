@@ -1,0 +1,166 @@
+export type Host = {
+  id: string;
+  name: string;
+  host: string;
+  user: string;
+  port: number;
+  identity_file?: string;
+  workspace?: string;
+  tags?: string[];
+};
+
+export type RuntimeInfo = {
+  name: string;
+  capabilities: {
+    supports_non_interactive_exec: boolean;
+    supports_interactive_session: boolean;
+    supports_structured_output: boolean;
+    supports_file_patch_mode: boolean;
+    supports_cost_metrics: boolean;
+  };
+};
+
+export type RunRequest = {
+  runtime: string;
+  prompt: string;
+  host_id?: string;
+  host_ids?: string[];
+  all_hosts?: boolean;
+  fanout?: number;
+  workdir?: string;
+  extra_args?: string[];
+  timeout_sec?: number;
+};
+
+export type RunTargetResult = {
+  host: Host;
+  result: {
+    command?: string;
+    stdout?: string;
+    stderr?: string;
+    exit_code?: number;
+    duration_ms?: number;
+    started_at?: string;
+    finished_at?: string;
+  };
+  ok: boolean;
+  error?: string | null;
+};
+
+export type RunResponse = {
+  runtime: string;
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    fanout: number;
+    duration_ms: number;
+    started_at: string;
+    finished_at: string;
+  };
+  targets: RunTargetResult[];
+};
+
+export type RunRecord = {
+  id: string;
+  runtime: string;
+  prompt_preview: string;
+  total_hosts: number;
+  succeeded_hosts: number;
+  failed_hosts: number;
+  fanout: number;
+  status_code: number;
+  duration_ms: number;
+  created_by_key_id?: string;
+  started_at: string;
+  finished_at: string;
+  targets: Array<{
+    host_id: string;
+    host_name: string;
+    ok: boolean;
+    exit_code: number;
+    duration_ms: number;
+    error?: string;
+  }>;
+};
+
+export type AuditEvent = {
+  id: string;
+  timestamp: string;
+  method: string;
+  path: string;
+  status_code: number;
+  duration_ms: number;
+  remote_addr?: string;
+  created_by_key_id?: string;
+  action: string;
+};
+
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8080";
+
+function headers(token?: string): HeadersInit {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) h.Authorization = `Bearer ${token}`;
+  return h;
+}
+
+export async function healthz(): Promise<{ ok: boolean; timestamp: string }> {
+  const res = await fetch(`${API_BASE}/v1/healthz`);
+  if (!res.ok) throw new Error(`healthz failed: ${res.status}`);
+  return res.json();
+}
+
+export async function listHosts(token: string): Promise<Host[]> {
+  const res = await fetch(`${API_BASE}/v1/hosts`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`list hosts failed: ${res.status}`);
+  const body = await res.json();
+  return body.hosts ?? [];
+}
+
+export async function listRuntimes(token: string): Promise<RuntimeInfo[]> {
+  const res = await fetch(`${API_BASE}/v1/runtimes`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`list runtimes failed: ${res.status}`);
+  const body = await res.json();
+  return body.runtimes ?? [];
+}
+
+export async function upsertHost(token: string, host: Partial<Host>): Promise<Host> {
+  const res = await fetch(`${API_BASE}/v1/hosts`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(host)
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`upsert host failed: ${res.status} ${text}`);
+  }
+  const body = await res.json();
+  return body.host;
+}
+
+export async function runFanout(token: string, request: RunRequest): Promise<{ status: number; body: RunResponse }> {
+  const res = await fetch(`${API_BASE}/v1/run`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok && !body?.summary) {
+    throw new Error(`run failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return { status: res.status, body };
+}
+
+export async function listRuns(token: string, limit = 20): Promise<RunRecord[]> {
+  const res = await fetch(`${API_BASE}/v1/runs?limit=${encodeURIComponent(String(limit))}`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`list runs failed: ${res.status}`);
+  const body = await res.json();
+  return body.runs ?? [];
+}
+
+export async function listAudit(token: string, limit = 100): Promise<AuditEvent[]> {
+  const res = await fetch(`${API_BASE}/v1/audit?limit=${encodeURIComponent(String(limit))}`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`list audit failed: ${res.status}`);
+  const body = await res.json();
+  return body.events ?? [];
+}

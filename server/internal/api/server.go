@@ -1,0 +1,571 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/hellsoul86/remote-llm-cli/server/internal/accesskey"
+	"github.com/hellsoul86/remote-llm-cli/server/internal/executor"
+	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
+	"github.com/hellsoul86/remote-llm-cli/server/internal/runtime"
+	"github.com/hellsoul86/remote-llm-cli/server/internal/store"
+)
+
+type Server struct {
+	store    *store.Store
+	runtimes *runtime.Registry
+}
+
+type authIdentity struct {
+	KeyID     string
+	KeyPrefix string
+}
+
+type authContextKey struct{}
+
+func New(st *store.Store, rt *runtime.Registry) *Server {
+	return &Server{store: st, runtimes: rt}
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /v1/healthz", s.handleHealthz)
+
+	mux.Handle("GET /v1/runtimes", s.withAuth(http.HandlerFunc(s.handleListRuntimes)))
+	mux.Handle("GET /v1/hosts", s.withAuth(http.HandlerFunc(s.handleListHosts)))
+	mux.Handle("POST /v1/hosts", s.withAuth(http.HandlerFunc(s.handleUpsertHost)))
+	mux.Handle("DELETE /v1/hosts/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteHost)))
+	mux.Handle("POST /v1/hosts/{id}/probe", s.withAuth(http.HandlerFunc(s.handleProbeHost)))
+	mux.Handle("POST /v1/run", s.withAuth(http.HandlerFunc(s.handleRun)))
+	mux.Handle("GET /v1/runs", s.withAuth(http.HandlerFunc(s.handleListRuns)))
+	mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleListAudit)))
+
+	return s.requestLogMiddleware(mux)
+}
+
+func (s *Server) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := bearerToken(r.Header.Get("Authorization"))
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing bearer token"})
+			return
+		}
+		prefix, secret, ok := accesskey.ParseFullKey(token)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid access key format"})
+			return
+		}
+		k, ok := s.store.FindActiveKeyByPrefix(prefix)
+		if !ok || !accesskey.VerifySecret(k.Hash, secret) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid access key"})
+			return
+		}
+		_ = s.store.TouchKey(k.ID)
+		ctx := context.WithValue(r.Context(), authContextKey{}, authIdentity{KeyID: k.ID, KeyPrefix: k.Prefix})
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"service":   "remote-llm-server",
+		"timestamp": time.Now().UTC(),
+	})
+}
+
+func (s *Server) handleListRuntimes(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"runtimes": s.runtimes.List()})
+}
+
+func (s *Server) handleListHosts(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": s.store.ListHosts()})
+}
+
+func (s *Server) handleUpsertHost(w http.ResponseWriter, r *http.Request) {
+	var h model.Host
+	if err := json.NewDecoder(r.Body).Decode(&h); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	if strings.TrimSpace(h.Name) == "" || strings.TrimSpace(h.Host) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name and host are required"})
+		return
+	}
+	h, err := s.store.UpsertHost(h)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"host": h})
+}
+
+func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing host id"})
+		return
+	}
+	deleted, err := s.store.DeleteHost(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "host not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimit(r, 20, 200)
+	writeJSON(w, http.StatusOK, map[string]any{"runs": s.store.ListRunRecords(limit)})
+}
+
+func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimit(r, 100, 500)
+	writeJSON(w, http.StatusOK, map[string]any{"events": s.store.ListAuditEvents(limit)})
+}
+
+type runRequest struct {
+	HostID     string   `json:"host_id,omitempty"`
+	HostIDs    []string `json:"host_ids,omitempty"`
+	AllHosts   bool     `json:"all_hosts,omitempty"`
+	Fanout     int      `json:"fanout,omitempty"`
+	Runtime    string   `json:"runtime"`
+	Prompt     string   `json:"prompt"`
+	Workdir    string   `json:"workdir,omitempty"`
+	ExtraArgs  []string `json:"extra_args,omitempty"`
+	TimeoutSec int      `json:"timeout_sec,omitempty"`
+}
+
+func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
+	var req runRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	hosts, err := s.resolveRunHosts(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := runtime.ValidateRuntime(req.Runtime); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	adapter, ok := s.runtimes.Get(req.Runtime)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported runtime"})
+		return
+	}
+	spec, err := adapter.BuildRunCommand(runtime.RunRequest{
+		Prompt:    req.Prompt,
+		Workdir:   req.Workdir,
+		ExtraArgs: req.ExtraArgs,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	timeout := 600 * time.Second
+	if req.TimeoutSec > 0 {
+		timeout = time.Duration(req.TimeoutSec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	startedAt := time.Now().UTC()
+	fanout := req.Fanout
+	if fanout <= 0 {
+		fanout = 3
+	}
+	if fanout > len(hosts) {
+		fanout = len(hosts)
+	}
+	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) (executor.ExecResult, error) {
+		return executor.RunViaSSH(ctx, host, spec, resolveWorkdir(req.Workdir, host.Workspace))
+	})
+	finishedAt := time.Now().UTC()
+
+	failed := 0
+	for _, t := range targets {
+		if !t.OK {
+			failed++
+		}
+	}
+
+	status := http.StatusOK
+	if failed > 0 {
+		status = http.StatusBadGateway
+	}
+
+	resp := map[string]any{
+		"runtime": req.Runtime,
+		"summary": map[string]any{
+			"total":       len(targets),
+			"succeeded":   len(targets) - failed,
+			"failed":      failed,
+			"fanout":      fanout,
+			"duration_ms": finishedAt.Sub(startedAt).Milliseconds(),
+			"started_at":  startedAt,
+			"finished_at": finishedAt,
+		},
+		"targets": targets,
+	}
+
+	identity, _ := authIdentityFromContext(r.Context())
+	_ = s.store.AddRunRecord(model.RunRecord{
+		ID:             fmt.Sprintf("run_%d", finishedAt.UnixNano()),
+		Runtime:        req.Runtime,
+		PromptPreview:  promptPreview(req.Prompt),
+		TotalHosts:     len(targets),
+		SucceededHosts: len(targets) - failed,
+		FailedHosts:    failed,
+		Fanout:         fanout,
+		StatusCode:     status,
+		DurationMS:     finishedAt.Sub(startedAt).Milliseconds(),
+		CreatedByKeyID: identity.KeyID,
+		StartedAt:      startedAt,
+		FinishedAt:     finishedAt,
+		Targets:        toRunTargetSummaries(targets),
+	})
+
+	writeJSON(w, status, resp)
+}
+
+func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	h, ok := s.store.GetHost(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "host not found"})
+		return
+	}
+	probeSpec := runtime.CommandSpec{Program: "echo", Args: []string{"ssh-ok"}}
+	sshRes, sshErr := executor.RunViaSSH(r.Context(), h, probeSpec, "")
+
+	codexAdapter, _ := s.runtimes.Get("codex")
+	codexSpec := codexAdapter.BuildProbeCommand()
+	codexRes, codexErr := executor.RunViaSSH(r.Context(), h, codexSpec, resolveWorkdir("", h.Workspace))
+
+	status := http.StatusOK
+	if sshErr != nil || codexErr != nil {
+		status = http.StatusBadGateway
+	}
+	writeJSON(w, status, map[string]any{
+		"host": h,
+		"ssh": map[string]any{
+			"ok":     sshErr == nil,
+			"error":  errAny(sshErr),
+			"result": sshRes,
+		},
+		"codex": map[string]any{
+			"ok":     codexErr == nil,
+			"error":  errAny(codexErr),
+			"result": codexRes,
+		},
+	})
+}
+
+func errAny(err error) any {
+	if err == nil {
+		return nil
+	}
+	return err.Error()
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+type runTargetResult struct {
+	Host   model.Host          `json:"host"`
+	Result executor.ExecResult `json:"result"`
+	OK     bool                `json:"ok"`
+	Error  string              `json:"error,omitempty"`
+}
+
+func (s *Server) runFanout(
+	ctx context.Context,
+	hosts []model.Host,
+	fanout int,
+	run func(host model.Host) (executor.ExecResult, error),
+) []runTargetResult {
+	type task struct {
+		index int
+		host  model.Host
+	}
+
+	results := make([]runTargetResult, len(hosts))
+	jobs := make(chan task)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	worker := func() {
+		defer wg.Done()
+		for job := range jobs {
+			res, err := run(job.host)
+			item := runTargetResult{
+				Host:   job.host,
+				Result: res,
+				OK:     err == nil,
+				Error:  errText(err),
+			}
+			mu.Lock()
+			results[job.index] = item
+			mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}
+
+	for i := 0; i < fanout; i++ {
+		wg.Add(1)
+		go worker()
+	}
+loop:
+	for i, h := range hosts {
+		select {
+		case <-ctx.Done():
+			break loop
+		case jobs <- task{index: i, host: h}:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	for i := range results {
+		if results[i].Host.ID != "" {
+			continue
+		}
+		results[i] = runTargetResult{
+			Host:  hosts[i],
+			OK:    false,
+			Error: "not executed (context canceled before scheduling)",
+		}
+	}
+	return results
+}
+
+func (s *Server) resolveRunHosts(req runRequest) ([]model.Host, error) {
+	hasSingle := strings.TrimSpace(req.HostID) != ""
+	hasMany := len(req.HostIDs) > 0
+	hasAll := req.AllHosts
+
+	selectorCount := 0
+	if hasSingle {
+		selectorCount++
+	}
+	if hasMany {
+		selectorCount++
+	}
+	if hasAll {
+		selectorCount++
+	}
+	if selectorCount == 0 {
+		return nil, fmt.Errorf("one selector is required: host_id, host_ids, or all_hosts")
+	}
+	if selectorCount > 1 {
+		return nil, fmt.Errorf("host selectors are mutually exclusive: use only one of host_id, host_ids, all_hosts")
+	}
+
+	if hasAll {
+		hosts := s.store.ListHosts()
+		if len(hosts) == 0 {
+			return nil, fmt.Errorf("no hosts configured")
+		}
+		return hosts, nil
+	}
+
+	if hasSingle {
+		h, ok := s.store.GetHost(strings.TrimSpace(req.HostID))
+		if !ok {
+			return nil, fmt.Errorf("host not found: %s", req.HostID)
+		}
+		return []model.Host{h}, nil
+	}
+
+	seen := map[string]struct{}{}
+	out := make([]model.Host, 0, len(req.HostIDs))
+	for _, id := range req.HostIDs {
+		key := strings.TrimSpace(id)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		h, ok := s.store.GetHost(key)
+		if !ok {
+			return nil, fmt.Errorf("host not found: %s", key)
+		}
+		out = append(out, h)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("host_ids resolved to empty set")
+	}
+	return out, nil
+}
+
+func resolveWorkdir(requestWorkdir string, hostWorkspace string) string {
+	if strings.TrimSpace(requestWorkdir) != "" {
+		return requestWorkdir
+	}
+	return strings.TrimSpace(hostWorkspace)
+}
+
+func bearerToken(v string) (string, bool) {
+	parts := strings.SplitN(strings.TrimSpace(v), " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return "", false
+	}
+	if strings.TrimSpace(parts[1]) == "" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+type responseCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rw *responseCapture) WriteHeader(status int) {
+	rw.status = status
+	rw.ResponseWriter.WriteHeader(status)
+}
+
+func (rw *responseCapture) Write(p []byte) (int, error) {
+	if rw.status == 0 {
+		rw.status = http.StatusOK
+	}
+	return rw.ResponseWriter.Write(p)
+}
+
+func (s *Server) requestLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now().UTC()
+		rw := &responseCapture{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r)
+		if r.URL.Path == "/v1/healthz" {
+			return
+		}
+		identity, _ := authIdentityFromContext(r.Context())
+		_ = s.store.AddAuditEvent(model.AuditEvent{
+			ID:             fmt.Sprintf("evt_%d", started.UnixNano()),
+			Timestamp:      started,
+			Method:         r.Method,
+			Path:           r.URL.Path,
+			StatusCode:     rw.status,
+			DurationMS:     time.Since(started).Milliseconds(),
+			RemoteAddr:     r.RemoteAddr,
+			CreatedByKeyID: identity.KeyID,
+			Action:         inferAction(r.Method, r.URL.Path),
+		})
+	})
+}
+
+func inferAction(method string, path string) string {
+	switch {
+	case method == http.MethodGet && path == "/v1/runtimes":
+		return "runtime.list"
+	case method == http.MethodGet && path == "/v1/hosts":
+		return "host.list"
+	case method == http.MethodPost && path == "/v1/hosts":
+		return "host.upsert"
+	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/hosts/"):
+		return "host.delete"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v1/hosts/") && strings.HasSuffix(path, "/probe"):
+		return "host.probe"
+	case method == http.MethodPost && path == "/v1/run":
+		return "run.execute"
+	case method == http.MethodGet && path == "/v1/runs":
+		return "run.list"
+	case method == http.MethodGet && path == "/v1/audit":
+		return "audit.list"
+	default:
+		return "request"
+	}
+}
+
+func authIdentityFromContext(ctx context.Context) (authIdentity, bool) {
+	v := ctx.Value(authContextKey{})
+	if v == nil {
+		return authIdentity{}, false
+	}
+	identity, ok := v.(authIdentity)
+	if !ok {
+		return authIdentity{}, false
+	}
+	return identity, true
+}
+
+func toRunTargetSummaries(targets []runTargetResult) []model.RunTargetSummary {
+	out := make([]model.RunTargetSummary, 0, len(targets))
+	for _, t := range targets {
+		out = append(out, model.RunTargetSummary{
+			HostID:     t.Host.ID,
+			HostName:   t.Host.Name,
+			OK:         t.OK,
+			ExitCode:   t.Result.ExitCode,
+			DurationMS: t.Result.DurationMS,
+			Error:      strings.TrimSpace(t.Error),
+		})
+	}
+	return out
+}
+
+func promptPreview(prompt string) string {
+	trimmed := strings.TrimSpace(prompt)
+	if len(trimmed) <= 240 {
+		return trimmed
+	}
+	return trimmed[:240]
+}
+
+func parseLimit(r *http.Request, fallback int, max int) int {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return fallback
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func ValidateConfig(dataPath string) error {
+	if strings.TrimSpace(dataPath) == "" {
+		return errors.New("data path is required")
+	}
+	if !strings.Contains(dataPath, ".json") {
+		return fmt.Errorf("data path should be a json file path")
+	}
+	return nil
+}

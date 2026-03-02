@@ -1,0 +1,106 @@
+:root {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: #0f172a;
+  background: radial-gradient(circle at top right, #dbeafe, #f8fafc 45%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.page {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 24px;
+  display: grid;
+  gap: 16px;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 32px;
+}
+
+header p {
+  margin: 4px 0 0;
+  color: #334155;
+}
+
+.card {
+  background: #ffffffcc;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+input,
+textarea,
+button {
+  border: 1px solid #94a3b8;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.host-grid {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.run-result {
+  margin-top: 10px;
+  border-top: 1px dashed #cbd5e1;
+  padding-top: 10px;
+}
+
+footer {
+  color: #475569;
+}
