@@ -11,6 +11,7 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 5. [ISSUE-005 #7](https://github.com/hellsoul86/remote-llm-cli/issues/7): Codex runtime deepening.
 6. [ISSUE-007 #12](https://github.com/hellsoul86/remote-llm-cli/issues/12): Deep remote operations (`sync`, retry policy, shell attach).
 7. [ISSUE-008 #15](https://github.com/hellsoul86/remote-llm-cli/issues/15): Async run jobs and reconnectable status polling.
+8. [ISSUE-009 #17](https://github.com/hellsoul86/remote-llm-cli/issues/17): TUI jobs pane and multi-job watch controls.
 
 ## Planned PR Sequence
 
@@ -21,6 +22,7 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 5. PR-005 -> ISSUE-005 #7 (codex deep runtime support)
 6. PR-006 -> ISSUE-007 #12 (sync + retry + shell attach)
 7. PR-007 -> ISSUE-008 #15 (async run jobs + polling/reconnect)
+8. PR-008 -> ISSUE-009 #17 (TUI jobs pane + multi-job watch)
 
 ## Branch Targets
 

@@ -15,6 +15,7 @@ const (
 	paneControl = iota
 	paneRuns
 	paneAudit
+	paneJobs
 )
 
 var codexModes = []string{"exec", "resume", "review"}
@@ -29,6 +30,11 @@ type loadHistoryMsg struct {
 	runs  []RunRecord
 	audit []AuditEvent
 	err   error
+}
+
+type loadJobsMsg struct {
+	jobs []RunJobRecord
+	err  error
 }
 
 type runDoneMsg struct {
@@ -85,16 +91,21 @@ type Model struct {
 
 	runHistory  []RunRecord
 	auditEvents []AuditEvent
+	runJobs     []RunJobRecord
 	activePane  int
 
 	loading        bool
 	historyLoading bool
+	jobsLoading    bool
 	running        bool
 	message        string
 
 	lastStatus int
 	lastRun    *RunResponse
 	activeJob  *RunJobRecord
+	jobCursor  int
+
+	jobPollDelay time.Duration
 }
 
 func NewModel(client *APIClient, runtime string) Model {
@@ -115,12 +126,14 @@ func NewModel(client *APIClient, runtime string) Model {
 		message:         "loading hosts and history...",
 		loading:         true,
 		historyLoading:  true,
+		jobsLoading:     true,
 		activePane:      paneControl,
+		jobPollDelay:    800 * time.Millisecond,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.loadHostsCmd(), m.loadHistoryCmd())
+	return tea.Batch(m.loadHostsCmd(), m.loadHistoryCmd(), m.loadJobsCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -149,6 +162,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.auditEvents = msg.audit
 		m.message = fmt.Sprintf("loaded history: %d runs, %d audit events", len(msg.runs), len(msg.audit))
 		return m, nil
+	case loadJobsMsg:
+		m.jobsLoading = false
+		if msg.err != nil {
+			m.message = "failed to load jobs: " + msg.err.Error()
+			return m, nil
+		}
+		m.runJobs = msg.jobs
+		m.jobCursor = clampCursor(m.jobCursor, len(m.runJobs))
+		m.syncActiveJobFromList()
+		if !m.running {
+			m.message = fmt.Sprintf("loaded jobs: %d", len(msg.jobs))
+		}
+		return m, nil
 	case runDoneMsg:
 		m.running = false
 		if msg.err != nil {
@@ -168,12 +194,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		job := msg.job
 		m.activeJob = &job
+		m.upsertRunJob(job)
 		m.message = fmt.Sprintf("job accepted: %s status=%s", job.ID, job.Status)
 		if isRunJobActive(job) {
 			m.running = true
-			return m, m.pollRunJobCmd(800 * time.Millisecond)
+			m.jobPollDelay = 800 * time.Millisecond
+			return m, tea.Batch(m.pollRunJobCmd(m.jobPollDelay), m.loadJobsCmd())
 		}
-		return m, nil
+		return m, m.loadJobsCmd()
 	case pollRunJobMsg:
 		if msg.err != nil {
 			m.running = false
@@ -182,11 +210,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		job := msg.job
 		m.activeJob = &job
+		m.upsertRunJob(job)
 		if isRunJobActive(job) {
 			m.running = true
-			return m, m.pollRunJobCmd(2 * time.Second)
+			m.jobPollDelay = nextJobPollDelay(m.jobPollDelay)
+			return m, tea.Batch(m.pollRunJobCmd(m.jobPollDelay), m.loadJobsCmd())
 		}
 		m.running = false
+		m.jobPollDelay = 800 * time.Millisecond
 		if job.Response != nil {
 			m.lastRun = job.Response
 			m.lastStatus = job.ResultStatus
@@ -199,7 +230,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			job.ResultStatus,
 			job.FailedHosts,
 		)
-		return m, m.loadHistoryCmd()
+		return m, tea.Batch(m.loadHistoryCmd(), m.loadJobsCmd())
 	case shellDoneMsg:
 		if msg.err != nil {
 			m.message = "shell ended with error: " + msg.err.Error()
@@ -237,7 +268,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "tab":
-			m.activePane = (m.activePane + 1) % 3
+			m.activePane = (m.activePane + 1) % 4
 			m.message = "switched pane: " + paneLabel(m.activePane)
 			return m, nil
 		case "h":
@@ -248,13 +279,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = "reloading history..."
 			return m, m.loadHistoryCmd()
 		case "R":
-			if m.loading || m.running || m.historyLoading {
+			if m.loading || m.running || m.historyLoading || m.jobsLoading {
 				return m, nil
 			}
 			m.loading = true
 			m.historyLoading = true
+			m.jobsLoading = true
 			m.message = "reloading hosts and history..."
-			return m, tea.Batch(m.loadHostsCmd(), m.loadHistoryCmd())
+			return m, tea.Batch(m.loadHostsCmd(), m.loadHistoryCmd(), m.loadJobsCmd())
 		case "r":
 			if m.running {
 				return m, nil
@@ -278,6 +310,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.message = "running..."
 			return m, m.runCmd()
+		}
+
+		if m.activePane == paneJobs {
+			switch msg.String() {
+			case "up", "k":
+				if m.jobCursor > 0 {
+					m.jobCursor--
+				}
+				return m, nil
+			case "down", "j":
+				if m.jobCursor < len(m.runJobs)-1 {
+					m.jobCursor++
+				}
+				return m, nil
+			case "enter", "w":
+				if len(m.runJobs) == 0 {
+					m.message = "no jobs available"
+					return m, nil
+				}
+				m.jobCursor = clampCursor(m.jobCursor, len(m.runJobs))
+				job := m.runJobs[m.jobCursor]
+				m.activeJob = &job
+				m.jobPollDelay = 800 * time.Millisecond
+				m.message = fmt.Sprintf("watching job: %s status=%s", job.ID, job.Status)
+				if isRunJobActive(job) {
+					m.running = true
+					return m, tea.Batch(m.pollRunJobCmd(m.jobPollDelay), m.loadJobsCmd())
+				}
+				m.running = false
+				return m, func() tea.Msg {
+					next, err := m.client.GetRunJob(job.ID)
+					return pollRunJobMsg{job: next, err: err}
+				}
+			case "J":
+				if m.jobsLoading {
+					return m, nil
+				}
+				m.jobsLoading = true
+				m.message = "reloading jobs..."
+				return m, m.loadJobsCmd()
+			}
+			return m, nil
 		}
 
 		if m.activePane != paneControl {
@@ -429,7 +503,7 @@ func (m Model) View() string {
 		"all_hosts=%t fanout=%d max_output_kb=%d retries=%d backoff_ms=%d async=%t pane=%s\n",
 		m.allHosts, m.fanout, m.maxOutputKB, m.retryCount, m.retryBackoffMS, m.runAsync, paneLabel(m.activePane),
 	))
-	b.WriteString("keys: q quit | R reload all | r run | u async toggle | h history | Tab pane | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | ./, retries | n/b backoff | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id | o shell\n")
+	b.WriteString("keys: q quit | R reload all | r run | u async toggle | h history | Tab pane | jobs-pane: up/down select, Enter/w watch, J refresh | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | ./, retries | n/b backoff | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id | o shell\n")
 
 	if m.loading {
 		b.WriteString("[loading hosts...]\n")
@@ -437,12 +511,17 @@ func (m Model) View() string {
 	if m.historyLoading {
 		b.WriteString("[loading history...]\n")
 	}
+	if m.jobsLoading {
+		b.WriteString("[loading jobs...]\n")
+	}
 
 	switch m.activePane {
 	case paneRuns:
 		m.viewRunsPane(&b)
 	case paneAudit:
 		m.viewAuditPane(&b)
+	case paneJobs:
+		m.viewJobsPane(&b)
 	default:
 		m.viewControlPane(&b)
 	}
@@ -614,6 +693,44 @@ func (m Model) viewAuditPane(b *strings.Builder) {
 	}
 }
 
+func (m Model) viewJobsPane(b *strings.Builder) {
+	b.WriteString("\nRun Jobs:\n")
+	if len(m.runJobs) == 0 {
+		b.WriteString("no jobs yet\n")
+		return
+	}
+	for i, job := range m.runJobs {
+		cursor := " "
+		if i == m.jobCursor {
+			cursor = ">"
+		}
+		active := " "
+		if m.activeJob != nil && m.activeJob.ID == job.ID {
+			active = "*"
+		}
+		tail := ""
+		if strings.TrimSpace(job.Error) != "" {
+			tail = " err=" + clamp(strings.TrimSpace(job.Error), 80)
+		}
+		b.WriteString(fmt.Sprintf(
+			"%s%s %2d. id=%s status=%s runtime=%s hosts=%d ok=%d failed=%d http=%d dur=%dms prompt=%q%s\n",
+			cursor,
+			active,
+			i+1,
+			job.ID,
+			job.Status,
+			job.Runtime,
+			job.TotalHosts,
+			job.SucceededHosts,
+			job.FailedHosts,
+			job.ResultStatus,
+			job.DurationMS,
+			clamp(job.PromptPreview, 60),
+			tail,
+		))
+	}
+}
+
 func (m Model) loadHostsCmd() tea.Cmd {
 	return func() tea.Msg {
 		hosts, err := m.client.ListHosts()
@@ -629,6 +746,13 @@ func (m Model) loadHistoryCmd() tea.Cmd {
 		}
 		audit, err := m.client.ListAudit(100)
 		return loadHistoryMsg{runs: runs, audit: audit, err: err}
+	}
+}
+
+func (m Model) loadJobsCmd() tea.Cmd {
+	return func() tea.Msg {
+		jobs, err := m.client.ListRunJobs(50)
+		return loadJobsMsg{jobs: jobs, err: err}
 	}
 }
 
@@ -709,6 +833,55 @@ func isRunJobActive(job RunJobRecord) bool {
 	}
 }
 
+func nextJobPollDelay(current time.Duration) time.Duration {
+	if current <= 0 {
+		return 800 * time.Millisecond
+	}
+	next := current + 400*time.Millisecond
+	if next > 5*time.Second {
+		return 5 * time.Second
+	}
+	return next
+}
+
+func clampCursor(cursor int, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	if cursor < 0 {
+		return 0
+	}
+	if cursor >= n {
+		return n - 1
+	}
+	return cursor
+}
+
+func (m *Model) upsertRunJob(job RunJobRecord) {
+	for i := range m.runJobs {
+		if m.runJobs[i].ID != job.ID {
+			continue
+		}
+		m.runJobs[i] = job
+		return
+	}
+	m.runJobs = append([]RunJobRecord{job}, m.runJobs...)
+	m.jobCursor = clampCursor(m.jobCursor, len(m.runJobs))
+}
+
+func (m *Model) syncActiveJobFromList() {
+	if m.activeJob == nil {
+		return
+	}
+	for i := range m.runJobs {
+		if m.runJobs[i].ID == m.activeJob.ID {
+			job := m.runJobs[i]
+			m.activeJob = &job
+			return
+		}
+	}
+}
+
 func (m Model) openShellCmd(host Host) tea.Cmd {
 	target := hostTarget(host)
 	if strings.TrimSpace(target) == "" {
@@ -754,6 +927,8 @@ func paneLabel(pane int) string {
 		return "runs"
 	case paneAudit:
 		return "audit"
+	case paneJobs:
+		return "jobs"
 	default:
 		return "control"
 	}
