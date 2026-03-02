@@ -1,0 +1,47 @@
+name: PR Governance
+
+on:
+  pull_request:
+    branches:
+      - staging
+      - main
+
+jobs:
+  target-rules:
+    name: Target Branch Rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR target policy
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          echo "base=$BASE_REF head=$HEAD_REF"
+
+          if [ "$BASE_REF" = "main" ]; then
+            if [ "$HEAD_REF" = "staging" ]; then
+              echo "release PR (staging -> main) allowed"
+              exit 0
+            fi
+            case "$HEAD_REF" in
+              hotfix/*)
+                echo "hotfix PR to main allowed"
+                exit 0
+                ;;
+            esac
+            echo "Only staging or hotfix/* can target main"
+            exit 1
+          fi
+
+          if [ "$BASE_REF" = "staging" ]; then
+            case "$HEAD_REF" in
+              feat/*|fix/*|chore/*|hotfix/*)
+                echo "feature/fix/chore/hotfix PR to staging allowed"
+                exit 0
+                ;;
+            esac
+            echo "Only feat/*, fix/*, chore/*, hotfix/* can target staging"
+            exit 1
+          fi
+
+          echo "No rule for base branch $BASE_REF, pass"
