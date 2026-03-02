@@ -122,6 +122,7 @@ export type SyncRequest = {
 
 export type SyncResponse = {
   operation: "sync";
+  runtime?: string;
   summary: {
     total: number;
     succeeded: number;
@@ -176,8 +177,8 @@ export type RunJobRecord = {
   fanout?: number;
   duration_ms?: number;
   error?: string;
-  request?: RunRequest;
-  response?: RunResponse;
+  request?: RunRequest | SyncRequest;
+  response?: RunResponse | SyncResponse;
 };
 
 export type AuditEvent = {
@@ -256,6 +257,19 @@ export async function enqueueRunJob(token: string, request: RunRequest): Promise
   const body = await res.json();
   if (!res.ok || !body?.job) {
     throw new Error(`enqueue run job failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return { status: res.status, body };
+}
+
+export async function enqueueSyncJob(token: string, request: SyncRequest): Promise<{ status: number; body: { job: RunJobRecord } }> {
+  const res = await fetch(`${API_BASE}/v1/jobs/sync`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.job) {
+    throw new Error(`enqueue sync job failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return { status: res.status, body };
 }

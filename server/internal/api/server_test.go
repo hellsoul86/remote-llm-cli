@@ -71,6 +71,7 @@ func TestInferAction(t *testing.T) {
 		{name: "host probe dynamic", method: http.MethodPost, path: "/v1/hosts/h_1/probe", want: "host.probe"},
 		{name: "run execute", method: http.MethodPost, path: "/v1/run", want: "run.execute"},
 		{name: "run enqueue", method: http.MethodPost, path: "/v1/jobs/run", want: "job.run.enqueue"},
+		{name: "sync enqueue", method: http.MethodPost, path: "/v1/jobs/sync", want: "job.sync.enqueue"},
 		{name: "job list", method: http.MethodGet, path: "/v1/jobs", want: "job.list"},
 		{name: "job get", method: http.MethodGet, path: "/v1/jobs/job_1", want: "job.get"},
 		{name: "sync execute", method: http.MethodPost, path: "/v1/sync", want: "sync.execute"},

@@ -66,6 +66,7 @@ Default API URL is `http://localhost:8080`.
 - Multi-host fanout execution (`POST /v1/run` with `host_ids` or `all_hosts`)
 - Async run jobs with reconnectable polling (`POST /v1/jobs/run`, `GET /v1/jobs`, `GET /v1/jobs/{id}`)
 - Multi-host file sync over rsync (`POST /v1/sync`)
+- Async sync jobs on the same scheduler (`POST /v1/jobs/sync`)
 - Retry policy for run/sync (`retry_count`, `retry_backoff_ms`)
 - Safe output capture limit (`max_output_kb`, includes truncation metadata in response)
 - Run history API (`GET /v1/runs`)
@@ -136,6 +137,24 @@ curl -X GET "http://localhost:8080/v1/jobs?limit=20" \
 # poll one
 curl -X GET "http://localhost:8080/v1/jobs/job_xxx" \
   -H "Authorization: Bearer $REMOTE_LLM_KEY"
+```
+
+## Async Sync Job API example
+
+```bash
+curl -X POST http://localhost:8080/v1/jobs/sync \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "all_hosts": true,
+    "fanout": 3,
+    "src": "./",
+    "dst": "workspace",
+    "delete": false,
+    "excludes": [".git", "node_modules"],
+    "retry_count": 1,
+    "retry_backoff_ms": 1000
+  }'
 ```
 
 ## Codex advanced run example
