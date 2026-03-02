@@ -27,7 +27,16 @@ export function App() {
   const [runPrompt, setRunPrompt] = useState("summarize current repo state and risks");
   const [runWorkdir, setRunWorkdir] = useState("");
   const [runFanoutValue, setRunFanoutValue] = useState("3");
+  const [runMaxOutputKB, setRunMaxOutputKB] = useState("256");
   const [runAllHosts, setRunAllHosts] = useState(true);
+  const [runMode, setRunMode] = useState<"exec" | "resume" | "review">("exec");
+  const [runModel, setRunModel] = useState("");
+  const [runSandbox, setRunSandbox] = useState<"" | "read-only" | "workspace-write" | "danger-full-access">("");
+  const [runJSONOutput, setRunJSONOutput] = useState(true);
+  const [runSkipGitRepoCheck, setRunSkipGitRepoCheck] = useState(false);
+  const [runEphemeral, setRunEphemeral] = useState(false);
+  const [runResumeLast, setRunResumeLast] = useState(true);
+  const [runSessionID, setRunSessionID] = useState("");
   const [selectedHostIDs, setSelectedHostIDs] = useState<string[]>([]);
   const [runStatus, setRunStatus] = useState<number | null>(null);
   const [runResult, setRunResult] = useState<RunResponse | null>(null);
@@ -101,8 +110,12 @@ export function App() {
       setMessage("set access key first");
       return;
     }
-    if (!runPrompt.trim()) {
-      setMessage("prompt is required");
+    if (runMode === "exec" && !runPrompt.trim()) {
+      setMessage("prompt is required for exec mode");
+      return;
+    }
+    if (runMode === "resume" && !runResumeLast && !runSessionID.trim()) {
+      setMessage("session id is required when resume_last is disabled");
       return;
     }
     if (!runAllHosts && selectedHostIDs.length === 0) {
@@ -111,18 +124,31 @@ export function App() {
     }
 
     const fanout = Math.max(1, Number.parseInt(runFanoutValue, 10) || 1);
+    const maxOutputKB = Math.max(32, Number.parseInt(runMaxOutputKB, 10) || 256);
     setRunLoading(true);
     setRunResult(null);
     setRunStatus(null);
     setMessage("");
     try {
+      const codex = {
+        mode: runMode,
+        model: runModel.trim() || undefined,
+        sandbox: runMode === "exec" ? runSandbox || undefined : undefined,
+        json_output: runJSONOutput,
+        skip_git_repo_check: runSkipGitRepoCheck,
+        ephemeral: runEphemeral,
+        resume_last: runMode === "resume" ? runResumeLast : undefined,
+        session_id: runMode === "resume" && !runResumeLast ? runSessionID.trim() : undefined
+      };
       const { status, body } = await runFanout(token, {
         runtime: "codex",
         prompt: runPrompt.trim(),
         fanout,
+        max_output_kb: maxOutputKB,
         all_hosts: runAllHosts,
         host_ids: runAllHosts ? undefined : selectedHostIDs,
-        workdir: runWorkdir.trim() || undefined
+        workdir: runWorkdir.trim() || undefined,
+        codex
       });
       setRunStatus(status);
       setRunResult(body);
@@ -203,13 +229,59 @@ export function App() {
       <section className="card">
         <h2>Run Codex (Fanout)</h2>
         <form onSubmit={onRunCodex} className="grid">
+          <label>
+            mode
+            <select value={runMode} onChange={(e) => setRunMode(e.target.value as "exec" | "resume" | "review")}>
+              <option value="exec">exec</option>
+              <option value="resume">resume</option>
+              <option value="review">review</option>
+            </select>
+          </label>
+          <label>
+            model
+            <input value={runModel} onChange={(e) => setRunModel(e.target.value)} placeholder="optional model" />
+          </label>
+          <label>
+            sandbox
+            <select
+              value={runSandbox}
+              onChange={(e) =>
+                setRunSandbox(e.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+              }
+            >
+              <option value="">default</option>
+              <option value="read-only">read-only</option>
+              <option value="workspace-write">workspace-write</option>
+              <option value="danger-full-access">danger-full-access</option>
+            </select>
+          </label>
+          <label>
+            max output KB
+            <input value={runMaxOutputKB} onChange={(e) => setRunMaxOutputKB(e.target.value)} />
+          </label>
           <textarea
             value={runPrompt}
             onChange={(e) => setRunPrompt(e.target.value)}
-            placeholder="prompt"
+            placeholder={runMode === "exec" ? "prompt (required for exec)" : "optional prompt"}
             rows={4}
             className="wide"
           />
+          {runMode === "resume" ? (
+            <>
+              <label className="inline">
+                <input type="checkbox" checked={runResumeLast} onChange={(e) => setRunResumeLast(e.target.checked)} />
+                resume last session
+              </label>
+              {!runResumeLast ? (
+                <input
+                  value={runSessionID}
+                  onChange={(e) => setRunSessionID(e.target.value)}
+                  placeholder="session id"
+                  className="wide"
+                />
+              ) : null}
+            </>
+          ) : null}
           <input
             value={runWorkdir}
             onChange={(e) => setRunWorkdir(e.target.value)}
@@ -223,6 +295,22 @@ export function App() {
           <label className="inline">
             <input type="checkbox" checked={runAllHosts} onChange={(e) => setRunAllHosts(e.target.checked)} />
             all hosts
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={runJSONOutput} onChange={(e) => setRunJSONOutput(e.target.checked)} />
+            codex --json
+          </label>
+          <label className="inline">
+            <input
+              type="checkbox"
+              checked={runSkipGitRepoCheck}
+              onChange={(e) => setRunSkipGitRepoCheck(e.target.checked)}
+            />
+            skip git repo check
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={runEphemeral} onChange={(e) => setRunEphemeral(e.target.checked)} />
+            ephemeral session
           </label>
           <button type="submit" disabled={runLoading}>
             {runLoading ? "Running..." : "Run Codex"}
@@ -250,7 +338,12 @@ export function App() {
               {runResult.targets.map((t) => (
                 <li key={t.host.id}>
                   <strong>{t.host.name}</strong> ok={String(t.ok)} exit={t.result.exit_code ?? "n/a"} dur=
-                  {t.result.duration_ms ?? 0}ms {t.error ? ` error=${t.error}` : ""}
+                  {t.result.duration_ms ?? 0}ms stdout={t.result.stdout_bytes ?? 0}B stderr={t.result.stderr_bytes ?? 0}
+                  B
+                  {t.result.stdout_truncated ? " stdout_truncated=true" : ""}
+                  {t.result.stderr_truncated ? " stderr_truncated=true" : ""}
+                  {t.codex ? ` codex_events=${t.codex.event_count} invalid_json_lines=${t.codex.invalid_lines ?? 0}` : ""}
+                  {t.error ? ` error=${t.error}` : ""}
                 </li>
               ))}
             </ul>

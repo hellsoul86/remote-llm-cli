@@ -9,9 +9,10 @@ import (
 )
 
 type RunRequest struct {
-	Prompt    string   `json:"prompt"`
-	Workdir   string   `json:"workdir,omitempty"`
-	ExtraArgs []string `json:"extra_args,omitempty"`
+	Prompt    string           `json:"prompt"`
+	Workdir   string           `json:"workdir,omitempty"`
+	ExtraArgs []string         `json:"extra_args,omitempty"`
+	Codex     *CodexRunOptions `json:"codex,omitempty"`
 }
 
 type CommandSpec struct {

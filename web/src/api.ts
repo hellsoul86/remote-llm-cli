@@ -30,6 +30,34 @@ export type RunRequest = {
   workdir?: string;
   extra_args?: string[];
   timeout_sec?: number;
+  max_output_kb?: number;
+  codex?: {
+    mode?: "exec" | "resume" | "review";
+    session_id?: string;
+    resume_last?: boolean;
+    model?: string;
+    profile?: string;
+    sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+    config?: string[];
+    enable?: string[];
+    disable?: string[];
+    add_dirs?: string[];
+    images?: string[];
+    local_provider?: string;
+    color?: "always" | "never" | "auto";
+    oss?: boolean;
+    full_auto?: boolean;
+    progress_cursor?: boolean;
+    skip_git_repo_check?: boolean;
+    ephemeral?: boolean;
+    json_output?: boolean;
+    review_uncommitted?: boolean;
+    dangerously_bypass_approvals_and_sandbox?: boolean;
+    output_last_message_file?: string;
+    review_base?: string;
+    review_commit?: string;
+    review_title?: string;
+  };
 };
 
 export type RunTargetResult = {
@@ -38,6 +66,10 @@ export type RunTargetResult = {
     command?: string;
     stdout?: string;
     stderr?: string;
+    stdout_bytes?: number;
+    stderr_bytes?: number;
+    stdout_truncated?: boolean;
+    stderr_truncated?: boolean;
     exit_code?: number;
     duration_ms?: number;
     started_at?: string;
@@ -45,6 +77,13 @@ export type RunTargetResult = {
   };
   ok: boolean;
   error?: string | null;
+  codex?: {
+    jsonl: boolean;
+    event_count: number;
+    invalid_lines?: number;
+    last_event_type?: string;
+    parse_error?: string;
+  };
 };
 
 export type RunResponse = {

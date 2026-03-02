@@ -15,6 +15,9 @@ const (
 	paneAudit
 )
 
+var codexModes = []string{"exec", "resume", "review"}
+var codexSandboxes = []string{"", "read-only", "workspace-write", "danger-full-access"}
+
 type loadHostsMsg struct {
 	hosts []Host
 	err   error
@@ -33,17 +36,32 @@ type runDoneMsg struct {
 }
 
 type Model struct {
-	client         *APIClient
-	runtime        string
-	hosts          []Host
-	selected       map[string]bool
-	cursor         int
-	prompt         string
-	workdir        string
-	fanout         int
-	allHosts       bool
-	editingPrompt  bool
-	editingWorkdir bool
+	client  *APIClient
+	runtime string
+	hosts   []Host
+
+	selected map[string]bool
+	cursor   int
+
+	prompt   string
+	workdir  string
+	fanout   int
+	allHosts bool
+
+	codexMode             string
+	codexModel            string
+	codexSandbox          string
+	codexJSONOutput       bool
+	codexSkipGitRepoCheck bool
+	codexEphemeral        bool
+	codexResumeLast       bool
+	codexSessionID        string
+	maxOutputKB           int
+
+	editingPrompt    bool
+	editingWorkdir   bool
+	editingModel     bool
+	editingSessionID bool
 
 	runHistory  []RunRecord
 	auditEvents []AuditEvent
@@ -60,16 +78,20 @@ type Model struct {
 
 func NewModel(client *APIClient, runtime string) Model {
 	return Model{
-		client:         client,
-		runtime:        runtime,
-		selected:       map[string]bool{},
-		prompt:         "summarize git status and key risks",
-		fanout:         3,
-		allHosts:       true,
-		message:        "loading hosts and history...",
-		loading:        true,
-		historyLoading: true,
-		activePane:     paneControl,
+		client:          client,
+		runtime:         runtime,
+		selected:        map[string]bool{},
+		prompt:          "summarize git status and key risks",
+		fanout:          3,
+		allHosts:        true,
+		codexMode:       "exec",
+		codexJSONOutput: true,
+		codexResumeLast: true,
+		maxOutputKB:     256,
+		message:         "loading hosts and history...",
+		loading:         true,
+		historyLoading:  true,
+		activePane:      paneControl,
 	}
 }
 
@@ -116,41 +138,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadHistoryCmd()
 	case tea.KeyMsg:
 		if m.editingPrompt {
-			switch msg.String() {
-			case "esc", "enter":
-				m.editingPrompt = false
-				m.message = "prompt edit done"
-				return m, nil
-			case "backspace":
-				if len(m.prompt) > 0 {
-					m.prompt = m.prompt[:len(m.prompt)-1]
-				}
-				return m, nil
-			default:
-				if len(msg.Runes) > 0 && msg.Type == tea.KeyRunes {
-					m.prompt += string(msg.Runes)
-				}
-				return m, nil
-			}
+			return finishOrAppendText(msg, m.prompt, "prompt edit done", func(v string) Model {
+				m.prompt = v
+				return m
+			})
 		}
 		if m.editingWorkdir {
-			switch msg.String() {
-			case "esc", "enter":
-				m.editingWorkdir = false
-				m.message = "workdir edit done"
-				return m, nil
-			case "backspace":
-				if len(m.workdir) > 0 {
-					m.workdir = m.workdir[:len(m.workdir)-1]
-				}
-				return m, nil
-			default:
-				if len(msg.Runes) > 0 && msg.Type == tea.KeyRunes {
-					m.workdir += string(msg.Runes)
-				}
-				return m, nil
-			}
+			return finishOrAppendText(msg, m.workdir, "workdir edit done", func(v string) Model {
+				m.workdir = v
+				return m
+			})
 		}
+		if m.editingModel {
+			return finishOrAppendText(msg, m.codexModel, "model edit done", func(v string) Model {
+				m.codexModel = v
+				return m
+			})
+		}
+		if m.editingSessionID {
+			return finishOrAppendText(msg, m.codexSessionID, "session id edit done", func(v string) Model {
+				m.codexSessionID = v
+				return m
+			})
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -165,12 +176,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.historyLoading = true
 			m.message = "reloading history..."
 			return m, m.loadHistoryCmd()
+		case "R":
+			if m.loading || m.running || m.historyLoading {
+				return m, nil
+			}
+			m.loading = true
+			m.historyLoading = true
+			m.message = "reloading hosts and history..."
+			return m, tea.Batch(m.loadHostsCmd(), m.loadHistoryCmd())
 		case "r":
 			if m.running {
 				return m, nil
 			}
-			if strings.TrimSpace(m.prompt) == "" {
-				m.message = "prompt is empty"
+			if strings.TrimSpace(m.codexMode) == "exec" && strings.TrimSpace(m.prompt) == "" {
+				m.message = "prompt is required for exec mode"
+				return m, nil
+			}
+			if strings.TrimSpace(m.codexMode) == "resume" && !m.codexResumeLast && strings.TrimSpace(m.codexSessionID) == "" {
+				m.message = "session id is required when resume_last is false"
 				return m, nil
 			}
 			if !m.allHosts && len(m.selectedHostIDs()) == 0 {
@@ -180,14 +203,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.running = true
 			m.message = "running..."
 			return m, m.runCmd()
-		case "R":
-			if m.loading || m.running || m.historyLoading {
-				return m, nil
-			}
-			m.loading = true
-			m.historyLoading = true
-			m.message = "reloading hosts and history..."
-			return m, tea.Batch(m.loadHostsCmd(), m.loadHistoryCmd())
 		}
 
 		if m.activePane != paneControl {
@@ -230,6 +245,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.fanout--
 			}
 			return m, nil
+		case "]":
+			if m.maxOutputKB < 4096 {
+				m.maxOutputKB += 64
+			}
+			return m, nil
+		case "[":
+			if m.maxOutputKB > 32 {
+				m.maxOutputKB -= 64
+				if m.maxOutputKB < 32 {
+					m.maxOutputKB = 32
+				}
+			}
+			return m, nil
 		case "p":
 			m.editingPrompt = true
 			m.message = "editing prompt (Enter/Esc to finish)"
@@ -237,6 +265,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "w":
 			m.editingWorkdir = true
 			m.message = "editing workdir (Enter/Esc to finish)"
+			return m, nil
+		case "m":
+			m.editingModel = true
+			m.message = "editing model (Enter/Esc to finish)"
+			return m, nil
+		case "t":
+			m.codexMode = nextInList(codexModes, m.codexMode)
+			if m.codexMode != "resume" {
+				m.codexResumeLast = true
+			}
+			m.message = "codex mode: " + m.codexMode
+			return m, nil
+		case "x":
+			m.codexSandbox = nextInList(codexSandboxes, m.codexSandbox)
+			if m.codexSandbox == "" {
+				m.message = "codex sandbox: default"
+			} else {
+				m.message = "codex sandbox: " + m.codexSandbox
+			}
+			return m, nil
+		case "y":
+			m.codexJSONOutput = !m.codexJSONOutput
+			return m, nil
+		case "g":
+			m.codexSkipGitRepoCheck = !m.codexSkipGitRepoCheck
+			return m, nil
+		case "e":
+			m.codexEphemeral = !m.codexEphemeral
+			return m, nil
+		case "l":
+			if m.codexMode == "resume" {
+				m.codexResumeLast = !m.codexResumeLast
+			}
+			return m, nil
+		case "s":
+			if m.codexMode == "resume" && !m.codexResumeLast {
+				m.editingSessionID = true
+				m.message = "editing session id (Enter/Esc to finish)"
+			}
 			return m, nil
 		}
 	}
@@ -247,8 +314,8 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString("remote-llm-cli (TUI)\n")
 	b.WriteString("runtime=" + m.runtime + "  ")
-	b.WriteString(fmt.Sprintf("all_hosts=%t  fanout=%d  pane=%s\n", m.allHosts, m.fanout, paneLabel(m.activePane)))
-	b.WriteString("keys: q quit | R reload all | r run | h reload-history | Tab switch-pane | a toggle-all | space toggle-host | p edit-prompt | w edit-workdir | +/- fanout\n")
+	b.WriteString(fmt.Sprintf("all_hosts=%t fanout=%d max_output_kb=%d pane=%s\n", m.allHosts, m.fanout, m.maxOutputKB, paneLabel(m.activePane)))
+	b.WriteString("keys: q quit | R reload all | r run | h history | Tab pane | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id\n")
 
 	if m.loading {
 		b.WriteString("[loading hosts...]\n")
@@ -294,6 +361,20 @@ func (m Model) viewControlPane(b *strings.Builder) {
 		}
 	}
 
+	b.WriteString("\nCodex Options:\n")
+	b.WriteString(fmt.Sprintf("mode=%s model=%q sandbox=%q json=%t skip_git=%t ephemeral=%t resume_last=%t\n",
+		m.codexMode,
+		strings.TrimSpace(m.codexModel),
+		sandboxDisplay(m.codexSandbox),
+		m.codexJSONOutput,
+		m.codexSkipGitRepoCheck,
+		m.codexEphemeral,
+		m.codexResumeLast,
+	))
+	if m.codexMode == "resume" && !m.codexResumeLast {
+		b.WriteString(fmt.Sprintf("session_id=%q\n", strings.TrimSpace(m.codexSessionID)))
+	}
+
 	if m.editingPrompt {
 		b.WriteString("\nPrompt (editing):\n")
 	} else {
@@ -331,12 +412,20 @@ func (m Model) viewControlPane(b *strings.Builder) {
 			if strings.TrimSpace(t.Error) != "" {
 				errText = " err=" + strings.TrimSpace(t.Error)
 			}
-			b.WriteString(fmt.Sprintf("- %s ok=%t exit=%d dur=%dms%s\n",
+			codexText := ""
+			if t.Codex != nil {
+				codexText = fmt.Sprintf(" codex_events=%d invalid_json=%d", t.Codex.EventCount, t.Codex.InvalidLines)
+			}
+			b.WriteString(fmt.Sprintf("- %s ok=%t exit=%d dur=%dms stdout=%dB stderr=%dB%s%s%s\n",
 				t.Host.Name,
 				t.OK,
 				t.Result.ExitCode,
 				t.Result.DurationMS,
-				errText,
+				t.Result.StdoutBytes,
+				t.Result.StderrBytes,
+				truncText(t.Result.StdoutTruncated, " stdout_truncated"),
+				truncText(t.Result.StderrTruncated, " stderr_truncated"),
+				codexText+errText,
 			))
 		}
 	}
@@ -416,11 +505,22 @@ func (m Model) selectedHostIDs() []string {
 
 func (m Model) runCmd() tea.Cmd {
 	req := RunRequest{
-		Runtime:  m.runtime,
-		Prompt:   m.prompt,
-		AllHosts: m.allHosts,
-		Fanout:   m.fanout,
-		Workdir:  strings.TrimSpace(m.workdir),
+		Runtime:     m.runtime,
+		Prompt:      strings.TrimSpace(m.prompt),
+		AllHosts:    m.allHosts,
+		Fanout:      m.fanout,
+		Workdir:     strings.TrimSpace(m.workdir),
+		MaxOutputKB: m.maxOutputKB,
+		Codex: &CodexRunOptions{
+			Mode:             m.codexMode,
+			SessionID:        strings.TrimSpace(m.codexSessionID),
+			ResumeLast:       m.codexResumeLast,
+			Model:            strings.TrimSpace(m.codexModel),
+			Sandbox:          sandboxForMode(m.codexMode, m.codexSandbox),
+			SkipGitRepoCheck: m.codexSkipGitRepoCheck,
+			Ephemeral:        m.codexEphemeral,
+			JSONOutput:       m.codexJSONOutput,
+		},
 	}
 	if !m.allHosts {
 		req.HostIDs = m.selectedHostIDs()
@@ -477,4 +577,70 @@ func min(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func nextInList(values []string, current string) string {
+	if len(values) == 0 {
+		return current
+	}
+	index := 0
+	for i, v := range values {
+		if v == current {
+			index = i
+			break
+		}
+	}
+	return values[(index+1)%len(values)]
+}
+
+func truncText(on bool, label string) string {
+	if on {
+		return label
+	}
+	return ""
+}
+
+func sandboxDisplay(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "default"
+	}
+	return v
+}
+
+func sandboxForMode(mode string, sandbox string) string {
+	if mode != "exec" {
+		return ""
+	}
+	return strings.TrimSpace(sandbox)
+}
+
+func finishOrAppendText(msg tea.KeyMsg, current string, doneMessage string, assign func(string) Model) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "enter":
+		m := assign(current)
+		m.message = doneMessage
+		switch doneMessage {
+		case "prompt edit done":
+			m.editingPrompt = false
+		case "workdir edit done":
+			m.editingWorkdir = false
+		case "model edit done":
+			m.editingModel = false
+		case "session id edit done":
+			m.editingSessionID = false
+		}
+		return m, nil
+	case "backspace":
+		if len(current) > 0 {
+			current = current[:len(current)-1]
+		}
+		m := assign(current)
+		return m, nil
+	default:
+		if len(msg.Runes) > 0 && msg.Type == tea.KeyRunes {
+			current += string(msg.Runes)
+		}
+		m := assign(current)
+		return m, nil
+	}
 }
