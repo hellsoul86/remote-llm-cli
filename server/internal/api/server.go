@@ -50,6 +50,7 @@ func New(st *store.Store, rt *runtime.Registry) *Server {
 		runJobs:  make(chan string, runJobQueueSize),
 	}
 	s.startRunJobWorkers(defaultRunJobWorkers)
+	s.recoverRunJobs()
 	return s
 }
 
@@ -436,6 +437,40 @@ func (s *Server) startRunJobWorkers(workers int) {
 	}
 	for i := 0; i < workers; i++ {
 		go s.runJobWorker()
+	}
+}
+
+func (s *Server) recoverRunJobs() {
+	jobs := s.store.ListRunJobs(1000)
+	for i := len(jobs) - 1; i >= 0; i-- {
+		job := jobs[i]
+		switch job.Status {
+		case runJobStatusPending:
+			s.enqueueRecoveredRunJob(job.ID)
+		case runJobStatusRunning:
+			job.Status = runJobStatusPending
+			job.Error = "server restarted before job completion; re-queued"
+			if err := s.store.UpdateRunJob(job); err == nil {
+				s.enqueueRecoveredRunJob(job.ID)
+			}
+		}
+	}
+}
+
+func (s *Server) enqueueRecoveredRunJob(jobID string) {
+	select {
+	case s.runJobs <- jobID:
+	default:
+		job, ok := s.store.GetRunJob(jobID)
+		if !ok {
+			return
+		}
+		finished := time.Now().UTC()
+		job.Status = runJobStatusFailed
+		job.ResultStatus = http.StatusServiceUnavailable
+		job.Error = "run job queue is full during startup recovery"
+		job.FinishedAt = &finished
+		_ = s.store.UpdateRunJob(job)
 	}
 }
 
