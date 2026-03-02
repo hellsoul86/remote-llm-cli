@@ -2,14 +2,17 @@ package runtime
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
 )
 
 type RunRequest struct {
-	Prompt    string   `json:"prompt"`
-	Workdir   string   `json:"workdir,omitempty"`
-	ExtraArgs []string `json:"extra_args,omitempty"`
+	Prompt    string           `json:"prompt"`
+	Workdir   string           `json:"workdir,omitempty"`
+	ExtraArgs []string         `json:"extra_args,omitempty"`
+	Codex     *CodexRunOptions `json:"codex,omitempty"`
 }
 
 type CommandSpec struct {
@@ -29,11 +32,29 @@ type Registry struct {
 }
 
 func NewRegistry(adapters ...Adapter) *Registry {
-	m := make(map[string]Adapter, len(adapters))
+	r := &Registry{adapters: map[string]Adapter{}}
 	for _, a := range adapters {
-		m[a.Name()] = a
+		if a == nil {
+			continue
+		}
+		_ = r.Add(a)
 	}
-	return &Registry{adapters: m}
+	return r
+}
+
+func (r *Registry) Add(adapter Adapter) error {
+	if adapter == nil {
+		return fmt.Errorf("adapter is nil")
+	}
+	name := strings.TrimSpace(adapter.Name())
+	if name == "" {
+		return fmt.Errorf("adapter name is empty")
+	}
+	if _, exists := r.adapters[name]; exists {
+		return fmt.Errorf("runtime already registered: %s", name)
+	}
+	r.adapters[name] = adapter
+	return nil
 }
 
 func (r *Registry) Get(name string) (Adapter, bool) {
@@ -42,8 +63,15 @@ func (r *Registry) Get(name string) (Adapter, bool) {
 }
 
 func (r *Registry) List() []model.RuntimeInfo {
-	out := make([]model.RuntimeInfo, 0, len(r.adapters))
-	for _, a := range r.adapters {
+	names := make([]string, 0, len(r.adapters))
+	for name := range r.adapters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]model.RuntimeInfo, 0, len(names))
+	for _, name := range names {
+		a := r.adapters[name]
 		out = append(out, model.RuntimeInfo{
 			Name:         a.Name(),
 			Capabilities: a.Capabilities(),

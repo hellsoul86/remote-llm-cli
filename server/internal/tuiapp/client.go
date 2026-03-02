@@ -39,12 +39,25 @@ type ListHostsResponse struct {
 }
 
 type RunRequest struct {
-	Runtime  string   `json:"runtime"`
-	Prompt   string   `json:"prompt"`
-	HostIDs  []string `json:"host_ids,omitempty"`
-	AllHosts bool     `json:"all_hosts,omitempty"`
-	Fanout   int      `json:"fanout,omitempty"`
-	Workdir  string   `json:"workdir,omitempty"`
+	Runtime     string           `json:"runtime"`
+	Prompt      string           `json:"prompt"`
+	HostIDs     []string         `json:"host_ids,omitempty"`
+	AllHosts    bool             `json:"all_hosts,omitempty"`
+	Fanout      int              `json:"fanout,omitempty"`
+	Workdir     string           `json:"workdir,omitempty"`
+	MaxOutputKB int              `json:"max_output_kb,omitempty"`
+	Codex       *CodexRunOptions `json:"codex,omitempty"`
+}
+
+type CodexRunOptions struct {
+	Mode             string `json:"mode,omitempty"`
+	SessionID        string `json:"session_id,omitempty"`
+	ResumeLast       bool   `json:"resume_last,omitempty"`
+	Model            string `json:"model,omitempty"`
+	Sandbox          string `json:"sandbox,omitempty"`
+	SkipGitRepoCheck bool   `json:"skip_git_repo_check,omitempty"`
+	Ephemeral        bool   `json:"ephemeral,omitempty"`
+	JSONOutput       bool   `json:"json_output,omitempty"`
 }
 
 type RunTarget struct {
@@ -53,11 +66,22 @@ type RunTarget struct {
 		Name string `json:"name"`
 	} `json:"host"`
 	Result struct {
-		ExitCode   int   `json:"exit_code"`
-		DurationMS int64 `json:"duration_ms"`
+		ExitCode        int   `json:"exit_code"`
+		DurationMS      int64 `json:"duration_ms"`
+		StdoutBytes     int   `json:"stdout_bytes"`
+		StderrBytes     int   `json:"stderr_bytes"`
+		StdoutTruncated bool  `json:"stdout_truncated"`
+		StderrTruncated bool  `json:"stderr_truncated"`
 	} `json:"result"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
+	Codex *struct {
+		JSONL         bool   `json:"jsonl"`
+		EventCount    int    `json:"event_count"`
+		InvalidLines  int    `json:"invalid_lines"`
+		LastEventType string `json:"last_event_type"`
+		ParseError    string `json:"parse_error"`
+	} `json:"codex,omitempty"`
 }
 
 type RunResponse struct {

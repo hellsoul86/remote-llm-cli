@@ -11,6 +11,7 @@ import (
 
 	"github.com/hellsoul86/remote-llm-cli/server/internal/accesskey"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
+	"github.com/hellsoul86/remote-llm-cli/server/internal/runtime"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/store"
 )
 
@@ -22,6 +23,8 @@ func main() {
 	switch os.Args[1] {
 	case "key":
 		handleKey(os.Args[2:])
+	case "runtime":
+		handleRuntime(os.Args[2:])
 	default:
 		printUsage()
 		os.Exit(1)
@@ -42,6 +45,20 @@ func handleKey(args []string) {
 		keyRevoke(args[1:])
 	default:
 		printKeyUsage()
+		os.Exit(1)
+	}
+}
+
+func handleRuntime(args []string) {
+	if len(args) < 1 {
+		printRuntimeUsage()
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "validate":
+		runtimeValidate(args[1:])
+	default:
+		printRuntimeUsage()
 		os.Exit(1)
 	}
 }
@@ -114,6 +131,23 @@ func keyRevoke(args []string) {
 	fmt.Printf("revoked key %s\n", *id)
 }
 
+func runtimeValidate(args []string) {
+	fs := flag.NewFlagSet("runtime validate", flag.ExitOnError)
+	config := fs.String("config", "", "runtime config json path")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*config) == "" {
+		log.Fatal("--config is required")
+	}
+	adapters, err := runtime.LoadTemplateAdaptersFromFile(strings.TrimSpace(*config))
+	if err != nil {
+		log.Fatalf("invalid runtime config: %v", err)
+	}
+	fmt.Printf("runtime config valid: %d adapters loaded\n", len(adapters))
+	for _, a := range adapters {
+		fmt.Printf("- %s\n", a.Name())
+	}
+}
+
 func mustStore(path string) *store.Store {
 	st, err := store.Open(path)
 	if err != nil {
@@ -127,8 +161,13 @@ func printUsage() {
 	fmt.Println("  remote-llm-admin key create --name default [--data ./data/state.json]")
 	fmt.Println("  remote-llm-admin key list [--json] [--data ./data/state.json]")
 	fmt.Println("  remote-llm-admin key revoke --id k_xxx [--data ./data/state.json]")
+	fmt.Println("  remote-llm-admin runtime validate --config ./examples/runtimes.example.json")
 }
 
 func printKeyUsage() {
 	fmt.Println("key subcommands: create | list | revoke")
+}
+
+func printRuntimeUsage() {
+	fmt.Println("runtime subcommands: validate")
 }
