@@ -193,6 +193,20 @@ export type AuditEvent = {
   action: string;
 };
 
+export type CodexSessionInfo = {
+  session_id: string;
+  path: string;
+  updated_at: string;
+  size_bytes: number;
+};
+
+export type CodexSessionTarget = {
+  host: Host;
+  ok: boolean;
+  error?: string;
+  sessions?: CodexSessionInfo[];
+};
+
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8080";
 
 function headers(token?: string): HeadersInit {
@@ -302,6 +316,22 @@ export async function cancelRunJob(token: string, id: string): Promise<{ state: 
     throw new Error(`cancel job failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+export async function discoverCodexSessions(
+  token: string,
+  request: { host_id?: string; host_ids?: string[]; all_hosts?: boolean; fanout?: number; timeout_sec?: number; limit_per_host?: number }
+): Promise<{ status: number; body: { targets: CodexSessionTarget[] } }> {
+  const res = await fetch(`${API_BASE}/v1/codex/sessions/discover`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok && !body?.targets) {
+    throw new Error(`discover codex sessions failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return { status: res.status, body };
 }
 
 export async function syncHosts(token: string, request: SyncRequest): Promise<{ status: number; body: SyncResponse }> {

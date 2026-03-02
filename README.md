@@ -68,6 +68,7 @@ Default API URL is `http://localhost:8080`.
 - Multi-host file sync over rsync (`POST /v1/sync`)
 - Async sync jobs on the same scheduler (`POST /v1/jobs/sync`)
 - Job cancellation API (`POST /v1/jobs/{id}/cancel`)
+- Codex session discovery and cleanup (`POST /v1/codex/sessions/discover`, `POST /v1/codex/sessions/cleanup`)
 - Retry policy for run/sync (`retry_count`, `retry_backoff_ms`)
 - Safe output capture limit (`max_output_kb`, includes truncation metadata in response)
 - Run history API (`GET /v1/runs`)
@@ -86,6 +87,7 @@ Default API URL is `http://localhost:8080`.
 - `J`: reload jobs list (in `jobs` pane)
 - `Enter` / `w`: watch selected job (in `jobs` pane)
 - `c`: cancel selected running/pending job (in `jobs` pane)
+- `v`: load latest resumable codex session from current host into resume config
 - `a`: toggle all-host mode
 - `space`: toggle selected host (when all-host mode is off)
 - `p`: edit prompt
@@ -160,6 +162,29 @@ curl -X POST http://localhost:8080/v1/jobs/sync \
     "excludes": [".git", "node_modules"],
     "retry_count": 1,
     "retry_backoff_ms": 1000
+  }'
+```
+
+## Codex Session Ops API example
+
+```bash
+# discover sessions for one host
+curl -X POST http://localhost:8080/v1/codex/sessions/discover \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "host_id": "h_123",
+    "limit_per_host": 10
+  }'
+
+# cleanup old session files (dry run)
+curl -X POST http://localhost:8080/v1/codex/sessions/cleanup \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "all_hosts": true,
+    "older_than_hours": 168,
+    "dry_run": true
   }'
 ```
 

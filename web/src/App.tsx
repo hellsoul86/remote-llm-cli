@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
   cancelRunJob,
+  discoverCodexSessions,
   enqueueRunJob,
   enqueueSyncJob,
   getRunJob,
@@ -271,6 +272,37 @@ export function App() {
     }
   }
 
+  async function onUseLatestSession() {
+    if (!token.trim()) {
+      setMessage("set access key first");
+      return;
+    }
+    if (runAllHosts || selectedHostIDs.length === 0) {
+      setMessage("disable all-hosts and select one host first");
+      return;
+    }
+    try {
+      const hostID = selectedHostIDs[0];
+      const { body } = await discoverCodexSessions(token, {
+        host_id: hostID,
+        limit_per_host: 1,
+        timeout_sec: 60
+      });
+      const target = body.targets?.[0];
+      const session = target?.sessions?.[0];
+      if (!session?.session_id) {
+        setMessage("no resumable codex session found on selected host");
+        return;
+      }
+      setRunMode("resume");
+      setRunResumeLast(false);
+      setRunSessionID(session.session_id);
+      setMessage(`selected latest session: ${session.session_id}`);
+    } catch (err) {
+      setMessage(String(err));
+    }
+  }
+
   async function onSyncHosts(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!token.trim()) {
@@ -475,6 +507,9 @@ export function App() {
                   className="wide"
                 />
               ) : null}
+              <button type="button" onClick={onUseLatestSession}>
+                Use Latest Session On Selected Host
+              </button>
             </>
           ) : null}
           <input
