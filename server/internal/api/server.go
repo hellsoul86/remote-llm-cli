@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /v1/hosts/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteHost)))
 	mux.Handle("POST /v1/hosts/{id}/probe", s.withAuth(http.HandlerFunc(s.handleProbeHost)))
 	mux.Handle("POST /v1/run", s.withAuth(http.HandlerFunc(s.handleRun)))
+	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
 	mux.Handle("GET /v1/runs", s.withAuth(http.HandlerFunc(s.handleListRuns)))
 	mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleListAudit)))
 
@@ -138,17 +141,35 @@ func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 type runRequest struct {
-	HostID      string                   `json:"host_id,omitempty"`
-	HostIDs     []string                 `json:"host_ids,omitempty"`
-	AllHosts    bool                     `json:"all_hosts,omitempty"`
-	Fanout      int                      `json:"fanout,omitempty"`
-	Runtime     string                   `json:"runtime"`
-	Prompt      string                   `json:"prompt"`
-	Workdir     string                   `json:"workdir,omitempty"`
-	ExtraArgs   []string                 `json:"extra_args,omitempty"`
-	TimeoutSec  int                      `json:"timeout_sec,omitempty"`
-	MaxOutputKB int                      `json:"max_output_kb,omitempty"`
-	Codex       *runtime.CodexRunOptions `json:"codex,omitempty"`
+	HostID         string                   `json:"host_id,omitempty"`
+	HostIDs        []string                 `json:"host_ids,omitempty"`
+	AllHosts       bool                     `json:"all_hosts,omitempty"`
+	Fanout         int                      `json:"fanout,omitempty"`
+	Runtime        string                   `json:"runtime"`
+	Prompt         string                   `json:"prompt"`
+	Workdir        string                   `json:"workdir,omitempty"`
+	ExtraArgs      []string                 `json:"extra_args,omitempty"`
+	TimeoutSec     int                      `json:"timeout_sec,omitempty"`
+	MaxOutputKB    int                      `json:"max_output_kb,omitempty"`
+	RetryCount     int                      `json:"retry_count,omitempty"`
+	RetryBackoffMS int                      `json:"retry_backoff_ms,omitempty"`
+	Codex          *runtime.CodexRunOptions `json:"codex,omitempty"`
+}
+
+type syncRequest struct {
+	HostID         string   `json:"host_id,omitempty"`
+	HostIDs        []string `json:"host_ids,omitempty"`
+	AllHosts       bool     `json:"all_hosts,omitempty"`
+	Fanout         int      `json:"fanout,omitempty"`
+	TimeoutSec     int      `json:"timeout_sec,omitempty"`
+	MaxOutputKB    int      `json:"max_output_kb,omitempty"`
+	RetryCount     int      `json:"retry_count,omitempty"`
+	RetryBackoffMS int      `json:"retry_backoff_ms,omitempty"`
+
+	Src      string   `json:"src"`
+	Dst      string   `json:"dst"`
+	Delete   bool     `json:"delete,omitempty"`
+	Excludes []string `json:"excludes,omitempty"`
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +178,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
 		return
 	}
-	hosts, err := s.resolveRunHosts(req)
+	hosts, err := s.resolveHosts(req.HostID, req.HostIDs, req.AllHosts)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -196,18 +217,28 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if fanout > len(hosts) {
 		fanout = len(hosts)
 	}
+	retryCount, retryBackoff := resolveRetryPolicy(req.RetryCount, req.RetryBackoffMS)
 	maxOutputBytes := resolveMaxOutputBytes(req.MaxOutputKB)
-	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) (executor.ExecResult, error) {
-		return executor.RunViaSSH(
-			ctx,
-			host,
-			spec,
-			resolveWorkdir(req.Workdir, host.Workspace),
-			executor.ExecOptions{
-				MaxStdoutBytes: maxOutputBytes,
-				MaxStderrBytes: maxOutputBytes,
-			},
-		)
+	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) runTargetResult {
+		res, runErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func() (executor.ExecResult, error) {
+			return executor.RunViaSSH(
+				ctx,
+				host,
+				spec,
+				resolveWorkdir(req.Workdir, host.Workspace),
+				executor.ExecOptions{
+					MaxStdoutBytes: maxOutputBytes,
+					MaxStderrBytes: maxOutputBytes,
+				},
+			)
+		})
+		return runTargetResult{
+			Host:     host,
+			Result:   res,
+			OK:       runErr == nil,
+			Error:    errText(runErr),
+			Attempts: attempts,
+		}
 	})
 	if req.Runtime == "codex" && req.Codex != nil && req.Codex.JSONOutput {
 		annotateCodexJSONSummary(targets)
@@ -229,13 +260,15 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"runtime": req.Runtime,
 		"summary": map[string]any{
-			"total":       len(targets),
-			"succeeded":   len(targets) - failed,
-			"failed":      failed,
-			"fanout":      fanout,
-			"duration_ms": finishedAt.Sub(startedAt).Milliseconds(),
-			"started_at":  startedAt,
-			"finished_at": finishedAt,
+			"total":            len(targets),
+			"succeeded":        len(targets) - failed,
+			"failed":           failed,
+			"fanout":           fanout,
+			"retry_count":      retryCount,
+			"retry_backoff_ms": retryBackoff.Milliseconds(),
+			"duration_ms":      finishedAt.Sub(startedAt).Milliseconds(),
+			"started_at":       startedAt,
+			"finished_at":      finishedAt,
 		},
 		"targets": targets,
 	}
@@ -258,6 +291,98 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, status, resp)
+}
+
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	var req syncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	if strings.TrimSpace(req.Src) == "" || strings.TrimSpace(req.Dst) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "src and dst are required"})
+		return
+	}
+	if _, err := os.Stat(req.Src); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("invalid src path: %v", err)})
+		return
+	}
+	hosts, err := s.resolveHosts(req.HostID, req.HostIDs, req.AllHosts)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	timeout := 1800 * time.Second
+	if req.TimeoutSec > 0 {
+		timeout = time.Duration(req.TimeoutSec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	startedAt := time.Now().UTC()
+	fanout := req.Fanout
+	if fanout <= 0 {
+		fanout = 3
+	}
+	if fanout > len(hosts) {
+		fanout = len(hosts)
+	}
+	retryCount, retryBackoff := resolveRetryPolicy(req.RetryCount, req.RetryBackoffMS)
+	maxOutputBytes := resolveMaxOutputBytes(req.MaxOutputKB)
+	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) runTargetResult {
+		dst := resolveSyncDst(req.Dst, host.Workspace)
+		res, syncErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func() (executor.ExecResult, error) {
+			return executor.RunRsyncViaSSH(
+				ctx,
+				host,
+				req.Src,
+				dst,
+				executor.SyncOptions{
+					Delete:   req.Delete,
+					Excludes: req.Excludes,
+				},
+				executor.ExecOptions{
+					MaxStdoutBytes: maxOutputBytes,
+					MaxStderrBytes: maxOutputBytes,
+				},
+			)
+		})
+		return runTargetResult{
+			Host:     host,
+			Result:   res,
+			OK:       syncErr == nil,
+			Error:    errText(syncErr),
+			Attempts: attempts,
+		}
+	})
+	finishedAt := time.Now().UTC()
+
+	failed := 0
+	for _, t := range targets {
+		if !t.OK {
+			failed++
+		}
+	}
+	status := http.StatusOK
+	if failed > 0 {
+		status = http.StatusBadGateway
+	}
+	writeJSON(w, status, map[string]any{
+		"operation": "sync",
+		"summary": map[string]any{
+			"total":            len(targets),
+			"succeeded":        len(targets) - failed,
+			"failed":           failed,
+			"fanout":           fanout,
+			"retry_count":      retryCount,
+			"retry_backoff_ms": retryBackoff.Milliseconds(),
+			"duration_ms":      finishedAt.Sub(startedAt).Milliseconds(),
+			"started_at":       startedAt,
+			"finished_at":      finishedAt,
+		},
+		"targets": targets,
+	})
 }
 
 func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
@@ -316,11 +441,12 @@ func errText(err error) string {
 }
 
 type runTargetResult struct {
-	Host   model.Host          `json:"host"`
-	Result executor.ExecResult `json:"result"`
-	OK     bool                `json:"ok"`
-	Error  string              `json:"error,omitempty"`
-	Codex  *codexJSONSummary   `json:"codex,omitempty"`
+	Host     model.Host          `json:"host"`
+	Result   executor.ExecResult `json:"result"`
+	OK       bool                `json:"ok"`
+	Error    string              `json:"error,omitempty"`
+	Attempts int                 `json:"attempts,omitempty"`
+	Codex    *codexJSONSummary   `json:"codex,omitempty"`
 }
 
 type codexJSONSummary struct {
@@ -335,7 +461,7 @@ func (s *Server) runFanout(
 	ctx context.Context,
 	hosts []model.Host,
 	fanout int,
-	run func(host model.Host) (executor.ExecResult, error),
+	run func(host model.Host) runTargetResult,
 ) []runTargetResult {
 	type task struct {
 		index int
@@ -350,12 +476,9 @@ func (s *Server) runFanout(
 	worker := func() {
 		defer wg.Done()
 		for job := range jobs {
-			res, err := run(job.host)
-			item := runTargetResult{
-				Host:   job.host,
-				Result: res,
-				OK:     err == nil,
-				Error:  errText(err),
+			item := run(job.host)
+			if item.Host.ID == "" {
+				item.Host = job.host
 			}
 			mu.Lock()
 			results[job.index] = item
@@ -397,9 +520,13 @@ loop:
 }
 
 func (s *Server) resolveRunHosts(req runRequest) ([]model.Host, error) {
-	hasSingle := strings.TrimSpace(req.HostID) != ""
-	hasMany := len(req.HostIDs) > 0
-	hasAll := req.AllHosts
+	return s.resolveHosts(req.HostID, req.HostIDs, req.AllHosts)
+}
+
+func (s *Server) resolveHosts(hostID string, hostIDs []string, allHosts bool) ([]model.Host, error) {
+	hasSingle := strings.TrimSpace(hostID) != ""
+	hasMany := len(hostIDs) > 0
+	hasAll := allHosts
 
 	selectorCount := 0
 	if hasSingle {
@@ -427,16 +554,16 @@ func (s *Server) resolveRunHosts(req runRequest) ([]model.Host, error) {
 	}
 
 	if hasSingle {
-		h, ok := s.store.GetHost(strings.TrimSpace(req.HostID))
+		h, ok := s.store.GetHost(strings.TrimSpace(hostID))
 		if !ok {
-			return nil, fmt.Errorf("host not found: %s", req.HostID)
+			return nil, fmt.Errorf("host not found: %s", hostID)
 		}
 		return []model.Host{h}, nil
 	}
 
 	seen := map[string]struct{}{}
-	out := make([]model.Host, 0, len(req.HostIDs))
-	for _, id := range req.HostIDs {
+	out := make([]model.Host, 0, len(hostIDs))
+	for _, id := range hostIDs {
 		key := strings.TrimSpace(id)
 		if key == "" {
 			continue
@@ -462,6 +589,70 @@ func resolveWorkdir(requestWorkdir string, hostWorkspace string) string {
 		return requestWorkdir
 	}
 	return strings.TrimSpace(hostWorkspace)
+}
+
+func resolveSyncDst(requestDst string, hostWorkspace string) string {
+	dst := strings.TrimSpace(requestDst)
+	if dst == "" {
+		return dst
+	}
+	if strings.HasPrefix(dst, "/") || strings.TrimSpace(hostWorkspace) == "" {
+		return dst
+	}
+	return path.Join(strings.TrimSpace(hostWorkspace), dst)
+}
+
+func resolveRetryPolicy(retryCount int, retryBackoffMS int) (int, time.Duration) {
+	const (
+		maxRetryCount    = 5
+		defaultBackoffMS = 1000
+		minBackoffMS     = 100
+		maxBackoffMS     = 30000
+	)
+	if retryCount < 0 {
+		retryCount = 0
+	}
+	if retryCount > maxRetryCount {
+		retryCount = maxRetryCount
+	}
+	if retryBackoffMS <= 0 {
+		retryBackoffMS = defaultBackoffMS
+	}
+	if retryBackoffMS < minBackoffMS {
+		retryBackoffMS = minBackoffMS
+	}
+	if retryBackoffMS > maxBackoffMS {
+		retryBackoffMS = maxBackoffMS
+	}
+	return retryCount, time.Duration(retryBackoffMS) * time.Millisecond
+}
+
+func executeWithRetry(
+	ctx context.Context,
+	retryCount int,
+	retryBackoff time.Duration,
+	run func() (executor.ExecResult, error),
+) (executor.ExecResult, error, int) {
+	attempts := 0
+	var lastRes executor.ExecResult
+	var lastErr error
+	for {
+		attempts++
+		res, err := run()
+		lastRes = res
+		lastErr = err
+		if err == nil {
+			return res, nil, attempts
+		}
+		if attempts > retryCount {
+			return lastRes, lastErr, attempts
+		}
+		select {
+		case <-ctx.Done():
+			return lastRes, fmt.Errorf("context canceled before retry: %w", ctx.Err()), attempts
+		case <-time.After(retryBackoff):
+		}
+	}
 }
 
 func bearerToken(v string) (string, bool) {
@@ -535,6 +726,8 @@ func inferAction(method string, path string) string {
 		return "host.probe"
 	case method == http.MethodPost && path == "/v1/run":
 		return "run.execute"
+	case method == http.MethodPost && path == "/v1/sync":
+		return "sync.execute"
 	case method == http.MethodGet && path == "/v1/runs":
 		return "run.list"
 	case method == http.MethodGet && path == "/v1/audit":

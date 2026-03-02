@@ -2,7 +2,9 @@ package tuiapp
 
 import (
 	"fmt"
+	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +37,11 @@ type runDoneMsg struct {
 	err    error
 }
 
+type shellDoneMsg struct {
+	host Host
+	err  error
+}
+
 type Model struct {
 	client  *APIClient
 	runtime string
@@ -57,6 +64,8 @@ type Model struct {
 	codexResumeLast       bool
 	codexSessionID        string
 	maxOutputKB           int
+	retryCount            int
+	retryBackoffMS        int
 
 	editingPrompt    bool
 	editingWorkdir   bool
@@ -88,6 +97,8 @@ func NewModel(client *APIClient, runtime string) Model {
 		codexJSONOutput: true,
 		codexResumeLast: true,
 		maxOutputKB:     256,
+		retryCount:      0,
+		retryBackoffMS:  1000,
 		message:         "loading hosts and history...",
 		loading:         true,
 		historyLoading:  true,
@@ -136,6 +147,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyLoading = true
 		m.message = fmt.Sprintf("run complete: http=%d total=%d failed=%d", msg.status, msg.resp.Summary.Total, msg.resp.Summary.Failed)
 		return m, m.loadHistoryCmd()
+	case shellDoneMsg:
+		if msg.err != nil {
+			m.message = "shell ended with error: " + msg.err.Error()
+		} else {
+			m.message = "shell closed: " + msg.host.Name
+		}
+		return m, nil
 	case tea.KeyMsg:
 		if m.editingPrompt {
 			return finishOrAppendText(msg, m.prompt, "prompt edit done", func(v string) Model {
@@ -245,6 +263,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.fanout--
 			}
 			return m, nil
+		case ".":
+			if m.retryCount < 5 {
+				m.retryCount++
+			}
+			return m, nil
+		case ",":
+			if m.retryCount > 0 {
+				m.retryCount--
+			}
+			return m, nil
+		case "n":
+			if m.retryBackoffMS < 30000 {
+				m.retryBackoffMS += 100
+			}
+			return m, nil
+		case "b":
+			if m.retryBackoffMS > 100 {
+				m.retryBackoffMS -= 100
+			}
+			return m, nil
 		case "]":
 			if m.maxOutputKB < 4096 {
 				m.maxOutputKB += 64
@@ -305,6 +343,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = "editing session id (Enter/Esc to finish)"
 			}
 			return m, nil
+		case "o":
+			if len(m.hosts) == 0 {
+				m.message = "no hosts available"
+				return m, nil
+			}
+			host := m.hosts[m.cursor]
+			m.message = "opening shell on " + host.Name + " ..."
+			return m, m.openShellCmd(host)
 		}
 	}
 	return m, nil
@@ -314,8 +360,11 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString("remote-llm-cli (TUI)\n")
 	b.WriteString("runtime=" + m.runtime + "  ")
-	b.WriteString(fmt.Sprintf("all_hosts=%t fanout=%d max_output_kb=%d pane=%s\n", m.allHosts, m.fanout, m.maxOutputKB, paneLabel(m.activePane)))
-	b.WriteString("keys: q quit | R reload all | r run | h history | Tab pane | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id\n")
+	b.WriteString(fmt.Sprintf(
+		"all_hosts=%t fanout=%d max_output_kb=%d retries=%d backoff_ms=%d pane=%s\n",
+		m.allHosts, m.fanout, m.maxOutputKB, m.retryCount, m.retryBackoffMS, paneLabel(m.activePane),
+	))
+	b.WriteString("keys: q quit | R reload all | r run | h history | Tab pane | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | ./, retries | n/b backoff | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id | o shell\n")
 
 	if m.loading {
 		b.WriteString("[loading hosts...]\n")
@@ -362,7 +411,7 @@ func (m Model) viewControlPane(b *strings.Builder) {
 	}
 
 	b.WriteString("\nCodex Options:\n")
-	b.WriteString(fmt.Sprintf("mode=%s model=%q sandbox=%q json=%t skip_git=%t ephemeral=%t resume_last=%t\n",
+	b.WriteString(fmt.Sprintf("mode=%s model=%q sandbox=%q json=%t skip_git=%t ephemeral=%t resume_last=%t retry=%d backoff_ms=%d\n",
 		m.codexMode,
 		strings.TrimSpace(m.codexModel),
 		sandboxDisplay(m.codexSandbox),
@@ -370,6 +419,8 @@ func (m Model) viewControlPane(b *strings.Builder) {
 		m.codexSkipGitRepoCheck,
 		m.codexEphemeral,
 		m.codexResumeLast,
+		m.retryCount,
+		m.retryBackoffMS,
 	))
 	if m.codexMode == "resume" && !m.codexResumeLast {
 		b.WriteString(fmt.Sprintf("session_id=%q\n", strings.TrimSpace(m.codexSessionID)))
@@ -398,12 +449,14 @@ func (m Model) viewControlPane(b *strings.Builder) {
 	}
 	if m.lastRun != nil {
 		b.WriteString("\nLast Run Summary:\n")
-		b.WriteString(fmt.Sprintf("http=%d total=%d ok=%d failed=%d fanout=%d duration=%dms\n",
+		b.WriteString(fmt.Sprintf("http=%d total=%d ok=%d failed=%d fanout=%d retry=%d/%dms duration=%dms\n",
 			m.lastStatus,
 			m.lastRun.Summary.Total,
 			m.lastRun.Summary.Succeeded,
 			m.lastRun.Summary.Failed,
 			m.lastRun.Summary.Fanout,
+			m.lastRun.Summary.RetryCount,
+			m.lastRun.Summary.RetryBackoffMS,
 			m.lastRun.Summary.DurationMS,
 		))
 		b.WriteString("Targets:\n")
@@ -416,11 +469,12 @@ func (m Model) viewControlPane(b *strings.Builder) {
 			if t.Codex != nil {
 				codexText = fmt.Sprintf(" codex_events=%d invalid_json=%d", t.Codex.EventCount, t.Codex.InvalidLines)
 			}
-			b.WriteString(fmt.Sprintf("- %s ok=%t exit=%d dur=%dms stdout=%dB stderr=%dB%s%s%s\n",
+			b.WriteString(fmt.Sprintf("- %s ok=%t exit=%d dur=%dms attempts=%d stdout=%dB stderr=%dB%s%s%s\n",
 				t.Host.Name,
 				t.OK,
 				t.Result.ExitCode,
 				t.Result.DurationMS,
+				maxInt(1, t.Attempts),
 				t.Result.StdoutBytes,
 				t.Result.StderrBytes,
 				truncText(t.Result.StdoutTruncated, " stdout_truncated"),
@@ -505,12 +559,14 @@ func (m Model) selectedHostIDs() []string {
 
 func (m Model) runCmd() tea.Cmd {
 	req := RunRequest{
-		Runtime:     m.runtime,
-		Prompt:      strings.TrimSpace(m.prompt),
-		AllHosts:    m.allHosts,
-		Fanout:      m.fanout,
-		Workdir:     strings.TrimSpace(m.workdir),
-		MaxOutputKB: m.maxOutputKB,
+		Runtime:        m.runtime,
+		Prompt:         strings.TrimSpace(m.prompt),
+		AllHosts:       m.allHosts,
+		Fanout:         m.fanout,
+		Workdir:        strings.TrimSpace(m.workdir),
+		MaxOutputKB:    m.maxOutputKB,
+		RetryCount:     m.retryCount,
+		RetryBackoffMS: m.retryBackoffMS,
 		Codex: &CodexRunOptions{
 			Mode:             m.codexMode,
 			SessionID:        strings.TrimSpace(m.codexSessionID),
@@ -529,6 +585,31 @@ func (m Model) runCmd() tea.Cmd {
 		status, resp, err := m.client.Run(req)
 		return runDoneMsg{status: status, resp: resp, err: err}
 	}
+}
+
+func (m Model) openShellCmd(host Host) tea.Cmd {
+	target := hostTarget(host)
+	if strings.TrimSpace(target) == "" {
+		return func() tea.Msg {
+			return shellDoneMsg{host: host, err: fmt.Errorf("invalid host target")}
+		}
+	}
+	sshArgs := []string{"-t", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}
+	if host.Port > 0 {
+		sshArgs = append(sshArgs, "-p", strconv.Itoa(host.Port))
+	}
+	if strings.TrimSpace(host.IdentityFile) != "" {
+		sshArgs = append(sshArgs, "-i", strings.TrimSpace(host.IdentityFile))
+	}
+	remoteShell := "exec ${SHELL:-bash} -l"
+	if strings.TrimSpace(host.Workspace) != "" {
+		remoteShell = "cd " + shellQuote(host.Workspace) + " && exec ${SHELL:-bash} -l"
+	}
+	sshArgs = append(sshArgs, target, "--", "sh", "-lc", remoteShell)
+	cmd := exec.Command("ssh", sshArgs...)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return shellDoneMsg{host: host, err: err}
+	})
 }
 
 func safeUser(v string) string {
@@ -577,6 +658,27 @@ func min(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func hostTarget(h Host) string {
+	if strings.TrimSpace(h.User) == "" {
+		return strings.TrimSpace(h.Host)
+	}
+	return strings.TrimSpace(h.User) + "@" + strings.TrimSpace(h.Host)
+}
+
+func shellQuote(v string) string {
+	if v == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(v, "'", "'\"'\"'") + "'"
 }
 
 func nextInList(values []string, current string) string {

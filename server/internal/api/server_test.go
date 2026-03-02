@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/hellsoul86/remote-llm-cli/server/internal/executor"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/runtime"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/store"
@@ -67,6 +70,7 @@ func TestInferAction(t *testing.T) {
 		{name: "host delete", method: http.MethodDelete, path: "/v1/hosts/h_1", want: "host.delete"},
 		{name: "host probe dynamic", method: http.MethodPost, path: "/v1/hosts/h_1/probe", want: "host.probe"},
 		{name: "run execute", method: http.MethodPost, path: "/v1/run", want: "run.execute"},
+		{name: "sync execute", method: http.MethodPost, path: "/v1/sync", want: "sync.execute"},
 		{name: "run list", method: http.MethodGet, path: "/v1/runs", want: "run.list"},
 		{name: "audit list", method: http.MethodGet, path: "/v1/audit", want: "audit.list"},
 		{name: "unknown", method: http.MethodPatch, path: "/v1/other", want: "request"},
@@ -78,6 +82,47 @@ func TestInferAction(t *testing.T) {
 				t.Fatalf("inferAction(%q,%q)=%q want=%q", tc.method, tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolveSyncDst(t *testing.T) {
+	got := resolveSyncDst("project", "/srv/work")
+	if got != "/srv/work/project" {
+		t.Fatalf("resolveSyncDst relative mismatch: got=%q", got)
+	}
+	got = resolveSyncDst("/tmp/data", "/srv/work")
+	if got != "/tmp/data" {
+		t.Fatalf("resolveSyncDst absolute mismatch: got=%q", got)
+	}
+}
+
+func TestResolveRetryPolicy(t *testing.T) {
+	retries, backoff := resolveRetryPolicy(10, 1)
+	if retries != 5 {
+		t.Fatalf("retries=%d want=5", retries)
+	}
+	if backoff != 100*time.Millisecond {
+		t.Fatalf("backoff=%s want=100ms", backoff)
+	}
+}
+
+func TestExecuteWithRetry(t *testing.T) {
+	calls := 0
+	res, err, attempts := executeWithRetry(context.Background(), 2, time.Millisecond, func() (executor.ExecResult, error) {
+		calls++
+		if calls < 3 {
+			return executor.ExecResult{ExitCode: 1}, context.DeadlineExceeded
+		}
+		return executor.ExecResult{ExitCode: 0}, nil
+	})
+	if err != nil {
+		t.Fatalf("executeWithRetry err=%v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts=%d want=3", attempts)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit=%d want=0", res.ExitCode)
 	}
 }
 
