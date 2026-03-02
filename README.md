@@ -339,8 +339,10 @@ This repo follows issue-first delivery:
 - PR template: `.github/pull_request_template.md`
 - Breakdown: [docs/issue-pr-breakdown.md](docs/issue-pr-breakdown.md)
 - Governance: [docs/repo-governance.md](docs/repo-governance.md)
+- Testing: [docs/testing.md](docs/testing.md)
 
 ## Docs
 
 - [requirements-v0](docs/requirements-v0.md)
 - [universal-agent-cli-v1](docs/universal-agent-cli-v1.md)
+- [testing](docs/testing.md)
