@@ -63,6 +63,14 @@ Default API URL is `http://localhost:8080`.
 - Template runtime adapter SDK (`run_args` placeholders + config loading)
 - Host CRUD API (JSON file persistence)
 - Host probe (`ssh` + codex diagnostics)
+- SSH transport hardening per host:
+  - `ssh_proxy_jump`
+  - `ssh_connect_timeout_sec`
+  - `ssh_server_alive_interval_sec`
+  - `ssh_server_alive_count_max`
+  - `ssh_host_key_policy` (`accept-new` / `strict` / `insecure-ignore`)
+- Structured transport error classification (`error_class`, `error_hint`) for run/sync/probe targets
+- Probe preflight checks for controller toolchain and SSH key accessibility
 - Multi-host fanout execution (`POST /v1/run` with `host_ids` or `all_hosts`)
 - Async run jobs with reconnectable polling (`POST /v1/jobs/run`, `GET /v1/jobs`, `GET /v1/jobs/{id}`)
 - Multi-host file sync over rsync (`POST /v1/sync`)
@@ -119,6 +127,34 @@ curl -X POST http://localhost:8080/v1/run \
     "prompt": "summarize git status and risks"
   }'
 ```
+
+## Host SSH hardening fields
+
+Host upsert accepts optional SSH transport settings:
+
+```json
+{
+  "name": "prod-a",
+  "host": "10.0.0.12",
+  "user": "ecs-user",
+  "identity_file": "/home/ecs-user/.ssh/id_ed25519",
+  "ssh_proxy_jump": "jump@bastion:22",
+  "ssh_connect_timeout_sec": 15,
+  "ssh_server_alive_interval_sec": 30,
+  "ssh_server_alive_count_max": 3,
+  "ssh_host_key_policy": "strict"
+}
+```
+
+`POST /v1/hosts/{id}/probe` also supports optional body:
+
+```json
+{
+  "preflight": true
+}
+```
+
+Probe response includes `preflight.checks[]`, and command failures include `error_class` + `error_hint`.
 
 ## Async Run Job API example
 

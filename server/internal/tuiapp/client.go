@@ -26,13 +26,18 @@ func NewAPIClient(baseURL string, token string) *APIClient {
 }
 
 type Host struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Host         string `json:"host"`
-	User         string `json:"user"`
-	Port         int    `json:"port"`
-	IdentityFile string `json:"identity_file,omitempty"`
-	Workspace    string `json:"workspace,omitempty"`
+	ID                        string `json:"id"`
+	Name                      string `json:"name"`
+	Host                      string `json:"host"`
+	User                      string `json:"user"`
+	Port                      int    `json:"port"`
+	IdentityFile              string `json:"identity_file,omitempty"`
+	Workspace                 string `json:"workspace,omitempty"`
+	SSHProxyJump              string `json:"ssh_proxy_jump,omitempty"`
+	SSHConnectTimeoutSec      int    `json:"ssh_connect_timeout_sec,omitempty"`
+	SSHServerAliveIntervalSec int    `json:"ssh_server_alive_interval_sec,omitempty"`
+	SSHServerAliveCountMax    int    `json:"ssh_server_alive_count_max,omitempty"`
+	SSHHostKeyPolicy          string `json:"ssh_host_key_policy,omitempty"`
 }
 
 type ListHostsResponse struct {
@@ -76,10 +81,12 @@ type RunTarget struct {
 		StdoutTruncated bool  `json:"stdout_truncated"`
 		StderrTruncated bool  `json:"stderr_truncated"`
 	} `json:"result"`
-	OK       bool   `json:"ok"`
-	Error    string `json:"error"`
-	Attempts int    `json:"attempts"`
-	Codex    *struct {
+	OK         bool   `json:"ok"`
+	Error      string `json:"error"`
+	ErrorClass string `json:"error_class,omitempty"`
+	ErrorHint  string `json:"error_hint,omitempty"`
+	Attempts   int    `json:"attempts"`
+	Codex      *struct {
 		JSONL         bool   `json:"jsonl"`
 		EventCount    int    `json:"event_count"`
 		InvalidLines  int    `json:"invalid_lines"`

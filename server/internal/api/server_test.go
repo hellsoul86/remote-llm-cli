@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -142,6 +143,53 @@ func TestExecuteWithRetry(t *testing.T) {
 	}
 	if res.ExitCode != 0 {
 		t.Fatalf("exit=%d want=0", res.ExitCode)
+	}
+}
+
+func TestNormalizeSSHHostKeyPolicy(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "", want: "", wantErr: false},
+		{in: "accept-new", want: "accept-new", wantErr: false},
+		{in: "strict", want: "strict", wantErr: false},
+		{in: "insecure-ignore", want: "insecure-ignore", wantErr: false},
+		{in: "bad-policy", wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := normalizeSSHHostKeyPolicy(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("normalizeSSHHostKeyPolicy(%q) should fail", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("normalizeSSHHostKeyPolicy(%q) error: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("normalizeSSHHostKeyPolicy(%q)=%q want=%q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestErrorDetailsFromClassifiedError(t *testing.T) {
+	msg, class, hint := errorDetails(&executor.ClassifiedError{
+		Class:   executor.ErrorClassAuth,
+		Hint:    "verify key",
+		Message: "permission denied",
+		Cause:   errors.New("exit"),
+	})
+	if msg != "permission denied" {
+		t.Fatalf("msg=%q want=permission denied", msg)
+	}
+	if class != "auth" {
+		t.Fatalf("class=%q want=auth", class)
+	}
+	if hint != "verify key" {
+		t.Fatalf("hint=%q want=verify key", hint)
 	}
 }
 

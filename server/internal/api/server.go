@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
@@ -135,7 +136,31 @@ func (s *Server) handleUpsertHost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name and host are required"})
 		return
 	}
-	h, err := s.store.UpsertHost(h)
+	h.Name = strings.TrimSpace(h.Name)
+	h.Host = strings.TrimSpace(h.Host)
+	h.User = strings.TrimSpace(h.User)
+	h.Workspace = strings.TrimSpace(h.Workspace)
+	h.IdentityFile = strings.TrimSpace(h.IdentityFile)
+	h.SSHProxyJump = strings.TrimSpace(h.SSHProxyJump)
+	policy, err := normalizeSSHHostKeyPolicy(h.SSHHostKeyPolicy)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	h.SSHHostKeyPolicy = policy
+	if h.SSHConnectTimeoutSec < 0 || h.SSHConnectTimeoutSec > 300 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_connect_timeout_sec must be in [0,300]"})
+		return
+	}
+	if h.SSHServerAliveIntervalSec < 0 || h.SSHServerAliveIntervalSec > 300 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_server_alive_interval_sec must be in [0,300]"})
+		return
+	}
+	if h.SSHServerAliveCountMax < 0 || h.SSHServerAliveCountMax > 10 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_server_alive_count_max must be in [0,10]"})
+		return
+	}
+	h, err = s.store.UpsertHost(h)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -255,11 +280,13 @@ type codexSessionInfo struct {
 }
 
 type codexSessionTarget struct {
-	Host     model.Host          `json:"host"`
-	Result   executor.ExecResult `json:"result"`
-	OK       bool                `json:"ok"`
-	Error    string              `json:"error,omitempty"`
-	Sessions []codexSessionInfo  `json:"sessions,omitempty"`
+	Host       model.Host          `json:"host"`
+	Result     executor.ExecResult `json:"result"`
+	OK         bool                `json:"ok"`
+	Error      string              `json:"error,omitempty"`
+	ErrorClass string              `json:"error_class,omitempty"`
+	ErrorHint  string              `json:"error_hint,omitempty"`
+	Sessions   []codexSessionInfo  `json:"sessions,omitempty"`
 }
 
 type codexCleanupTarget struct {
@@ -267,6 +294,8 @@ type codexCleanupTarget struct {
 	Result     executor.ExecResult `json:"result"`
 	OK         bool                `json:"ok"`
 	Error      string              `json:"error,omitempty"`
+	ErrorClass string              `json:"error_class,omitempty"`
+	ErrorHint  string              `json:"error_hint,omitempty"`
 	DryRun     bool                `json:"dry_run"`
 	PathCount  int                 `json:"path_count"`
 	Paths      []string            `json:"paths,omitempty"`
@@ -530,12 +559,15 @@ func (s *Server) executePreparedRun(parentCtx context.Context, prepared prepared
 				},
 			)
 		})
+		msg, class, hint := errorDetails(runErr)
 		return runTargetResult{
-			Host:     host,
-			Result:   res,
-			OK:       runErr == nil,
-			Error:    errText(runErr),
-			Attempts: attempts,
+			Host:       host,
+			Result:     res,
+			OK:         runErr == nil,
+			Error:      msg,
+			ErrorClass: class,
+			ErrorHint:  hint,
+			Attempts:   attempts,
 		}
 	})
 	if req.Runtime == "codex" && req.Codex != nil && req.Codex.JSONOutput {
@@ -929,12 +961,15 @@ func (s *Server) executePreparedSync(parentCtx context.Context, prepared prepare
 				},
 			)
 		})
+		msg, class, hint := errorDetails(syncErr)
 		return runTargetResult{
-			Host:     host,
-			Result:   res,
-			OK:       syncErr == nil,
-			Error:    errText(syncErr),
-			Attempts: attempts,
+			Host:       host,
+			Result:     res,
+			OK:         syncErr == nil,
+			Error:      msg,
+			ErrorClass: class,
+			ErrorHint:  hint,
+			Attempts:   attempts,
 		}
 	})
 	finishedAt := time.Now().UTC()
@@ -1006,11 +1041,14 @@ func (s *Server) handleDiscoverCodexSessions(w http.ResponseWriter, r *http.Requ
 				MaxStderrBytes: 256 * 1024,
 			},
 		)
+		msg, class, hint := errorDetails(runErr)
 		return runTargetResult{
-			Host:   host,
-			Result: res,
-			OK:     runErr == nil,
-			Error:  errText(runErr),
+			Host:       host,
+			Result:     res,
+			OK:         runErr == nil,
+			Error:      msg,
+			ErrorClass: class,
+			ErrorHint:  hint,
 		}
 	})
 	finishedAt := time.Now().UTC()
@@ -1018,10 +1056,12 @@ func (s *Server) handleDiscoverCodexSessions(w http.ResponseWriter, r *http.Requ
 	out := make([]codexSessionTarget, 0, len(targets))
 	for _, t := range targets {
 		item := codexSessionTarget{
-			Host:   t.Host,
-			Result: t.Result,
-			OK:     t.OK,
-			Error:  t.Error,
+			Host:       t.Host,
+			Result:     t.Result,
+			OK:         t.OK,
+			Error:      t.Error,
+			ErrorClass: t.ErrorClass,
+			ErrorHint:  t.ErrorHint,
 		}
 		if t.OK {
 			item.Sessions = parseCodexSessionDiscoverOutput(t.Result.Stdout)
@@ -1087,11 +1127,14 @@ func (s *Server) handleCleanupCodexSessions(w http.ResponseWriter, r *http.Reque
 				MaxStderrBytes: 256 * 1024,
 			},
 		)
+		msg, class, hint := errorDetails(runErr)
 		return runTargetResult{
-			Host:   host,
-			Result: res,
-			OK:     runErr == nil,
-			Error:  errText(runErr),
+			Host:       host,
+			Result:     res,
+			OK:         runErr == nil,
+			Error:      msg,
+			ErrorClass: class,
+			ErrorHint:  hint,
 		}
 	})
 	finishedAt := time.Now().UTC()
@@ -1104,6 +1147,8 @@ func (s *Server) handleCleanupCodexSessions(w http.ResponseWriter, r *http.Reque
 			Result:     t.Result,
 			OK:         t.OK,
 			Error:      t.Error,
+			ErrorClass: t.ErrorClass,
+			ErrorHint:  t.ErrorHint,
 			DryRun:     req.DryRun,
 			Paths:      capStringList(paths, 200),
 			PathCount:  len(paths),
@@ -1238,6 +1283,10 @@ func capStringList(src []string, max int) []string {
 	return src[:max]
 }
 
+type probeRequest struct {
+	Preflight bool `json:"preflight"`
+}
+
 func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	h, ok := s.store.GetHost(id)
@@ -1245,6 +1294,16 @@ func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "host not found"})
 		return
 	}
+
+	req := probeRequest{Preflight: true}
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+			return
+		}
+	}
+
 	probeOutputOpts := executor.ExecOptions{MaxStdoutBytes: 64 * 1024, MaxStderrBytes: 64 * 1024}
 	sshSpec := runtime.CommandSpec{Program: "echo", Args: []string{"ssh-ok"}}
 	sshRes, sshErr := executor.RunViaSSH(r.Context(), h, sshSpec, "", probeOutputOpts)
@@ -1255,51 +1314,60 @@ func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
 	codexLoginSpec := runtime.CommandSpec{Program: "codex", Args: []string{"login", "status"}}
 	codexLoginRes, codexLoginErr := executor.RunViaSSH(r.Context(), h, codexLoginSpec, resolveWorkdir("", h.Workspace), probeOutputOpts)
 
+	var preflight executor.SSHPreflightReport
+	if req.Preflight {
+		preflight = executor.RunSSHPreflight(h)
+	}
 	status := http.StatusOK
-	if sshErr != nil || codexVersionErr != nil {
+	if sshErr != nil || codexVersionErr != nil || (req.Preflight && !preflight.OK) {
 		status = http.StatusBadGateway
 	}
-	writeJSON(w, status, map[string]any{
-		"host": h,
-		"ssh": map[string]any{
-			"ok":     sshErr == nil,
-			"error":  errAny(sshErr),
-			"result": sshRes,
-		},
-		"codex": map[string]any{
-			"ok":     codexVersionErr == nil,
-			"error":  errAny(codexVersionErr),
-			"result": codexVersionRes,
-		},
-		"codex_login": map[string]any{
-			"ok":     codexLoginErr == nil,
-			"error":  errAny(codexLoginErr),
-			"result": codexLoginRes,
-		},
-	})
-}
-
-func errAny(err error) any {
-	if err == nil {
-		return nil
+	resp := map[string]any{
+		"host":        h,
+		"ssh":         probeTargetPayload(sshErr, sshRes),
+		"codex":       probeTargetPayload(codexVersionErr, codexVersionRes),
+		"codex_login": probeTargetPayload(codexLoginErr, codexLoginRes),
 	}
-	return err.Error()
+	if req.Preflight {
+		resp["preflight"] = preflight
+	}
+	writeJSON(w, status, resp)
 }
 
-func errText(err error) string {
+func errorText(err error) string {
 	if err == nil {
 		return ""
 	}
 	return err.Error()
 }
 
+func errorDetails(err error) (msg string, class string, hint string) {
+	if err == nil {
+		return "", "", ""
+	}
+	return errorText(err), strings.TrimSpace(executor.ErrorClassOf(err)), strings.TrimSpace(executor.ErrorHintOf(err))
+}
+
+func probeTargetPayload(err error, res executor.ExecResult) map[string]any {
+	msg, class, hint := errorDetails(err)
+	return map[string]any{
+		"ok":          err == nil,
+		"error":       msg,
+		"error_class": class,
+		"error_hint":  hint,
+		"result":      res,
+	}
+}
+
 type runTargetResult struct {
-	Host     model.Host          `json:"host"`
-	Result   executor.ExecResult `json:"result"`
-	OK       bool                `json:"ok"`
-	Error    string              `json:"error,omitempty"`
-	Attempts int                 `json:"attempts,omitempty"`
-	Codex    *codexJSONSummary   `json:"codex,omitempty"`
+	Host       model.Host          `json:"host"`
+	Result     executor.ExecResult `json:"result"`
+	OK         bool                `json:"ok"`
+	Error      string              `json:"error,omitempty"`
+	ErrorClass string              `json:"error_class,omitempty"`
+	ErrorHint  string              `json:"error_hint,omitempty"`
+	Attempts   int                 `json:"attempts,omitempty"`
+	Codex      *codexJSONSummary   `json:"codex,omitempty"`
 }
 
 type codexJSONSummary struct {
@@ -1364,9 +1432,11 @@ loop:
 			continue
 		}
 		results[i] = runTargetResult{
-			Host:  hosts[i],
-			OK:    false,
-			Error: "not executed (context canceled before scheduling)",
+			Host:       hosts[i],
+			OK:         false,
+			Error:      "not executed (context canceled before scheduling)",
+			ErrorClass: string(executor.ErrorClassNetwork),
+			ErrorHint:  "verify fanout/timeout settings and retry",
 		}
 	}
 	return results
@@ -1453,6 +1523,19 @@ func resolveSyncDst(requestDst string, hostWorkspace string) string {
 		return dst
 	}
 	return path.Join(strings.TrimSpace(hostWorkspace), dst)
+}
+
+func normalizeSSHHostKeyPolicy(v string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(v))
+	if trimmed == "" {
+		return "", nil
+	}
+	switch trimmed {
+	case executor.HostKeyPolicyAcceptNew, executor.HostKeyPolicyStrict, executor.HostKeyPolicyInsecureSkip:
+		return trimmed, nil
+	default:
+		return "", fmt.Errorf("invalid ssh_host_key_policy: %q", v)
+	}
 }
 
 func resolveRetryPolicy(retryCount int, retryBackoffMS int) (int, time.Duration) {
@@ -1626,6 +1709,7 @@ func toRunTargetSummaries(targets []runTargetResult) []model.RunTargetSummary {
 			ExitCode:   t.Result.ExitCode,
 			DurationMS: t.Result.DurationMS,
 			Error:      strings.TrimSpace(t.Error),
+			ErrorClass: strings.TrimSpace(t.ErrorClass),
 		})
 	}
 	return out

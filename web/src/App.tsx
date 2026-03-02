@@ -169,12 +169,48 @@ export function App() {
     const host = String(form.get("host") ?? "").trim();
     const user = String(form.get("user") ?? "").trim();
     const workspace = String(form.get("workspace") ?? "").trim();
+    const identityFile = String(form.get("identity_file") ?? "").trim();
+    const sshProxyJump = String(form.get("ssh_proxy_jump") ?? "").trim();
+    const sshHostKeyPolicyRaw = String(form.get("ssh_host_key_policy") ?? "").trim();
+    const sshConnectTimeoutRaw = String(form.get("ssh_connect_timeout_sec") ?? "").trim();
+    const sshAliveIntervalRaw = String(form.get("ssh_server_alive_interval_sec") ?? "").trim();
+    const sshAliveCountRaw = String(form.get("ssh_server_alive_count_max") ?? "").trim();
     if (!name || !host) {
       setMessage("name and host are required");
       return;
     }
+    const parseOptionalInt = (raw: string, field: string, min: number, max: number): number | undefined => {
+      if (!raw) return undefined;
+      const v = Number.parseInt(raw, 10);
+      if (!Number.isFinite(v) || v < min || v > max) {
+        throw new Error(`${field} must be an integer in [${min}, ${max}]`);
+      }
+      return v;
+    };
     try {
-      await upsertHost(token, { name, host, user, workspace });
+      const sshConnectTimeoutSec = parseOptionalInt(sshConnectTimeoutRaw, "ssh_connect_timeout_sec", 1, 300);
+      const sshServerAliveIntervalSec = parseOptionalInt(sshAliveIntervalRaw, "ssh_server_alive_interval_sec", 1, 300);
+      const sshServerAliveCountMax = parseOptionalInt(sshAliveCountRaw, "ssh_server_alive_count_max", 1, 10);
+      let sshHostKeyPolicy: "accept-new" | "strict" | "insecure-ignore" | undefined = undefined;
+      if (sshHostKeyPolicyRaw) {
+        if (sshHostKeyPolicyRaw === "accept-new" || sshHostKeyPolicyRaw === "strict" || sshHostKeyPolicyRaw === "insecure-ignore") {
+          sshHostKeyPolicy = sshHostKeyPolicyRaw;
+        } else {
+          throw new Error("ssh_host_key_policy must be one of: accept-new, strict, insecure-ignore");
+        }
+      }
+      await upsertHost(token, {
+        name,
+        host,
+        user,
+        workspace,
+        identity_file: identityFile || undefined,
+        ssh_proxy_jump: sshProxyJump || undefined,
+        ssh_host_key_policy: sshHostKeyPolicy,
+        ssh_connect_timeout_sec: sshConnectTimeoutSec,
+        ssh_server_alive_interval_sec: sshServerAliveIntervalSec,
+        ssh_server_alive_count_max: sshServerAliveCountMax
+      });
       setMessage(`host ${name} saved`);
       await refresh();
       e.currentTarget.reset();
@@ -436,6 +472,19 @@ export function App() {
           <input name="host" placeholder="hostname or ip" required />
           <input name="user" placeholder="user" />
           <input name="workspace" placeholder="/home/user/workspace" />
+          <input name="identity_file" placeholder="identity file (optional), e.g. ~/.ssh/id_ed25519" />
+          <input name="ssh_proxy_jump" placeholder="ssh proxy jump (optional), e.g. jump@bastion:22" />
+          <label>
+            host key policy
+            <select name="ssh_host_key_policy" defaultValue="accept-new">
+              <option value="accept-new">accept-new</option>
+              <option value="strict">strict</option>
+              <option value="insecure-ignore">insecure-ignore</option>
+            </select>
+          </label>
+          <input name="ssh_connect_timeout_sec" placeholder="ssh connect timeout sec (1-300)" />
+          <input name="ssh_server_alive_interval_sec" placeholder="ssh keepalive interval sec (1-300)" />
+          <input name="ssh_server_alive_count_max" placeholder="ssh keepalive count max (1-10)" />
           <button type="submit">Save Host</button>
         </form>
       </section>
@@ -448,6 +497,8 @@ export function App() {
               <strong>{h.name}</strong> {h.user ? `${h.user}@` : ""}
               {h.host}:{h.port}
               {h.workspace ? ` (${h.workspace})` : ""}
+              {h.ssh_proxy_jump ? ` proxy_jump=${h.ssh_proxy_jump}` : ""}
+              {h.ssh_host_key_policy ? ` host_key=${h.ssh_host_key_policy}` : ""}
             </li>
           ))}
         </ul>
@@ -586,6 +637,8 @@ export function App() {
                   {t.result.stdout_truncated ? " stdout_truncated=true" : ""}
                   {t.result.stderr_truncated ? " stderr_truncated=true" : ""}
                   {t.codex ? ` codex_events=${t.codex.event_count} invalid_json_lines=${t.codex.invalid_lines ?? 0}` : ""}
+                  {t.error_class ? ` error_class=${t.error_class}` : ""}
+                  {t.error_hint ? ` hint=${t.error_hint}` : ""}
                   {t.error ? ` error=${t.error}` : ""}
                 </li>
               ))}
@@ -711,6 +764,8 @@ export function App() {
                   B attempts={t.attempts ?? 1}
                   {t.result.stdout_truncated ? " stdout_truncated=true" : ""}
                   {t.result.stderr_truncated ? " stderr_truncated=true" : ""}
+                  {t.error_class ? ` error_class=${t.error_class}` : ""}
+                  {t.error_hint ? ` hint=${t.error_hint}` : ""}
                   {t.error ? ` error=${t.error}` : ""}
                 </li>
               ))}
