@@ -163,6 +163,7 @@ This repo follows issue-first delivery:
 - Issue templates: `.github/ISSUE_TEMPLATE/`
 - PR template: `.github/pull_request_template.md`
 - Breakdown: [docs/issue-pr-breakdown.md](docs/issue-pr-breakdown.md)
+- Governance: [docs/repo-governance.md](docs/repo-governance.md)
 
 ## Docs
 

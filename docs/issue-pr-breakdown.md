@@ -18,11 +18,25 @@ This project follows an issue-first workflow. Every PR should map to one issue.
 4. PR-004 -> ISSUE-004 #5 (runtime adapter extension points)
 5. PR-005 -> ISSUE-005 #7 (codex deep runtime support)
 
+## Branch Targets
+
+- `feat/*`, `fix/*`, `chore/*` -> `staging`
+- release PR: `staging` -> `main`
+- `hotfix/*` -> `main` (then back-merge to `staging`)
+
 ## Status
 
 - PR-001/PR-002/PR-003: implemented in `feat/issue-1-2-3-mvp-controller` and pending review/merge.
 - PR-004: in progress on `feat/issue-5-runtime-adapter-sdk`.
 - PR-005: in progress on `feat/issue-7-codex-runtime-deepening`.
+
+Current merge order:
+
+1. [PR #4](https://github.com/hellsoul86/remote-llm-cli/pull/4) `feat/issue-1-2-3-mvp-controller` -> `staging`
+2. [PR #6](https://github.com/hellsoul86/remote-llm-cli/pull/6) `feat/issue-5-runtime-adapter-sdk` -> `feat/issue-1-2-3-mvp-controller`
+3. [PR #8](https://github.com/hellsoul86/remote-llm-cli/pull/8) `feat/issue-7-codex-runtime-deepening` -> `feat/issue-5-runtime-adapter-sdk`
+4. [PR #10](https://github.com/hellsoul86/remote-llm-cli/pull/10) `feat/issue-9-branch-governance` -> `feat/issue-7-codex-runtime-deepening`
+5. release PR: `staging` -> `main`
 
 ## Branch Naming
 
