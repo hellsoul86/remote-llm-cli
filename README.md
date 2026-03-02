@@ -56,11 +56,15 @@ Default API URL is `http://localhost:8080`.
 
 - Access-key auth (`Bearer`)
 - Runtime registry abstraction
-- `codex` runtime adapter (`probe` + remote `codex exec`)
+- `codex` runtime adapter:
+  - `exec` / `exec resume` / `exec review` modes
+  - advanced flags (`model`, `sandbox`, `json`, `ephemeral`, `skip-git-repo-check`, etc.)
+  - probe diagnostics (`codex --version`, `codex login status`)
 - Template runtime adapter SDK (`run_args` placeholders + config loading)
 - Host CRUD API (JSON file persistence)
-- Host probe (`ssh` + `codex --version`)
+- Host probe (`ssh` + codex diagnostics)
 - Multi-host fanout execution (`POST /v1/run` with `host_ids` or `all_hosts`)
+- Safe output capture limit (`max_output_kb`, includes truncation metadata in response)
 - Run history API (`GET /v1/runs`)
 - Audit event API (`GET /v1/audit`)
 - Go TUI CLI for terminal-first operations (`server/cmd/remote-llm-cli`)
@@ -78,6 +82,15 @@ Default API URL is `http://localhost:8080`.
 - `p`: edit prompt
 - `w`: edit workdir override
 - `+` / `-`: adjust fanout
+- `[` / `]`: decrease/increase max output KB
+- `t`: cycle codex mode (`exec`/`resume`/`review`)
+- `m`: edit codex model
+- `x`: cycle codex sandbox
+- `y`: toggle `codex --json`
+- `g`: toggle `--skip-git-repo-check`
+- `e`: toggle `--ephemeral`
+- `l`: toggle resume `--last`
+- `s`: edit resume session id (when `resume_last=false`)
 
 ## Fanout API example
 
@@ -90,6 +103,29 @@ curl -X POST http://localhost:8080/v1/run \
     "all_hosts": true,
     "fanout": 3,
     "prompt": "summarize git status and risks"
+  }'
+```
+
+## Codex advanced run example
+
+```bash
+curl -X POST http://localhost:8080/v1/run \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "runtime": "codex",
+    "all_hosts": true,
+    "fanout": 2,
+    "prompt": "continue implementing tests",
+    "max_output_kb": 512,
+    "codex": {
+      "mode": "resume",
+      "resume_last": true,
+      "model": "gpt-5",
+      "json_output": true,
+      "ephemeral": false,
+      "skip_git_repo_check": true
+    }
   }'
 ```
 

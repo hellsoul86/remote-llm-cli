@@ -78,7 +78,9 @@ v1 only implements `codex` adapter with:
    - check `codex --version`
 2. `exec`
    - run `codex exec ...` remotely
-3. result capture
+3. `resume/review`
+   - support `codex exec resume ...` and `codex exec review ...`
+4. result capture
    - stdout/stderr
    - exit code
 

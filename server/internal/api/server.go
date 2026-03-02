@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -137,15 +138,17 @@ func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 type runRequest struct {
-	HostID     string   `json:"host_id,omitempty"`
-	HostIDs    []string `json:"host_ids,omitempty"`
-	AllHosts   bool     `json:"all_hosts,omitempty"`
-	Fanout     int      `json:"fanout,omitempty"`
-	Runtime    string   `json:"runtime"`
-	Prompt     string   `json:"prompt"`
-	Workdir    string   `json:"workdir,omitempty"`
-	ExtraArgs  []string `json:"extra_args,omitempty"`
-	TimeoutSec int      `json:"timeout_sec,omitempty"`
+	HostID      string                   `json:"host_id,omitempty"`
+	HostIDs     []string                 `json:"host_ids,omitempty"`
+	AllHosts    bool                     `json:"all_hosts,omitempty"`
+	Fanout      int                      `json:"fanout,omitempty"`
+	Runtime     string                   `json:"runtime"`
+	Prompt      string                   `json:"prompt"`
+	Workdir     string                   `json:"workdir,omitempty"`
+	ExtraArgs   []string                 `json:"extra_args,omitempty"`
+	TimeoutSec  int                      `json:"timeout_sec,omitempty"`
+	MaxOutputKB int                      `json:"max_output_kb,omitempty"`
+	Codex       *runtime.CodexRunOptions `json:"codex,omitempty"`
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +175,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Prompt:    req.Prompt,
 		Workdir:   req.Workdir,
 		ExtraArgs: req.ExtraArgs,
+		Codex:     req.Codex,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -192,9 +196,22 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if fanout > len(hosts) {
 		fanout = len(hosts)
 	}
+	maxOutputBytes := resolveMaxOutputBytes(req.MaxOutputKB)
 	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) (executor.ExecResult, error) {
-		return executor.RunViaSSH(ctx, host, spec, resolveWorkdir(req.Workdir, host.Workspace))
+		return executor.RunViaSSH(
+			ctx,
+			host,
+			spec,
+			resolveWorkdir(req.Workdir, host.Workspace),
+			executor.ExecOptions{
+				MaxStdoutBytes: maxOutputBytes,
+				MaxStderrBytes: maxOutputBytes,
+			},
+		)
 	})
+	if req.Runtime == "codex" && req.Codex != nil && req.Codex.JSONOutput {
+		annotateCodexJSONSummary(targets)
+	}
 	finishedAt := time.Now().UTC()
 
 	failed := 0
@@ -250,15 +267,18 @@ func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "host not found"})
 		return
 	}
-	probeSpec := runtime.CommandSpec{Program: "echo", Args: []string{"ssh-ok"}}
-	sshRes, sshErr := executor.RunViaSSH(r.Context(), h, probeSpec, "")
+	probeOutputOpts := executor.ExecOptions{MaxStdoutBytes: 64 * 1024, MaxStderrBytes: 64 * 1024}
+	sshSpec := runtime.CommandSpec{Program: "echo", Args: []string{"ssh-ok"}}
+	sshRes, sshErr := executor.RunViaSSH(r.Context(), h, sshSpec, "", probeOutputOpts)
 
-	codexAdapter, _ := s.runtimes.Get("codex")
-	codexSpec := codexAdapter.BuildProbeCommand()
-	codexRes, codexErr := executor.RunViaSSH(r.Context(), h, codexSpec, resolveWorkdir("", h.Workspace))
+	codexVersionSpec := runtime.CommandSpec{Program: "codex", Args: []string{"--version"}}
+	codexVersionRes, codexVersionErr := executor.RunViaSSH(r.Context(), h, codexVersionSpec, resolveWorkdir("", h.Workspace), probeOutputOpts)
+
+	codexLoginSpec := runtime.CommandSpec{Program: "codex", Args: []string{"login", "status"}}
+	codexLoginRes, codexLoginErr := executor.RunViaSSH(r.Context(), h, codexLoginSpec, resolveWorkdir("", h.Workspace), probeOutputOpts)
 
 	status := http.StatusOK
-	if sshErr != nil || codexErr != nil {
+	if sshErr != nil || codexVersionErr != nil {
 		status = http.StatusBadGateway
 	}
 	writeJSON(w, status, map[string]any{
@@ -269,9 +289,14 @@ func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
 			"result": sshRes,
 		},
 		"codex": map[string]any{
-			"ok":     codexErr == nil,
-			"error":  errAny(codexErr),
-			"result": codexRes,
+			"ok":     codexVersionErr == nil,
+			"error":  errAny(codexVersionErr),
+			"result": codexVersionRes,
+		},
+		"codex_login": map[string]any{
+			"ok":     codexLoginErr == nil,
+			"error":  errAny(codexLoginErr),
+			"result": codexLoginRes,
 		},
 	})
 }
@@ -295,6 +320,15 @@ type runTargetResult struct {
 	Result executor.ExecResult `json:"result"`
 	OK     bool                `json:"ok"`
 	Error  string              `json:"error,omitempty"`
+	Codex  *codexJSONSummary   `json:"codex,omitempty"`
+}
+
+type codexJSONSummary struct {
+	JSONL         bool   `json:"jsonl"`
+	EventCount    int    `json:"event_count"`
+	InvalidLines  int    `json:"invalid_lines,omitempty"`
+	LastEventType string `json:"last_event_type,omitempty"`
+	ParseError    string `json:"parse_error,omitempty"`
 }
 
 func (s *Server) runFanout(
@@ -558,6 +592,55 @@ func parseLimit(r *http.Request, fallback int, max int) int {
 		return max
 	}
 	return v
+}
+
+func resolveMaxOutputBytes(maxOutputKB int) int {
+	const (
+		defaultKB = 256
+		maxKB     = 4096
+	)
+	if maxOutputKB <= 0 {
+		return defaultKB * 1024
+	}
+	if maxOutputKB > maxKB {
+		maxOutputKB = maxKB
+	}
+	return maxOutputKB * 1024
+}
+
+func annotateCodexJSONSummary(targets []runTargetResult) {
+	for i := range targets {
+		summary := parseCodexJSONSummary(targets[i].Result.Stdout)
+		targets[i].Codex = &summary
+	}
+}
+
+func parseCodexJSONSummary(stdout string) codexJSONSummary {
+	out := codexJSONSummary{JSONL: true}
+	scanner := bufio.NewScanner(strings.NewReader(stdout))
+	scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			out.InvalidLines++
+			if out.ParseError == "" {
+				out.ParseError = err.Error()
+			}
+			continue
+		}
+		out.EventCount++
+		if typ, ok := event["type"].(string); ok {
+			out.LastEventType = typ
+		}
+	}
+	if err := scanner.Err(); err != nil && out.ParseError == "" {
+		out.ParseError = err.Error()
+	}
+	return out
 }
 
 func ValidateConfig(dataPath string) error {
