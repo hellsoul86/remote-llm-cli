@@ -35,7 +35,8 @@ Current merge order:
 1. [PR #4](https://github.com/hellsoul86/remote-llm-cli/pull/4) `feat/issue-1-2-3-mvp-controller` -> `staging`
 2. [PR #6](https://github.com/hellsoul86/remote-llm-cli/pull/6) `feat/issue-5-runtime-adapter-sdk` -> `feat/issue-1-2-3-mvp-controller`
 3. [PR #8](https://github.com/hellsoul86/remote-llm-cli/pull/8) `feat/issue-7-codex-runtime-deepening` -> `feat/issue-5-runtime-adapter-sdk`
-4. release PR: `staging` -> `main`
+4. [PR #10](https://github.com/hellsoul86/remote-llm-cli/pull/10) `feat/issue-9-branch-governance` -> `feat/issue-7-codex-runtime-deepening`
+5. release PR: `staging` -> `main`
 
 ## Branch Naming
 

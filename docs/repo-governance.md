@@ -45,7 +45,8 @@ Workflows:
 1. `#4` `feat/issue-1-2-3-mvp-controller` -> `staging`
 2. `#6` `feat/issue-5-runtime-adapter-sdk` -> `feat/issue-1-2-3-mvp-controller`
 3. `#8` `feat/issue-7-codex-runtime-deepening` -> `feat/issue-5-runtime-adapter-sdk`
+4. `#10` `feat/issue-9-branch-governance` -> `feat/issue-7-codex-runtime-deepening`
 
-After `#4/#6/#8` are merged sequentially, open release PR:
+After `#4/#6/#8/#10` are merged sequentially, open release PR:
 
 - `staging` -> `main`
