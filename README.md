@@ -5,6 +5,7 @@ Universal remote controller for agent CLIs over SSH.
 Current runtime support:
 
 - `codex` (implemented)
+- `claudecode` (built-in v2 adapter baseline)
 - template-based custom runtimes via JSON config (adapter SDK)
 
 ## Stack
@@ -56,11 +57,13 @@ Default API URL is `http://localhost:8080`.
 
 - Access-key auth (`Bearer`)
 - Runtime registry abstraction
+- Runtime adapter contract v2 metadata (`version`, `prompt_required`, `supports_workdir`, `supports_extra_args`)
 - `codex` runtime adapter:
   - `exec` / `exec resume` / `exec review` modes
   - advanced flags (`model`, `sandbox`, `json`, `ephemeral`, `skip-git-repo-check`, etc.)
   - probe diagnostics (`codex --version`, `codex login status`)
 - Template runtime adapter SDK (`run_args` placeholders + config loading)
+- Built-in `claudecode` adapter path through the same controller pipeline
 - Host CRUD API (JSON file persistence)
 - Host probe (`ssh` + codex diagnostics)
 - SSH transport hardening per host:
@@ -323,6 +326,13 @@ Supported placeholders in `run_args`:
 - `{{workdir}}`: workdir value from run request (errors if empty)
 - `{{extra_args}}`: expands `extra_args` list; must be standalone token
 
+Built-in adapters expose contract metadata via `GET /v1/runtimes`:
+
+- `contract.version` (currently `v2`)
+- `contract.prompt_required`
+- `contract.supports_workdir`
+- `contract.supports_extra_args`
+
 Validate runtime config:
 
 ```bash
@@ -346,3 +356,4 @@ This repo follows issue-first delivery:
 - [requirements-v0](docs/requirements-v0.md)
 - [universal-agent-cli-v1](docs/universal-agent-cli-v1.md)
 - [testing](docs/testing.md)
+- [adapter-authoring](docs/adapter-authoring.md)

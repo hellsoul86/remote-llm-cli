@@ -632,6 +632,7 @@ export function App() {
           {runtimes.map((r) => (
             <li key={r.name}>
               <code>{r.name}</code> non-interactive={String(r.capabilities.supports_non_interactive_exec)}
+              {r.contract ? ` contract=${r.contract.version} prompt_required=${String(r.contract.prompt_required)}` : ""}
             </li>
           ))}
         </ul>

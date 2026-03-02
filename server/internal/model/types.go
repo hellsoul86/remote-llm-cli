@@ -41,9 +41,17 @@ type RuntimeCapabilities struct {
 	SupportsCostMetrics        bool `json:"supports_cost_metrics"`
 }
 
+type RuntimeContract struct {
+	Version           string `json:"version"`
+	PromptRequired    bool   `json:"prompt_required"`
+	SupportsWorkdir   bool   `json:"supports_workdir"`
+	SupportsExtraArgs bool   `json:"supports_extra_args"`
+}
+
 type RuntimeInfo struct {
 	Name         string              `json:"name"`
 	Capabilities RuntimeCapabilities `json:"capabilities"`
+	Contract     RuntimeContract     `json:"contract"`
 }
 
 type RetentionPolicy struct {

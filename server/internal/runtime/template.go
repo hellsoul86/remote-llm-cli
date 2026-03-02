@@ -49,6 +49,15 @@ func (a *TemplateAdapter) Capabilities() model.RuntimeCapabilities {
 	return a.def.Capabilities
 }
 
+func (a *TemplateAdapter) Contract() model.RuntimeContract {
+	return model.RuntimeContract{
+		Version:           "v2",
+		PromptRequired:    true,
+		SupportsWorkdir:   true,
+		SupportsExtraArgs: true,
+	}
+}
+
 func (a *TemplateAdapter) BuildRunCommand(req RunRequest) (CommandSpec, error) {
 	if strings.TrimSpace(req.Prompt) == "" {
 		return CommandSpec{}, fmt.Errorf("prompt is required")
