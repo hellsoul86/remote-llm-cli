@@ -121,6 +121,20 @@ type RunJobRecord struct {
 	Response       *RunResponse `json:"response,omitempty"`
 }
 
+type CodexSessionInfo struct {
+	SessionID string `json:"session_id"`
+	Path      string `json:"path"`
+	UpdatedAt string `json:"updated_at"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+type CodexSessionTarget struct {
+	Host     Host               `json:"host"`
+	OK       bool               `json:"ok"`
+	Error    string             `json:"error,omitempty"`
+	Sessions []CodexSessionInfo `json:"sessions,omitempty"`
+}
+
 type RunRecord struct {
 	ID             string `json:"id"`
 	Runtime        string `json:"runtime"`
@@ -163,6 +177,21 @@ type enqueueRunJobResponse struct {
 
 type getRunJobResponse struct {
 	Job RunJobRecord `json:"job"`
+}
+
+type cancelRunJobResponse struct {
+	State string       `json:"state"`
+	Job   RunJobRecord `json:"job"`
+}
+
+type discoverCodexSessionsRequest struct {
+	HostID       string `json:"host_id,omitempty"`
+	LimitPerHost int    `json:"limit_per_host,omitempty"`
+	TimeoutSec   int    `json:"timeout_sec,omitempty"`
+}
+
+type discoverCodexSessionsResponse struct {
+	Targets []CodexSessionTarget `json:"targets"`
 }
 
 func (c *APIClient) ListHosts() ([]Host, error) {
@@ -268,6 +297,63 @@ func (c *APIClient) GetRunJob(id string) (RunJobRecord, error) {
 		return RunJobRecord{}, err
 	}
 	return out.Job, nil
+}
+
+func (c *APIClient) CancelRunJob(id string) (string, RunJobRecord, error) {
+	url := fmt.Sprintf("%s/v1/jobs/%s/cancel", c.BaseURL, id)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return "", RunJobRecord{}, err
+	}
+	c.applyAuth(req)
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", RunJobRecord{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", RunJobRecord{}, fmt.Errorf("cancel run job failed: http %d", res.StatusCode)
+	}
+	var out cancelRunJobResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return "", RunJobRecord{}, err
+	}
+	return out.State, out.Job, nil
+}
+
+func (c *APIClient) DiscoverLatestCodexSession(hostID string) (CodexSessionTarget, error) {
+	reqBody := discoverCodexSessionsRequest{
+		HostID:       strings.TrimSpace(hostID),
+		LimitPerHost: 1,
+		TimeoutSec:   60,
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return CodexSessionTarget{}, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/v1/codex/sessions/discover", bytes.NewReader(raw))
+	if err != nil {
+		return CodexSessionTarget{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.applyAuth(req)
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return CodexSessionTarget{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return CodexSessionTarget{}, fmt.Errorf("discover codex sessions failed: http %d", res.StatusCode)
+	}
+	var out discoverCodexSessionsResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return CodexSessionTarget{}, err
+	}
+	if len(out.Targets) == 0 {
+		return CodexSessionTarget{}, nil
+	}
+	return out.Targets[0], nil
 }
 
 func (c *APIClient) ListRunJobs(limit int) ([]RunJobRecord, error) {

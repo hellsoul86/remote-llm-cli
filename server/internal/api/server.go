@@ -25,6 +25,9 @@ type Server struct {
 	store    *store.Store
 	runtimes *runtime.Registry
 	runJobs  chan string
+	mu       sync.Mutex
+	cancels  map[string]context.CancelFunc
+	cancelRq map[string]bool
 }
 
 type authIdentity struct {
@@ -39,8 +42,10 @@ const (
 	runJobStatusRunning   = "running"
 	runJobStatusSucceeded = "succeeded"
 	runJobStatusFailed    = "failed"
+	runJobStatusCanceled  = "canceled"
 	defaultRunJobWorkers  = 3
 	runJobQueueSize       = 512
+	jobResultCanceled     = 499
 )
 
 func New(st *store.Store, rt *runtime.Registry) *Server {
@@ -48,6 +53,8 @@ func New(st *store.Store, rt *runtime.Registry) *Server {
 		store:    st,
 		runtimes: rt,
 		runJobs:  make(chan string, runJobQueueSize),
+		cancels:  map[string]context.CancelFunc{},
+		cancelRq: map[string]bool{},
 	}
 	s.startRunJobWorkers(defaultRunJobWorkers)
 	s.recoverRunJobs()
@@ -69,7 +76,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/jobs/sync", s.withAuth(http.HandlerFunc(s.handleEnqueueSyncJob)))
 	mux.Handle("GET /v1/jobs", s.withAuth(http.HandlerFunc(s.handleListRunJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
+	mux.Handle("POST /v1/jobs/{id}/cancel", s.withAuth(http.HandlerFunc(s.handleCancelRunJob)))
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
+	mux.Handle("POST /v1/codex/sessions/discover", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexSessions)))
+	mux.Handle("POST /v1/codex/sessions/cleanup", s.withAuth(http.HandlerFunc(s.handleCleanupCodexSessions)))
 	mux.Handle("GET /v1/runs", s.withAuth(http.HandlerFunc(s.handleListRuns)))
 	mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleListAudit)))
 
@@ -216,6 +226,52 @@ type syncResponse struct {
 	Runtime   string             `json:"runtime"`
 	Summary   runResponseSummary `json:"summary"`
 	Targets   []runTargetResult  `json:"targets"`
+}
+
+type codexSessionsRequest struct {
+	HostID       string   `json:"host_id,omitempty"`
+	HostIDs      []string `json:"host_ids,omitempty"`
+	AllHosts     bool     `json:"all_hosts,omitempty"`
+	Fanout       int      `json:"fanout,omitempty"`
+	TimeoutSec   int      `json:"timeout_sec,omitempty"`
+	LimitPerHost int      `json:"limit_per_host,omitempty"`
+}
+
+type codexCleanupRequest struct {
+	HostID         string   `json:"host_id,omitempty"`
+	HostIDs        []string `json:"host_ids,omitempty"`
+	AllHosts       bool     `json:"all_hosts,omitempty"`
+	Fanout         int      `json:"fanout,omitempty"`
+	TimeoutSec     int      `json:"timeout_sec,omitempty"`
+	OlderThanHours int      `json:"older_than_hours,omitempty"`
+	DryRun         bool     `json:"dry_run,omitempty"`
+}
+
+type codexSessionInfo struct {
+	SessionID string    `json:"session_id"`
+	Path      string    `json:"path"`
+	UpdatedAt time.Time `json:"updated_at"`
+	SizeBytes int64     `json:"size_bytes"`
+}
+
+type codexSessionTarget struct {
+	Host     model.Host          `json:"host"`
+	Result   executor.ExecResult `json:"result"`
+	OK       bool                `json:"ok"`
+	Error    string              `json:"error,omitempty"`
+	Sessions []codexSessionInfo  `json:"sessions,omitempty"`
+}
+
+type codexCleanupTarget struct {
+	Host       model.Host          `json:"host"`
+	Result     executor.ExecResult `json:"result"`
+	OK         bool                `json:"ok"`
+	Error      string              `json:"error,omitempty"`
+	DryRun     bool                `json:"dry_run"`
+	PathCount  int                 `json:"path_count"`
+	Paths      []string            `json:"paths,omitempty"`
+	Deleted    int                 `json:"deleted"`
+	Candidates int                 `json:"candidates"`
 }
 
 type preparedRun struct {
@@ -369,6 +425,46 @@ func (s *Server) handleGetRunJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+func (s *Server) handleCancelRunJob(w http.ResponseWriter, r *http.Request) {
+	jobID := strings.TrimSpace(r.PathValue("id"))
+	if jobID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing job id"})
+		return
+	}
+	job, ok := s.store.GetRunJob(jobID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
+		return
+	}
+	switch job.Status {
+	case runJobStatusSucceeded, runJobStatusFailed, runJobStatusCanceled:
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "job already finished", "job": compactRunJob(job)})
+		return
+	case runJobStatusPending:
+		finished := time.Now().UTC()
+		job.Status = runJobStatusCanceled
+		job.ResultStatus = jobResultCanceled
+		job.Error = "canceled before execution"
+		job.FinishedAt = &finished
+		if err := s.store.UpdateRunJob(job); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"state": "canceled", "job": compactRunJob(job)})
+		return
+	case runJobStatusRunning:
+		s.requestJobCancel(jobID)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"state": "cancel_requested",
+			"job":   compactRunJob(job),
+		})
+		return
+	default:
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "job cannot be canceled in current state", "job": compactRunJob(job)})
+		return
+	}
 }
 
 func (s *Server) executeRunRequest(parentCtx context.Context, req runRequest, identity authIdentity) (int, runResponse, error) {
@@ -541,6 +637,36 @@ func (s *Server) enqueueStoredJob(jobID string) bool {
 	}
 }
 
+func (s *Server) registerRunningJob(jobID string, cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancels[jobID] = cancel
+}
+
+func (s *Server) unregisterRunningJob(jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cancels, jobID)
+}
+
+func (s *Server) requestJobCancel(jobID string) {
+	s.mu.Lock()
+	cancel := s.cancels[jobID]
+	s.cancelRq[jobID] = true
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Server) takeJobCancelRequested(jobID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.cancelRq[jobID]
+	delete(s.cancelRq, jobID)
+	return v
+}
+
 func (s *Server) runJobWorker() {
 	for jobID := range s.runJobs {
 		s.executeQueuedJob(jobID)
@@ -559,12 +685,15 @@ func (s *Server) executeQueuedJob(jobID string) {
 	if err := s.store.UpdateRunJob(job); err != nil {
 		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.registerRunningJob(jobID, cancel)
+	defer s.unregisterRunningJob(jobID)
 
 	switch job.Type {
 	case "run":
-		s.executeQueuedRunJob(job)
+		s.executeQueuedRunJob(ctx, job)
 	case "sync":
-		s.executeQueuedSyncJob(job)
+		s.executeQueuedSyncJob(ctx, job)
 	default:
 		finished := time.Now().UTC()
 		job.Status = runJobStatusFailed
@@ -575,7 +704,7 @@ func (s *Server) executeQueuedJob(jobID string) {
 	}
 }
 
-func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
+func (s *Server) executeQueuedRunJob(ctx context.Context, job model.RunJobRecord) {
 	var req runRequest
 	if err := json.Unmarshal(job.Request, &req); err != nil {
 		finished := time.Now().UTC()
@@ -587,11 +716,19 @@ func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
 		return
 	}
 
-	status, resp, err := s.executeRunRequest(context.Background(), req, authIdentity{KeyID: job.CreatedByKeyID})
+	status, resp, err := s.executeRunRequest(ctx, req, authIdentity{KeyID: job.CreatedByKeyID})
 	finished := time.Now().UTC()
 	job.ResultStatus = status
 	job.FinishedAt = &finished
+	canceled := s.takeJobCancelRequested(job.ID)
 	if err != nil {
+		if canceled || errors.Is(err, context.Canceled) {
+			job.Status = runJobStatusCanceled
+			job.ResultStatus = jobResultCanceled
+			job.Error = "canceled while running"
+			_ = s.store.UpdateRunJob(job)
+			return
+		}
 		var badReq apiError
 		if errors.As(err, &badReq) {
 			job.ResultStatus = badReq.StatusCode
@@ -612,8 +749,14 @@ func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
 		_ = s.store.UpdateRunJob(job)
 		return
 	}
-	job.Status = runJobStatusSucceeded
-	job.Error = ""
+	if canceled {
+		job.Status = runJobStatusCanceled
+		job.ResultStatus = jobResultCanceled
+		job.Error = "canceled while running"
+	} else {
+		job.Status = runJobStatusSucceeded
+		job.Error = ""
+	}
 	job.Response = rawResp
 	job.TotalHosts = resp.Summary.Total
 	job.SucceededHosts = resp.Summary.Succeeded
@@ -623,7 +766,7 @@ func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
 	_ = s.store.UpdateRunJob(job)
 }
 
-func (s *Server) executeQueuedSyncJob(job model.RunJobRecord) {
+func (s *Server) executeQueuedSyncJob(ctx context.Context, job model.RunJobRecord) {
 	var req syncRequest
 	if err := json.Unmarshal(job.Request, &req); err != nil {
 		finished := time.Now().UTC()
@@ -634,11 +777,19 @@ func (s *Server) executeQueuedSyncJob(job model.RunJobRecord) {
 		_ = s.store.UpdateRunJob(job)
 		return
 	}
-	status, resp, err := s.executeSyncRequest(context.Background(), req)
+	status, resp, err := s.executeSyncRequest(ctx, req)
 	finished := time.Now().UTC()
 	job.ResultStatus = status
 	job.FinishedAt = &finished
+	canceled := s.takeJobCancelRequested(job.ID)
 	if err != nil {
+		if canceled || errors.Is(err, context.Canceled) {
+			job.Status = runJobStatusCanceled
+			job.ResultStatus = jobResultCanceled
+			job.Error = "canceled while running"
+			_ = s.store.UpdateRunJob(job)
+			return
+		}
 		var badReq apiError
 		if errors.As(err, &badReq) {
 			job.ResultStatus = badReq.StatusCode
@@ -659,8 +810,14 @@ func (s *Server) executeQueuedSyncJob(job model.RunJobRecord) {
 		_ = s.store.UpdateRunJob(job)
 		return
 	}
-	job.Status = runJobStatusSucceeded
-	job.Error = ""
+	if canceled {
+		job.Status = runJobStatusCanceled
+		job.ResultStatus = jobResultCanceled
+		job.Error = "canceled while running"
+	} else {
+		job.Status = runJobStatusSucceeded
+		job.Error = ""
+	}
 	job.Response = rawResp
 	job.TotalHosts = resp.Summary.Total
 	job.SucceededHosts = resp.Summary.Succeeded
@@ -809,6 +966,276 @@ func (s *Server) executePreparedSync(parentCtx context.Context, prepared prepare
 		Targets: targets,
 	}
 	return status, resp
+}
+
+func (s *Server) handleDiscoverCodexSessions(w http.ResponseWriter, r *http.Request) {
+	var req codexSessionsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	hosts, err := s.resolveHosts(req.HostID, req.HostIDs, req.AllHosts)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	limit := req.LimitPerHost
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	timeout := 120 * time.Second
+	if req.TimeoutSec > 0 {
+		timeout = time.Duration(req.TimeoutSec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	fanout := normalizeFanout(req.Fanout, len(hosts))
+	startedAt := time.Now().UTC()
+	spec := buildCodexSessionDiscoverSpec(limit)
+	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) runTargetResult {
+		res, runErr := executor.RunViaSSH(
+			ctx,
+			host,
+			spec,
+			resolveWorkdir("", host.Workspace),
+			executor.ExecOptions{
+				MaxStdoutBytes: 512 * 1024,
+				MaxStderrBytes: 256 * 1024,
+			},
+		)
+		return runTargetResult{
+			Host:   host,
+			Result: res,
+			OK:     runErr == nil,
+			Error:  errText(runErr),
+		}
+	})
+	finishedAt := time.Now().UTC()
+	failed := 0
+	out := make([]codexSessionTarget, 0, len(targets))
+	for _, t := range targets {
+		item := codexSessionTarget{
+			Host:   t.Host,
+			Result: t.Result,
+			OK:     t.OK,
+			Error:  t.Error,
+		}
+		if t.OK {
+			item.Sessions = parseCodexSessionDiscoverOutput(t.Result.Stdout)
+		} else {
+			failed++
+		}
+		out = append(out, item)
+	}
+	status := http.StatusOK
+	if failed > 0 {
+		status = http.StatusBadGateway
+	}
+	writeJSON(w, status, map[string]any{
+		"operation": "codex_sessions_discover",
+		"summary": runResponseSummary{
+			Total:      len(out),
+			Succeeded:  len(out) - failed,
+			Failed:     failed,
+			Fanout:     fanout,
+			DurationMS: finishedAt.Sub(startedAt).Milliseconds(),
+			StartedAt:  startedAt,
+			FinishedAt: finishedAt,
+		},
+		"targets": out,
+	})
+}
+
+func (s *Server) handleCleanupCodexSessions(w http.ResponseWriter, r *http.Request) {
+	var req codexCleanupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	hosts, err := s.resolveHosts(req.HostID, req.HostIDs, req.AllHosts)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	olderHours := req.OlderThanHours
+	if olderHours <= 0 {
+		olderHours = 72
+	}
+	if olderHours > 24*365 {
+		olderHours = 24 * 365
+	}
+	timeout := 240 * time.Second
+	if req.TimeoutSec > 0 {
+		timeout = time.Duration(req.TimeoutSec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	fanout := normalizeFanout(req.Fanout, len(hosts))
+	startedAt := time.Now().UTC()
+	spec := buildCodexSessionCleanupSpec(olderHours, req.DryRun)
+	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) runTargetResult {
+		res, runErr := executor.RunViaSSH(
+			ctx,
+			host,
+			spec,
+			resolveWorkdir("", host.Workspace),
+			executor.ExecOptions{
+				MaxStdoutBytes: 512 * 1024,
+				MaxStderrBytes: 256 * 1024,
+			},
+		)
+		return runTargetResult{
+			Host:   host,
+			Result: res,
+			OK:     runErr == nil,
+			Error:  errText(runErr),
+		}
+	})
+	finishedAt := time.Now().UTC()
+	failed := 0
+	out := make([]codexCleanupTarget, 0, len(targets))
+	for _, t := range targets {
+		paths := parsePathLines(t.Result.Stdout)
+		item := codexCleanupTarget{
+			Host:       t.Host,
+			Result:     t.Result,
+			OK:         t.OK,
+			Error:      t.Error,
+			DryRun:     req.DryRun,
+			Paths:      capStringList(paths, 200),
+			PathCount:  len(paths),
+			Candidates: len(paths),
+		}
+		if req.DryRun {
+			item.Deleted = 0
+		} else {
+			item.Deleted = len(paths)
+		}
+		if !t.OK {
+			failed++
+		}
+		out = append(out, item)
+	}
+	status := http.StatusOK
+	if failed > 0 {
+		status = http.StatusBadGateway
+	}
+	writeJSON(w, status, map[string]any{
+		"operation": "codex_sessions_cleanup",
+		"summary": runResponseSummary{
+			Total:      len(out),
+			Succeeded:  len(out) - failed,
+			Failed:     failed,
+			Fanout:     fanout,
+			DurationMS: finishedAt.Sub(startedAt).Milliseconds(),
+			StartedAt:  startedAt,
+			FinishedAt: finishedAt,
+		},
+		"targets": out,
+		"policy": map[string]any{
+			"older_than_hours": olderHours,
+			"dry_run":          req.DryRun,
+		},
+	})
+}
+
+func buildCodexSessionDiscoverSpec(limitPerHost int) runtime.CommandSpec {
+	script := fmt.Sprintf(`
+set -e
+limit=%d
+if [ -d "$HOME/.codex" ]; then
+  find "$HOME/.codex" -type f \( -name "*.jsonl" -o -name "*.json" -o -name "*.ndjson" \) -printf "%%T@|%%s|%%p\n" 2>/dev/null || true
+fi | sort -t'|' -k1,1nr | awk -F'|' '!seen[$3]++' | head -n "$limit"
+`, limitPerHost)
+	return runtime.CommandSpec{Program: "sh", Args: []string{"-lc", script}}
+}
+
+func buildCodexSessionCleanupSpec(olderHours int, dryRun bool) runtime.CommandSpec {
+	minutes := olderHours * 60
+	dryFlag := "0"
+	if dryRun {
+		dryFlag = "1"
+	}
+	script := fmt.Sprintf(`
+set -e
+target="$HOME/.codex/sessions"
+if [ ! -d "$target" ]; then
+  exit 0
+fi
+mins=%d
+if [ "%s" = "1" ]; then
+  find "$target" -type f -mmin +"$mins" -print 2>/dev/null
+else
+  find "$target" -type f -mmin +"$mins" -print -delete 2>/dev/null
+fi
+`, minutes, dryFlag)
+	return runtime.CommandSpec{Program: "sh", Args: []string{"-lc", script}}
+}
+
+func parseCodexSessionDiscoverOutput(stdout string) []codexSessionInfo {
+	lines := parsePathLines(stdout)
+	out := make([]codexSessionInfo, 0, len(lines))
+	for _, line := range lines {
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		updated, err := parseEpochSeconds(parts[0])
+		if err != nil {
+			continue
+		}
+		size, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		path := strings.TrimSpace(parts[2])
+		out = append(out, codexSessionInfo{
+			SessionID: inferSessionIDFromPath(path),
+			Path:      path,
+			UpdatedAt: updated,
+			SizeBytes: size,
+		})
+	}
+	return out
+}
+
+func parseEpochSeconds(raw string) (time.Time, error) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	sec := int64(v)
+	nsec := int64((v - float64(sec)) * float64(time.Second))
+	return time.Unix(sec, nsec).UTC(), nil
+}
+
+func inferSessionIDFromPath(p string) string {
+	base := path.Base(strings.TrimSpace(p))
+	base = strings.TrimSuffix(base, path.Ext(base))
+	if base != "" {
+		return base
+	}
+	return strings.TrimSpace(p)
+}
+
+func parsePathLines(stdout string) []string {
+	lines := strings.Split(stdout, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		v := strings.TrimSpace(line)
+		if v == "" {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func capStringList(src []string, max int) []string {
+	if len(src) <= max {
+		return src
+	}
+	return src[:max]
 }
 
 func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
@@ -1160,8 +1587,14 @@ func inferAction(method string, path string) string {
 		return "job.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/"):
 		return "job.get"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/cancel"):
+		return "job.cancel"
 	case method == http.MethodPost && path == "/v1/sync":
 		return "sync.execute"
+	case method == http.MethodPost && path == "/v1/codex/sessions/discover":
+		return "codex.sessions.discover"
+	case method == http.MethodPost && path == "/v1/codex/sessions/cleanup":
+		return "codex.sessions.cleanup"
 	case method == http.MethodGet && path == "/v1/runs":
 		return "run.list"
 	case method == http.MethodGet && path == "/v1/audit":

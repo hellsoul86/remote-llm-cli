@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
+  cancelRunJob,
+  discoverCodexSessions,
   enqueueRunJob,
   enqueueSyncJob,
   getRunJob,
@@ -80,6 +82,10 @@ export function App() {
   function isRunJobActive(job: RunJobRecord | null | undefined): boolean {
     if (!job) return false;
     return job.status === "pending" || job.status === "running";
+  }
+
+  function isRunJobCancelable(job: RunJobRecord | null | undefined): boolean {
+    return isRunJobActive(job);
   }
 
   function isRunResponsePayload(v: unknown): v is RunResponse {
@@ -266,6 +272,37 @@ export function App() {
     }
   }
 
+  async function onUseLatestSession() {
+    if (!token.trim()) {
+      setMessage("set access key first");
+      return;
+    }
+    if (runAllHosts || selectedHostIDs.length === 0) {
+      setMessage("disable all-hosts and select one host first");
+      return;
+    }
+    try {
+      const hostID = selectedHostIDs[0];
+      const { body } = await discoverCodexSessions(token, {
+        host_id: hostID,
+        limit_per_host: 1,
+        timeout_sec: 60
+      });
+      const target = body.targets?.[0];
+      const session = target?.sessions?.[0];
+      if (!session?.session_id) {
+        setMessage("no resumable codex session found on selected host");
+        return;
+      }
+      setRunMode("resume");
+      setRunResumeLast(false);
+      setRunSessionID(session.session_id);
+      setMessage(`selected latest session: ${session.session_id}`);
+    } catch (err) {
+      setMessage(String(err));
+    }
+  }
+
   async function onSyncHosts(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!token.trim()) {
@@ -329,6 +366,27 @@ export function App() {
       setMessage(String(err));
     } finally {
       setSyncLoading(false);
+    }
+  }
+
+  async function onCancelJob(jobID: string) {
+    if (!token.trim()) {
+      setMessage("set access key first");
+      return;
+    }
+    try {
+      const { state, job } = await cancelRunJob(token, jobID);
+      setMessage(`job ${jobID}: ${state}`);
+      setActiveRunJobID(jobID);
+      setActiveRunJob(job);
+      const [nextJobs, nextAudit] = await Promise.all([listRunJobs(token, 30), listAudit(token, 80)]);
+      setRunJobs(nextJobs);
+      setAuditEvents(nextAudit);
+      if (!isRunJobActive(job)) {
+        setRunJobPolling(false);
+      }
+    } catch (err) {
+      setMessage(String(err));
     }
   }
 
@@ -449,6 +507,9 @@ export function App() {
                   className="wide"
                 />
               ) : null}
+              <button type="button" onClick={onUseLatestSession}>
+                Use Latest Session On Selected Host
+              </button>
             </>
           ) : null}
           <input
@@ -561,6 +622,11 @@ export function App() {
                 >
                   watch
                 </button>{" "}
+                {isRunJobCancelable(job) ? (
+                  <button type="button" onClick={() => onCancelJob(job.id)}>
+                    cancel
+                  </button>
+                ) : null}{" "}
                 <strong>{job.id}</strong> type={job.type} status={job.status} runtime={job.runtime} hosts={job.total_hosts ?? 0} ok=
                 {job.succeeded_hosts ?? 0} failed={job.failed_hosts ?? 0} http={job.result_status ?? "n/a"} dur=
                 {job.duration_ms ?? 0}ms
