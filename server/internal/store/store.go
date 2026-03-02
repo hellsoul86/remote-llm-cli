@@ -13,10 +13,11 @@ import (
 )
 
 type State struct {
-	Hosts       []model.Host       `json:"hosts"`
-	AccessKeys  []model.AccessKey  `json:"access_keys"`
-	RunRecords  []model.RunRecord  `json:"run_records"`
-	AuditEvents []model.AuditEvent `json:"audit_events"`
+	Hosts       []model.Host         `json:"hosts"`
+	AccessKeys  []model.AccessKey    `json:"access_keys"`
+	RunRecords  []model.RunRecord    `json:"run_records"`
+	RunJobs     []model.RunJobRecord `json:"run_jobs"`
+	AuditEvents []model.AuditEvent   `json:"audit_events"`
 }
 
 type Store struct {
@@ -32,7 +33,16 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
-	s := &Store{path: path, state: State{Hosts: []model.Host{}, AccessKeys: []model.AccessKey{}}}
+	s := &Store{
+		path: path,
+		state: State{
+			Hosts:       []model.Host{},
+			AccessKeys:  []model.AccessKey{},
+			RunRecords:  []model.RunRecord{},
+			RunJobs:     []model.RunJobRecord{},
+			AuditEvents: []model.AuditEvent{},
+		},
+	}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -63,6 +73,9 @@ func (s *Store) load() error {
 	}
 	if s.state.RunRecords == nil {
 		s.state.RunRecords = []model.RunRecord{}
+	}
+	if s.state.RunJobs == nil {
+		s.state.RunJobs = []model.RunJobRecord{}
 	}
 	if s.state.AuditEvents == nil {
 		s.state.AuditEvents = []model.AuditEvent{}
@@ -223,6 +236,48 @@ func (s *Store) AddRunRecord(r model.RunRecord) error {
 	return s.saveLocked()
 }
 
+func (s *Store) AddRunJob(j model.RunJobRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.RunJobs = append(s.state.RunJobs, cloneRunJob(j))
+	s.state.RunJobs = capTail(s.state.RunJobs, 1000)
+	return s.saveLocked()
+}
+
+func (s *Store) UpdateRunJob(j model.RunJobRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.RunJobs {
+		if s.state.RunJobs[i].ID != j.ID {
+			continue
+		}
+		s.state.RunJobs[i] = cloneRunJob(j)
+		return s.saveLocked()
+	}
+	return fmt.Errorf("run job not found: %s", j.ID)
+}
+
+func (s *Store) GetRunJob(id string) (model.RunJobRecord, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, job := range s.state.RunJobs {
+		if job.ID == id {
+			return cloneRunJob(job), true
+		}
+	}
+	return model.RunJobRecord{}, false
+}
+
+func (s *Store) ListRunJobs(limit int) []model.RunJobRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := copyTail(s.state.RunJobs, limit)
+	for i := range out {
+		out[i] = cloneRunJob(out[i])
+	}
+	return out
+}
+
 func (s *Store) ListRunRecords(limit int) []model.RunRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -259,4 +314,11 @@ func capTail[T any](src []T, max int) []T {
 		return src
 	}
 	return append([]T(nil), src[len(src)-max:]...)
+}
+
+func cloneRunJob(j model.RunJobRecord) model.RunJobRecord {
+	out := j
+	out.Request = append([]byte(nil), j.Request...)
+	out.Response = append([]byte(nil), j.Response...)
+	return out
 }

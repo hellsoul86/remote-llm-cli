@@ -37,6 +37,16 @@ type runDoneMsg struct {
 	err    error
 }
 
+type enqueueRunDoneMsg struct {
+	job RunJobRecord
+	err error
+}
+
+type pollRunJobMsg struct {
+	job RunJobRecord
+	err error
+}
+
 type shellDoneMsg struct {
 	host Host
 	err  error
@@ -66,6 +76,7 @@ type Model struct {
 	maxOutputKB           int
 	retryCount            int
 	retryBackoffMS        int
+	runAsync              bool
 
 	editingPrompt    bool
 	editingWorkdir   bool
@@ -83,6 +94,7 @@ type Model struct {
 
 	lastStatus int
 	lastRun    *RunResponse
+	activeJob  *RunJobRecord
 }
 
 func NewModel(client *APIClient, runtime string) Model {
@@ -99,6 +111,7 @@ func NewModel(client *APIClient, runtime string) Model {
 		maxOutputKB:     256,
 		retryCount:      0,
 		retryBackoffMS:  1000,
+		runAsync:        true,
 		message:         "loading hosts and history...",
 		loading:         true,
 		historyLoading:  true,
@@ -146,6 +159,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastRun = &msg.resp
 		m.historyLoading = true
 		m.message = fmt.Sprintf("run complete: http=%d total=%d failed=%d", msg.status, msg.resp.Summary.Total, msg.resp.Summary.Failed)
+		return m, m.loadHistoryCmd()
+	case enqueueRunDoneMsg:
+		m.running = false
+		if msg.err != nil {
+			m.message = "enqueue failed: " + msg.err.Error()
+			return m, nil
+		}
+		job := msg.job
+		m.activeJob = &job
+		m.message = fmt.Sprintf("job accepted: %s status=%s", job.ID, job.Status)
+		if isRunJobActive(job) {
+			m.running = true
+			return m, m.pollRunJobCmd(800 * time.Millisecond)
+		}
+		return m, nil
+	case pollRunJobMsg:
+		if msg.err != nil {
+			m.running = false
+			m.message = "job poll failed: " + msg.err.Error()
+			return m, nil
+		}
+		job := msg.job
+		m.activeJob = &job
+		if isRunJobActive(job) {
+			m.running = true
+			return m, m.pollRunJobCmd(2 * time.Second)
+		}
+		m.running = false
+		if job.Response != nil {
+			m.lastRun = job.Response
+			m.lastStatus = job.ResultStatus
+		}
+		m.historyLoading = true
+		m.message = fmt.Sprintf(
+			"job complete: %s status=%s http=%d failed=%d",
+			job.ID,
+			job.Status,
+			job.ResultStatus,
+			job.FailedHosts,
+		)
 		return m, m.loadHistoryCmd()
 	case shellDoneMsg:
 		if msg.err != nil {
@@ -219,6 +272,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.running = true
+			if m.runAsync {
+				m.message = "queueing run job..."
+				return m, m.enqueueRunCmd()
+			}
 			m.message = "running..."
 			return m, m.runCmd()
 		}
@@ -251,6 +308,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = "targeting all hosts"
 			} else {
 				m.message = "manual host selection mode"
+			}
+			return m, nil
+		case "u":
+			m.runAsync = !m.runAsync
+			if m.runAsync {
+				m.message = "run mode: async jobs"
+			} else {
+				m.message = "run mode: sync request"
 			}
 			return m, nil
 		case "+", "=":
@@ -361,10 +426,10 @@ func (m Model) View() string {
 	b.WriteString("remote-llm-cli (TUI)\n")
 	b.WriteString("runtime=" + m.runtime + "  ")
 	b.WriteString(fmt.Sprintf(
-		"all_hosts=%t fanout=%d max_output_kb=%d retries=%d backoff_ms=%d pane=%s\n",
-		m.allHosts, m.fanout, m.maxOutputKB, m.retryCount, m.retryBackoffMS, paneLabel(m.activePane),
+		"all_hosts=%t fanout=%d max_output_kb=%d retries=%d backoff_ms=%d async=%t pane=%s\n",
+		m.allHosts, m.fanout, m.maxOutputKB, m.retryCount, m.retryBackoffMS, m.runAsync, paneLabel(m.activePane),
 	))
-	b.WriteString("keys: q quit | R reload all | r run | h history | Tab pane | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | ./, retries | n/b backoff | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id | o shell\n")
+	b.WriteString("keys: q quit | R reload all | r run | u async toggle | h history | Tab pane | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | ./, retries | n/b backoff | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id | o shell\n")
 
 	if m.loading {
 		b.WriteString("[loading hosts...]\n")
@@ -411,7 +476,7 @@ func (m Model) viewControlPane(b *strings.Builder) {
 	}
 
 	b.WriteString("\nCodex Options:\n")
-	b.WriteString(fmt.Sprintf("mode=%s model=%q sandbox=%q json=%t skip_git=%t ephemeral=%t resume_last=%t retry=%d backoff_ms=%d\n",
+	b.WriteString(fmt.Sprintf("mode=%s model=%q sandbox=%q json=%t skip_git=%t ephemeral=%t resume_last=%t retry=%d backoff_ms=%d async=%t\n",
 		m.codexMode,
 		strings.TrimSpace(m.codexModel),
 		sandboxDisplay(m.codexSandbox),
@@ -421,6 +486,7 @@ func (m Model) viewControlPane(b *strings.Builder) {
 		m.codexResumeLast,
 		m.retryCount,
 		m.retryBackoffMS,
+		m.runAsync,
 	))
 	if m.codexMode == "resume" && !m.codexResumeLast {
 		b.WriteString(fmt.Sprintf("session_id=%q\n", strings.TrimSpace(m.codexSessionID)))
@@ -445,7 +511,27 @@ func (m Model) viewControlPane(b *strings.Builder) {
 	}
 
 	if m.running {
-		b.WriteString("\n[run in progress...]\n")
+		if m.runAsync {
+			b.WriteString("\n[run job in progress...]\n")
+		} else {
+			b.WriteString("\n[run in progress...]\n")
+		}
+	}
+	if m.activeJob != nil {
+		b.WriteString(fmt.Sprintf(
+			"\nActive Job: id=%s status=%s runtime=%s total=%d ok=%d failed=%d http=%d dur=%dms\n",
+			m.activeJob.ID,
+			m.activeJob.Status,
+			m.activeJob.Runtime,
+			m.activeJob.TotalHosts,
+			m.activeJob.SucceededHosts,
+			m.activeJob.FailedHosts,
+			m.activeJob.ResultStatus,
+			m.activeJob.DurationMS,
+		))
+		if strings.TrimSpace(m.activeJob.Error) != "" {
+			b.WriteString("Active Job Error: " + strings.TrimSpace(m.activeJob.Error) + "\n")
+		}
 	}
 	if m.lastRun != nil {
 		b.WriteString("\nLast Run Summary:\n")
@@ -558,6 +644,36 @@ func (m Model) selectedHostIDs() []string {
 }
 
 func (m Model) runCmd() tea.Cmd {
+	req := m.buildRunRequest()
+	return func() tea.Msg {
+		status, resp, err := m.client.Run(req)
+		return runDoneMsg{status: status, resp: resp, err: err}
+	}
+}
+
+func (m Model) enqueueRunCmd() tea.Cmd {
+	req := m.buildRunRequest()
+	return func() tea.Msg {
+		job, err := m.client.EnqueueRun(req)
+		return enqueueRunDoneMsg{job: job, err: err}
+	}
+}
+
+func (m Model) pollRunJobCmd(after time.Duration) tea.Cmd {
+	if m.activeJob == nil {
+		return nil
+	}
+	jobID := strings.TrimSpace(m.activeJob.ID)
+	if jobID == "" {
+		return nil
+	}
+	return tea.Tick(after, func(_ time.Time) tea.Msg {
+		job, err := m.client.GetRunJob(jobID)
+		return pollRunJobMsg{job: job, err: err}
+	})
+}
+
+func (m Model) buildRunRequest() RunRequest {
 	req := RunRequest{
 		Runtime:        m.runtime,
 		Prompt:         strings.TrimSpace(m.prompt),
@@ -581,9 +697,15 @@ func (m Model) runCmd() tea.Cmd {
 	if !m.allHosts {
 		req.HostIDs = m.selectedHostIDs()
 	}
-	return func() tea.Msg {
-		status, resp, err := m.client.Run(req)
-		return runDoneMsg{status: status, resp: resp, err: err}
+	return req
+}
+
+func isRunJobActive(job RunJobRecord) bool {
+	switch strings.TrimSpace(job.Status) {
+	case "pending", "running":
+		return true
+	default:
+		return false
 	}
 }
 

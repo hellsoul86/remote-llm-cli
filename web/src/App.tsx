@@ -1,8 +1,11 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
+  enqueueRunJob,
+  getRunJob,
   healthz,
   listAudit,
   listHosts,
+  listRunJobs,
   listRuns,
   listRuntimes,
   runFanout,
@@ -10,10 +13,11 @@ import {
   upsertHost,
   type AuditEvent,
   type Host,
+  type RunJobRecord,
   type RunRecord,
   type RunResponse,
-  type SyncResponse,
-  type RuntimeInfo
+  type RuntimeInfo,
+  type SyncResponse
 } from "./api";
 
 const TOKEN_KEY = "remote_llm_access_key";
@@ -42,8 +46,13 @@ export function App() {
   const [runRetryCountValue, setRunRetryCountValue] = useState("0");
   const [runRetryBackoffMSValue, setRunRetryBackoffMSValue] = useState("1000");
   const [selectedHostIDs, setSelectedHostIDs] = useState<string[]>([]);
+  const [runAsyncMode, setRunAsyncMode] = useState(true);
   const [runStatus, setRunStatus] = useState<number | null>(null);
   const [runResult, setRunResult] = useState<RunResponse | null>(null);
+  const [runJobs, setRunJobs] = useState<RunJobRecord[]>([]);
+  const [activeRunJobID, setActiveRunJobID] = useState("");
+  const [activeRunJob, setActiveRunJob] = useState<RunJobRecord | null>(null);
+  const [runJobPolling, setRunJobPolling] = useState(false);
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncAllHosts, setSyncAllHosts] = useState(true);
   const [syncSelectedHostIDs, setSyncSelectedHostIDs] = useState<string[]>([]);
@@ -66,6 +75,11 @@ export function App() {
       .catch((e) => setHealth(`error: ${String(e)}`));
   }, []);
 
+  function isRunJobActive(job: RunJobRecord | null | undefined): boolean {
+    if (!job) return false;
+    return job.status === "pending" || job.status === "running";
+  }
+
   async function refresh() {
     if (!token.trim()) {
       setMessage("set access key first");
@@ -74,25 +88,66 @@ export function App() {
     setLoading(true);
     setMessage("");
     try {
-      const [nextHosts, nextRuntimes, nextRuns, nextAudit] = await Promise.all([
+      const [nextHosts, nextRuntimes, nextRuns, nextAudit, nextJobs] = await Promise.all([
         listHosts(token),
         listRuntimes(token),
         listRuns(token, 20),
-        listAudit(token, 80)
+        listAudit(token, 80),
+        listRunJobs(token, 30)
       ]);
       setHosts(nextHosts);
       setRuntimes(nextRuntimes);
       setRunHistory(nextRuns);
       setAuditEvents(nextAudit);
+      setRunJobs(nextJobs);
       setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
       setSyncSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
-      setMessage(`loaded ${nextHosts.length} hosts, ${nextRuns.length} runs, ${nextAudit.length} events`);
+      const ongoing = nextJobs.find((job) => isRunJobActive(job));
+      if (ongoing) {
+        setActiveRunJobID((prev) => prev || ongoing.id);
+        setActiveRunJob((prev) => (prev && prev.id === ongoing.id ? prev : ongoing));
+        setRunJobPolling(true);
+      }
+      setMessage(`loaded ${nextHosts.length} hosts, ${nextRuns.length} runs, ${nextAudit.length} events, ${nextJobs.length} jobs`);
     } catch (e) {
       setMessage(String(e));
     } finally {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (!runJobPolling || !token.trim() || !activeRunJobID) {
+      return;
+    }
+    let canceled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const [job, jobs] = await Promise.all([getRunJob(token, activeRunJobID), listRunJobs(token, 30)]);
+        if (canceled) return;
+        setActiveRunJob(job);
+        setRunJobs(jobs);
+        if (!isRunJobActive(job)) {
+          setRunJobPolling(false);
+          setRunStatus(job.result_status ?? null);
+          if (job.response) setRunResult(job.response);
+          const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
+          if (canceled) return;
+          setRunHistory(nextRuns);
+          setAuditEvents(nextAudit);
+          setMessage(`job ${job.id} completed: ${job.status}, http=${job.result_status ?? "n/a"}`);
+        }
+      } catch (err) {
+        if (canceled) return;
+        setRunJobPolling(false);
+        setMessage(`job polling error: ${String(err)}`);
+      }
+    }, 2000);
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [runJobPolling, token, activeRunJobID]);
 
   async function onAddHost(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -167,7 +222,7 @@ export function App() {
         resume_last: runMode === "resume" ? runResumeLast : undefined,
         session_id: runMode === "resume" && !runResumeLast ? runSessionID.trim() : undefined
       };
-      const { status, body } = await runFanout(token, {
+      const runRequest = {
         runtime: "codex",
         prompt: runPrompt.trim(),
         fanout,
@@ -178,13 +233,25 @@ export function App() {
         host_ids: runAllHosts ? undefined : selectedHostIDs,
         workdir: runWorkdir.trim() || undefined,
         codex
-      });
-      setRunStatus(status);
-      setRunResult(body);
-      setMessage(`run finished with HTTP ${status}, failed=${body.summary.failed}`);
-      const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
-      setRunHistory(nextRuns);
-      setAuditEvents(nextAudit);
+      };
+      if (runAsyncMode) {
+        const { status, body } = await enqueueRunJob(token, runRequest);
+        setActiveRunJobID(body.job.id);
+        setActiveRunJob(body.job);
+        setRunJobPolling(isRunJobActive(body.job));
+        setMessage(`run job accepted with HTTP ${status}: ${body.job.id}`);
+        const [nextJobs, nextAudit] = await Promise.all([listRunJobs(token, 30), listAudit(token, 80)]);
+        setRunJobs(nextJobs);
+        setAuditEvents(nextAudit);
+      } else {
+        const { status, body } = await runFanout(token, runRequest);
+        setRunStatus(status);
+        setRunResult(body);
+        setMessage(`run finished with HTTP ${status}, failed=${body.summary.failed}`);
+        const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
+        setRunHistory(nextRuns);
+        setAuditEvents(nextAudit);
+      }
     } catch (err) {
       setMessage(String(err));
     } finally {
@@ -388,6 +455,10 @@ export function App() {
             all hosts
           </label>
           <label className="inline">
+            <input type="checkbox" checked={runAsyncMode} onChange={(e) => setRunAsyncMode(e.target.checked)} />
+            async job mode
+          </label>
+          <label className="inline">
             <input type="checkbox" checked={runJSONOutput} onChange={(e) => setRunJSONOutput(e.target.checked)} />
             codex --json
           </label>
@@ -404,7 +475,7 @@ export function App() {
             ephemeral session
           </label>
           <button type="submit" disabled={runLoading}>
-            {runLoading ? "Running..." : "Run Codex"}
+            {runLoading ? (runAsyncMode ? "Queueing..." : "Running...") : runAsyncMode ? "Queue Codex Run" : "Run Codex"}
           </button>
         </form>
 
@@ -441,6 +512,44 @@ export function App() {
             </ul>
           </div>
         ) : null}
+      </section>
+
+      <section className="card">
+        <h2>Run Jobs</h2>
+        {activeRunJob ? (
+          <p>
+            active={activeRunJob.id} status={activeRunJob.status} runtime={activeRunJob.runtime} total=
+            {activeRunJob.total_hosts ?? 0} ok={activeRunJob.succeeded_hosts ?? 0} failed={activeRunJob.failed_hosts ?? 0}
+            http={activeRunJob.result_status ?? "n/a"} {runJobPolling ? "polling=true" : "polling=false"}
+            {activeRunJob.error ? ` error=${activeRunJob.error}` : ""}
+          </p>
+        ) : (
+          <p>no active run job</p>
+        )}
+        {runJobs.length === 0 ? (
+          <p>no run jobs yet</p>
+        ) : (
+          <ul>
+            {runJobs.map((job) => (
+              <li key={job.id}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveRunJobID(job.id);
+                    setActiveRunJob(job);
+                    setRunJobPolling(isRunJobActive(job));
+                  }}
+                >
+                  watch
+                </button>{" "}
+                <strong>{job.id}</strong> status={job.status} runtime={job.runtime} hosts={job.total_hosts ?? 0} ok=
+                {job.succeeded_hosts ?? 0} failed={job.failed_hosts ?? 0} http={job.result_status ?? "n/a"} dur=
+                {job.duration_ms ?? 0}ms
+                {job.error ? ` error=${job.error}` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="card">

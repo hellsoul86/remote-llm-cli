@@ -24,6 +24,7 @@ import (
 type Server struct {
 	store    *store.Store
 	runtimes *runtime.Registry
+	runJobs  chan string
 }
 
 type authIdentity struct {
@@ -33,8 +34,23 @@ type authIdentity struct {
 
 type authContextKey struct{}
 
+const (
+	runJobStatusPending   = "pending"
+	runJobStatusRunning   = "running"
+	runJobStatusSucceeded = "succeeded"
+	runJobStatusFailed    = "failed"
+	defaultRunJobWorkers  = 3
+	runJobQueueSize       = 512
+)
+
 func New(st *store.Store, rt *runtime.Registry) *Server {
-	return &Server{store: st, runtimes: rt}
+	s := &Server{
+		store:    st,
+		runtimes: rt,
+		runJobs:  make(chan string, runJobQueueSize),
+	}
+	s.startRunJobWorkers(defaultRunJobWorkers)
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -48,6 +64,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /v1/hosts/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteHost)))
 	mux.Handle("POST /v1/hosts/{id}/probe", s.withAuth(http.HandlerFunc(s.handleProbeHost)))
 	mux.Handle("POST /v1/run", s.withAuth(http.HandlerFunc(s.handleRun)))
+	mux.Handle("POST /v1/jobs/run", s.withAuth(http.HandlerFunc(s.handleEnqueueRunJob)))
+	mux.Handle("GET /v1/jobs", s.withAuth(http.HandlerFunc(s.handleListRunJobs)))
+	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
 	mux.Handle("GET /v1/runs", s.withAuth(http.HandlerFunc(s.handleListRuns)))
 	mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleListAudit)))
@@ -156,6 +175,24 @@ type runRequest struct {
 	Codex          *runtime.CodexRunOptions `json:"codex,omitempty"`
 }
 
+type runResponseSummary struct {
+	Total          int       `json:"total"`
+	Succeeded      int       `json:"succeeded"`
+	Failed         int       `json:"failed"`
+	Fanout         int       `json:"fanout"`
+	RetryCount     int       `json:"retry_count"`
+	RetryBackoffMS int64     `json:"retry_backoff_ms"`
+	DurationMS     int64     `json:"duration_ms"`
+	StartedAt      time.Time `json:"started_at"`
+	FinishedAt     time.Time `json:"finished_at"`
+}
+
+type runResponse struct {
+	Runtime string             `json:"runtime"`
+	Summary runResponseSummary `json:"summary"`
+	Targets []runTargetResult  `json:"targets"`
+}
+
 type syncRequest struct {
 	HostID         string   `json:"host_id,omitempty"`
 	HostIDs        []string `json:"host_ids,omitempty"`
@@ -172,25 +209,128 @@ type syncRequest struct {
 	Excludes []string `json:"excludes,omitempty"`
 }
 
+type preparedRun struct {
+	Request runRequest
+	Hosts   []model.Host
+	Spec    runtime.CommandSpec
+}
+
+type apiError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e apiError) Error() string {
+	return e.Message
+}
+
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req runRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
 		return
 	}
-	hosts, err := s.resolveHosts(req.HostID, req.HostIDs, req.AllHosts)
+	identity, _ := authIdentityFromContext(r.Context())
+	status, resp, err := s.executeRunRequest(r.Context(), req, identity)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
-	if err := runtime.ValidateRuntime(req.Runtime); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+	writeJSON(w, status, resp)
+}
+
+func (s *Server) handleEnqueueRunJob(w http.ResponseWriter, r *http.Request) {
+	var req runRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
 		return
+	}
+	prepared, err := s.prepareRun(req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	rawReq, err := json.Marshal(req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "encode run request failed"})
+		return
+	}
+	now := time.Now().UTC()
+	fanout := normalizeFanout(prepared.Request.Fanout, len(prepared.Hosts))
+	identity, _ := authIdentityFromContext(r.Context())
+	job := model.RunJobRecord{
+		ID:             fmt.Sprintf("job_%d", now.UnixNano()),
+		Type:           "run",
+		Status:         runJobStatusPending,
+		Runtime:        prepared.Request.Runtime,
+		PromptPreview:  promptPreview(prepared.Request.Prompt),
+		CreatedByKeyID: identity.KeyID,
+		QueuedAt:       now,
+		TotalHosts:     len(prepared.Hosts),
+		Fanout:         fanout,
+		Request:        rawReq,
+	}
+	if err := s.store.AddRunJob(job); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	select {
+	case s.runJobs <- job.ID:
+		writeJSON(w, http.StatusAccepted, map[string]any{"job": compactRunJob(job)})
+	default:
+		finished := time.Now().UTC()
+		job.Status = runJobStatusFailed
+		job.ResultStatus = http.StatusServiceUnavailable
+		job.Error = "run job queue is full"
+		job.FinishedAt = &finished
+		_ = s.store.UpdateRunJob(job)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": job.Error, "job": compactRunJob(job)})
+	}
+}
+
+func (s *Server) handleListRunJobs(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimit(r, 30, 500)
+	jobs := s.store.ListRunJobs(limit)
+	for i := range jobs {
+		jobs[i] = compactRunJob(jobs[i])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+}
+
+func (s *Server) handleGetRunJob(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing job id"})
+		return
+	}
+	job, ok := s.store.GetRunJob(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+func (s *Server) executeRunRequest(parentCtx context.Context, req runRequest, identity authIdentity) (int, runResponse, error) {
+	prepared, err := s.prepareRun(req)
+	if err != nil {
+		return 0, runResponse{}, err
+	}
+	status, resp := s.executePreparedRun(parentCtx, prepared, identity)
+	return status, resp, nil
+}
+
+func (s *Server) prepareRun(req runRequest) (preparedRun, error) {
+	hosts, err := s.resolveHosts(req.HostID, req.HostIDs, req.AllHosts)
+	if err != nil {
+		return preparedRun{}, apiError{StatusCode: http.StatusBadRequest, Message: err.Error()}
+	}
+	if err := runtime.ValidateRuntime(req.Runtime); err != nil {
+		return preparedRun{}, apiError{StatusCode: http.StatusBadRequest, Message: err.Error()}
 	}
 	adapter, ok := s.runtimes.Get(req.Runtime)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported runtime"})
-		return
+		return preparedRun{}, apiError{StatusCode: http.StatusBadRequest, Message: "unsupported runtime"}
 	}
 	spec, err := adapter.BuildRunCommand(runtime.RunRequest{
 		Prompt:    req.Prompt,
@@ -199,32 +339,34 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Codex:     req.Codex,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
+		return preparedRun{}, apiError{StatusCode: http.StatusBadRequest, Message: err.Error()}
 	}
+	return preparedRun{
+		Request: req,
+		Hosts:   hosts,
+		Spec:    spec,
+	}, nil
+}
+
+func (s *Server) executePreparedRun(parentCtx context.Context, prepared preparedRun, identity authIdentity) (int, runResponse) {
+	req := prepared.Request
 	timeout := 600 * time.Second
 	if req.TimeoutSec > 0 {
 		timeout = time.Duration(req.TimeoutSec) * time.Second
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
 	startedAt := time.Now().UTC()
-	fanout := req.Fanout
-	if fanout <= 0 {
-		fanout = 3
-	}
-	if fanout > len(hosts) {
-		fanout = len(hosts)
-	}
+	fanout := normalizeFanout(req.Fanout, len(prepared.Hosts))
 	retryCount, retryBackoff := resolveRetryPolicy(req.RetryCount, req.RetryBackoffMS)
 	maxOutputBytes := resolveMaxOutputBytes(req.MaxOutputKB)
-	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) runTargetResult {
+	targets := s.runFanout(ctx, prepared.Hosts, fanout, func(host model.Host) runTargetResult {
 		res, runErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func() (executor.ExecResult, error) {
 			return executor.RunViaSSH(
 				ctx,
 				host,
-				spec,
+				prepared.Spec,
 				resolveWorkdir(req.Workdir, host.Workspace),
 				executor.ExecOptions{
 					MaxStdoutBytes: maxOutputBytes,
@@ -251,46 +393,147 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			failed++
 		}
 	}
-
 	status := http.StatusOK
 	if failed > 0 {
 		status = http.StatusBadGateway
 	}
-
-	resp := map[string]any{
-		"runtime": req.Runtime,
-		"summary": map[string]any{
-			"total":            len(targets),
-			"succeeded":        len(targets) - failed,
-			"failed":           failed,
-			"fanout":           fanout,
-			"retry_count":      retryCount,
-			"retry_backoff_ms": retryBackoff.Milliseconds(),
-			"duration_ms":      finishedAt.Sub(startedAt).Milliseconds(),
-			"started_at":       startedAt,
-			"finished_at":      finishedAt,
+	resp := runResponse{
+		Runtime: req.Runtime,
+		Summary: runResponseSummary{
+			Total:          len(targets),
+			Succeeded:      len(targets) - failed,
+			Failed:         failed,
+			Fanout:         fanout,
+			RetryCount:     retryCount,
+			RetryBackoffMS: retryBackoff.Milliseconds(),
+			DurationMS:     finishedAt.Sub(startedAt).Milliseconds(),
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAt,
 		},
-		"targets": targets,
+		Targets: targets,
 	}
-
-	identity, _ := authIdentityFromContext(r.Context())
 	_ = s.store.AddRunRecord(model.RunRecord{
 		ID:             fmt.Sprintf("run_%d", finishedAt.UnixNano()),
 		Runtime:        req.Runtime,
 		PromptPreview:  promptPreview(req.Prompt),
-		TotalHosts:     len(targets),
-		SucceededHosts: len(targets) - failed,
-		FailedHosts:    failed,
-		Fanout:         fanout,
+		TotalHosts:     resp.Summary.Total,
+		SucceededHosts: resp.Summary.Succeeded,
+		FailedHosts:    resp.Summary.Failed,
+		Fanout:         resp.Summary.Fanout,
 		StatusCode:     status,
-		DurationMS:     finishedAt.Sub(startedAt).Milliseconds(),
+		DurationMS:     resp.Summary.DurationMS,
 		CreatedByKeyID: identity.KeyID,
-		StartedAt:      startedAt,
-		FinishedAt:     finishedAt,
+		StartedAt:      resp.Summary.StartedAt,
+		FinishedAt:     resp.Summary.FinishedAt,
 		Targets:        toRunTargetSummaries(targets),
 	})
+	return status, resp
+}
 
-	writeJSON(w, status, resp)
+func (s *Server) startRunJobWorkers(workers int) {
+	if workers <= 0 {
+		workers = 1
+	}
+	for i := 0; i < workers; i++ {
+		go s.runJobWorker()
+	}
+}
+
+func (s *Server) runJobWorker() {
+	for jobID := range s.runJobs {
+		s.executeRunJob(jobID)
+	}
+}
+
+func (s *Server) executeRunJob(jobID string) {
+	job, ok := s.store.GetRunJob(jobID)
+	if !ok || job.Status != runJobStatusPending {
+		return
+	}
+	started := time.Now().UTC()
+	job.Status = runJobStatusRunning
+	job.StartedAt = &started
+	job.Error = ""
+	if err := s.store.UpdateRunJob(job); err != nil {
+		return
+	}
+
+	var req runRequest
+	if err := json.Unmarshal(job.Request, &req); err != nil {
+		finished := time.Now().UTC()
+		job.Status = runJobStatusFailed
+		job.ResultStatus = http.StatusBadRequest
+		job.Error = fmt.Sprintf("decode run request: %v", err)
+		job.FinishedAt = &finished
+		_ = s.store.UpdateRunJob(job)
+		return
+	}
+
+	status, resp, err := s.executeRunRequest(context.Background(), req, authIdentity{KeyID: job.CreatedByKeyID})
+	finished := time.Now().UTC()
+	job.ResultStatus = status
+	job.FinishedAt = &finished
+	if err != nil {
+		var badReq apiError
+		if errors.As(err, &badReq) {
+			job.ResultStatus = badReq.StatusCode
+		}
+		if job.ResultStatus == 0 {
+			job.ResultStatus = http.StatusInternalServerError
+		}
+		job.Status = runJobStatusFailed
+		job.Error = err.Error()
+		_ = s.store.UpdateRunJob(job)
+		return
+	}
+	rawResp, err := json.Marshal(resp)
+	if err != nil {
+		job.Status = runJobStatusFailed
+		job.ResultStatus = http.StatusInternalServerError
+		job.Error = fmt.Sprintf("encode run response: %v", err)
+		_ = s.store.UpdateRunJob(job)
+		return
+	}
+	job.Status = runJobStatusSucceeded
+	job.Error = ""
+	job.Response = rawResp
+	job.TotalHosts = resp.Summary.Total
+	job.SucceededHosts = resp.Summary.Succeeded
+	job.FailedHosts = resp.Summary.Failed
+	job.Fanout = resp.Summary.Fanout
+	job.DurationMS = resp.Summary.DurationMS
+	_ = s.store.UpdateRunJob(job)
+}
+
+func compactRunJob(job model.RunJobRecord) model.RunJobRecord {
+	job.Request = nil
+	job.Response = nil
+	return job
+}
+
+func normalizeFanout(fanout int, hostCount int) int {
+	if hostCount <= 0 {
+		return 0
+	}
+	if fanout <= 0 {
+		fanout = 3
+	}
+	if fanout > hostCount {
+		fanout = hostCount
+	}
+	if fanout <= 0 {
+		return 1
+	}
+	return fanout
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	var badReq apiError
+	if errors.As(err, &badReq) {
+		writeJSON(w, badReq.StatusCode, map[string]any{"error": badReq.Message})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 }
 
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
@@ -726,6 +969,12 @@ func inferAction(method string, path string) string {
 		return "host.probe"
 	case method == http.MethodPost && path == "/v1/run":
 		return "run.execute"
+	case method == http.MethodPost && path == "/v1/jobs/run":
+		return "job.run.enqueue"
+	case method == http.MethodGet && path == "/v1/jobs":
+		return "job.list"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/"):
+		return "job.get"
 	case method == http.MethodPost && path == "/v1/sync":
 		return "sync.execute"
 	case method == http.MethodGet && path == "/v1/runs":

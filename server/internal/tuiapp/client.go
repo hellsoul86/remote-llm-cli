@@ -102,6 +102,25 @@ type RunResponse struct {
 	Targets []RunTarget `json:"targets"`
 }
 
+type RunJobRecord struct {
+	ID             string       `json:"id"`
+	Type           string       `json:"type"`
+	Status         string       `json:"status"`
+	Runtime        string       `json:"runtime"`
+	PromptPreview  string       `json:"prompt_preview"`
+	QueuedAt       string       `json:"queued_at"`
+	StartedAt      string       `json:"started_at,omitempty"`
+	FinishedAt     string       `json:"finished_at,omitempty"`
+	ResultStatus   int          `json:"result_status,omitempty"`
+	TotalHosts     int          `json:"total_hosts,omitempty"`
+	SucceededHosts int          `json:"succeeded_hosts,omitempty"`
+	FailedHosts    int          `json:"failed_hosts,omitempty"`
+	Fanout         int          `json:"fanout,omitempty"`
+	DurationMS     int64        `json:"duration_ms,omitempty"`
+	Error          string       `json:"error,omitempty"`
+	Response       *RunResponse `json:"response,omitempty"`
+}
+
 type RunRecord struct {
 	ID             string `json:"id"`
 	Runtime        string `json:"runtime"`
@@ -132,6 +151,14 @@ type listRunsResponse struct {
 
 type listAuditResponse struct {
 	Events []AuditEvent `json:"events"`
+}
+
+type enqueueRunJobResponse struct {
+	Job RunJobRecord `json:"job"`
+}
+
+type getRunJobResponse struct {
+	Job RunJobRecord `json:"job"`
 }
 
 func (c *APIClient) ListHosts() ([]Host, error) {
@@ -186,6 +213,57 @@ func (c *APIClient) Run(reqBody RunRequest) (int, RunResponse, error) {
 		out.Targets = []RunTarget{}
 	}
 	return res.StatusCode, out, nil
+}
+
+func (c *APIClient) EnqueueRun(reqBody RunRequest) (RunJobRecord, error) {
+	url := c.BaseURL + "/v1/jobs/run"
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return RunJobRecord{}, err
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return RunJobRecord{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.applyAuth(req)
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return RunJobRecord{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return RunJobRecord{}, fmt.Errorf("enqueue run failed: http %d", res.StatusCode)
+	}
+	var out enqueueRunJobResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return RunJobRecord{}, err
+	}
+	return out.Job, nil
+}
+
+func (c *APIClient) GetRunJob(id string) (RunJobRecord, error) {
+	url := fmt.Sprintf("%s/v1/jobs/%s", c.BaseURL, id)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return RunJobRecord{}, err
+	}
+	c.applyAuth(req)
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return RunJobRecord{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return RunJobRecord{}, fmt.Errorf("get run job failed: http %d", res.StatusCode)
+	}
+	var out getRunJobResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return RunJobRecord{}, err
+	}
+	return out.Job, nil
 }
 
 func (c *APIClient) ListRuns(limit int) ([]RunRecord, error) {
