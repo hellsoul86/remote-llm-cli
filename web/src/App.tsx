@@ -6,11 +6,13 @@ import {
   listRuns,
   listRuntimes,
   runFanout,
+  syncHosts,
   upsertHost,
   type AuditEvent,
   type Host,
   type RunRecord,
   type RunResponse,
+  type SyncResponse,
   type RuntimeInfo
 } from "./api";
 
@@ -37,9 +39,24 @@ export function App() {
   const [runEphemeral, setRunEphemeral] = useState(false);
   const [runResumeLast, setRunResumeLast] = useState(true);
   const [runSessionID, setRunSessionID] = useState("");
+  const [runRetryCountValue, setRunRetryCountValue] = useState("0");
+  const [runRetryBackoffMSValue, setRunRetryBackoffMSValue] = useState("1000");
   const [selectedHostIDs, setSelectedHostIDs] = useState<string[]>([]);
   const [runStatus, setRunStatus] = useState<number | null>(null);
   const [runResult, setRunResult] = useState<RunResponse | null>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncAllHosts, setSyncAllHosts] = useState(true);
+  const [syncSelectedHostIDs, setSyncSelectedHostIDs] = useState<string[]>([]);
+  const [syncSrc, setSyncSrc] = useState("./");
+  const [syncDst, setSyncDst] = useState("workspace");
+  const [syncDelete, setSyncDelete] = useState(false);
+  const [syncExcludes, setSyncExcludes] = useState(".git,node_modules");
+  const [syncFanoutValue, setSyncFanoutValue] = useState("3");
+  const [syncMaxOutputKB, setSyncMaxOutputKB] = useState("256");
+  const [syncRetryCountValue, setSyncRetryCountValue] = useState("0");
+  const [syncRetryBackoffMSValue, setSyncRetryBackoffMSValue] = useState("1000");
+  const [syncStatus, setSyncStatus] = useState<number | null>(null);
+  const [syncResult, setSyncResult] = useState<SyncResponse | null>(null);
   const [runHistory, setRunHistory] = useState<RunRecord[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
 
@@ -68,6 +85,7 @@ export function App() {
       setRunHistory(nextRuns);
       setAuditEvents(nextAudit);
       setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
+      setSyncSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
       setMessage(`loaded ${nextHosts.length} hosts, ${nextRuns.length} runs, ${nextAudit.length} events`);
     } catch (e) {
       setMessage(String(e));
@@ -104,6 +122,13 @@ export function App() {
     });
   }
 
+  function toggleSyncHost(id: string) {
+    setSyncSelectedHostIDs((prev) => {
+      if (prev.includes(id)) return prev.filter((v) => v !== id);
+      return [...prev, id];
+    });
+  }
+
   async function onRunCodex(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!token.trim()) {
@@ -125,6 +150,8 @@ export function App() {
 
     const fanout = Math.max(1, Number.parseInt(runFanoutValue, 10) || 1);
     const maxOutputKB = Math.max(32, Number.parseInt(runMaxOutputKB, 10) || 256);
+    const retryCount = Math.max(0, Number.parseInt(runRetryCountValue, 10) || 0);
+    const retryBackoffMS = Math.max(100, Number.parseInt(runRetryBackoffMSValue, 10) || 1000);
     setRunLoading(true);
     setRunResult(null);
     setRunStatus(null);
@@ -145,6 +172,8 @@ export function App() {
         prompt: runPrompt.trim(),
         fanout,
         max_output_kb: maxOutputKB,
+        retry_count: retryCount,
+        retry_backoff_ms: retryBackoffMS,
         all_hosts: runAllHosts,
         host_ids: runAllHosts ? undefined : selectedHostIDs,
         workdir: runWorkdir.trim() || undefined,
@@ -160,6 +189,60 @@ export function App() {
       setMessage(String(err));
     } finally {
       setRunLoading(false);
+    }
+  }
+
+  async function onSyncHosts(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!token.trim()) {
+      setMessage("set access key first");
+      return;
+    }
+    if (!syncSrc.trim() || !syncDst.trim()) {
+      setMessage("sync src and dst are required");
+      return;
+    }
+    if (!syncAllHosts && syncSelectedHostIDs.length === 0) {
+      setMessage("select at least one host or enable sync all hosts");
+      return;
+    }
+
+    const fanout = Math.max(1, Number.parseInt(syncFanoutValue, 10) || 1);
+    const maxOutputKB = Math.max(32, Number.parseInt(syncMaxOutputKB, 10) || 256);
+    const retryCount = Math.max(0, Number.parseInt(syncRetryCountValue, 10) || 0);
+    const retryBackoffMS = Math.max(100, Number.parseInt(syncRetryBackoffMSValue, 10) || 1000);
+    const excludes = syncExcludes
+      .split(",")
+      .map((x) => x.trim())
+      .filter((x) => x.length > 0);
+
+    setSyncLoading(true);
+    setSyncStatus(null);
+    setSyncResult(null);
+    setMessage("");
+    try {
+      const { status, body } = await syncHosts(token, {
+        src: syncSrc.trim(),
+        dst: syncDst.trim(),
+        fanout,
+        max_output_kb: maxOutputKB,
+        retry_count: retryCount,
+        retry_backoff_ms: retryBackoffMS,
+        all_hosts: syncAllHosts,
+        host_ids: syncAllHosts ? undefined : syncSelectedHostIDs,
+        delete: syncDelete,
+        excludes: excludes.length > 0 ? excludes : undefined
+      });
+      setSyncStatus(status);
+      setSyncResult(body);
+      setMessage(`sync finished with HTTP ${status}, failed=${body.summary.failed}`);
+      const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
+      setRunHistory(nextRuns);
+      setAuditEvents(nextAudit);
+    } catch (err) {
+      setMessage(String(err));
+    } finally {
+      setSyncLoading(false);
     }
   }
 
@@ -292,6 +375,14 @@ export function App() {
             fanout
             <input value={runFanoutValue} onChange={(e) => setRunFanoutValue(e.target.value)} />
           </label>
+          <label>
+            retry count
+            <input value={runRetryCountValue} onChange={(e) => setRunRetryCountValue(e.target.value)} />
+          </label>
+          <label>
+            retry backoff ms
+            <input value={runRetryBackoffMSValue} onChange={(e) => setRunRetryBackoffMSValue(e.target.value)} />
+          </label>
           <label className="inline">
             <input type="checkbox" checked={runAllHosts} onChange={(e) => setRunAllHosts(e.target.checked)} />
             all hosts
@@ -332,17 +423,96 @@ export function App() {
           <div className="run-result">
             <p>
               status={runStatus} total={runResult.summary.total} ok={runResult.summary.succeeded} failed=
-              {runResult.summary.failed} fanout={runResult.summary.fanout} duration={runResult.summary.duration_ms}ms
+              {runResult.summary.failed} fanout={runResult.summary.fanout} retry={runResult.summary.retry_count ?? 0}
+              /{runResult.summary.retry_backoff_ms ?? 0}ms duration={runResult.summary.duration_ms}ms
             </p>
             <ul>
               {runResult.targets.map((t) => (
                 <li key={t.host.id}>
                   <strong>{t.host.name}</strong> ok={String(t.ok)} exit={t.result.exit_code ?? "n/a"} dur=
                   {t.result.duration_ms ?? 0}ms stdout={t.result.stdout_bytes ?? 0}B stderr={t.result.stderr_bytes ?? 0}
-                  B
+                  B attempts={t.attempts ?? 1}
                   {t.result.stdout_truncated ? " stdout_truncated=true" : ""}
                   {t.result.stderr_truncated ? " stderr_truncated=true" : ""}
                   {t.codex ? ` codex_events=${t.codex.event_count} invalid_json_lines=${t.codex.invalid_lines ?? 0}` : ""}
+                  {t.error ? ` error=${t.error}` : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="card">
+        <h2>Sync Files (rsync)</h2>
+        <form onSubmit={onSyncHosts} className="grid">
+          <input value={syncSrc} onChange={(e) => setSyncSrc(e.target.value)} placeholder="local src path (controller)" className="wide" />
+          <input value={syncDst} onChange={(e) => setSyncDst(e.target.value)} placeholder="remote dst path" className="wide" />
+          <label>
+            fanout
+            <input value={syncFanoutValue} onChange={(e) => setSyncFanoutValue(e.target.value)} />
+          </label>
+          <label>
+            max output KB
+            <input value={syncMaxOutputKB} onChange={(e) => setSyncMaxOutputKB(e.target.value)} />
+          </label>
+          <label>
+            retry count
+            <input value={syncRetryCountValue} onChange={(e) => setSyncRetryCountValue(e.target.value)} />
+          </label>
+          <label>
+            retry backoff ms
+            <input value={syncRetryBackoffMSValue} onChange={(e) => setSyncRetryBackoffMSValue(e.target.value)} />
+          </label>
+          <input
+            value={syncExcludes}
+            onChange={(e) => setSyncExcludes(e.target.value)}
+            placeholder="excludes (comma separated), e.g. .git,node_modules"
+            className="wide"
+          />
+          <label className="inline">
+            <input type="checkbox" checked={syncAllHosts} onChange={(e) => setSyncAllHosts(e.target.checked)} />
+            all hosts
+          </label>
+          <label className="inline">
+            <input type="checkbox" checked={syncDelete} onChange={(e) => setSyncDelete(e.target.checked)} />
+            delete extra remote files
+          </label>
+          <button type="submit" disabled={syncLoading}>
+            {syncLoading ? "Syncing..." : "Sync"}
+          </button>
+        </form>
+
+        {!syncAllHosts ? (
+          <div className="host-grid">
+            {hosts.map((h) => (
+              <label key={h.id} className="inline">
+                <input
+                  type="checkbox"
+                  checked={syncSelectedHostIDs.includes(h.id)}
+                  onChange={() => toggleSyncHost(h.id)}
+                />
+                {h.name}
+              </label>
+            ))}
+          </div>
+        ) : null}
+
+        {syncResult ? (
+          <div className="run-result">
+            <p>
+              status={syncStatus} total={syncResult.summary.total} ok={syncResult.summary.succeeded} failed=
+              {syncResult.summary.failed} fanout={syncResult.summary.fanout} retry={syncResult.summary.retry_count ?? 0}
+              /{syncResult.summary.retry_backoff_ms ?? 0}ms duration={syncResult.summary.duration_ms}ms
+            </p>
+            <ul>
+              {syncResult.targets.map((t) => (
+                <li key={t.host.id}>
+                  <strong>{t.host.name}</strong> ok={String(t.ok)} exit={t.result.exit_code ?? "n/a"} dur=
+                  {t.result.duration_ms ?? 0}ms stdout={t.result.stdout_bytes ?? 0}B stderr={t.result.stderr_bytes ?? 0}
+                  B attempts={t.attempts ?? 1}
+                  {t.result.stdout_truncated ? " stdout_truncated=true" : ""}
+                  {t.result.stderr_truncated ? " stderr_truncated=true" : ""}
                   {t.error ? ` error=${t.error}` : ""}
                 </li>
               ))}

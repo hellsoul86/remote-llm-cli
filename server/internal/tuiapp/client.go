@@ -26,12 +26,13 @@ func NewAPIClient(baseURL string, token string) *APIClient {
 }
 
 type Host struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Host      string `json:"host"`
-	User      string `json:"user"`
-	Port      int    `json:"port"`
-	Workspace string `json:"workspace,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Host         string `json:"host"`
+	User         string `json:"user"`
+	Port         int    `json:"port"`
+	IdentityFile string `json:"identity_file,omitempty"`
+	Workspace    string `json:"workspace,omitempty"`
 }
 
 type ListHostsResponse struct {
@@ -39,14 +40,16 @@ type ListHostsResponse struct {
 }
 
 type RunRequest struct {
-	Runtime     string           `json:"runtime"`
-	Prompt      string           `json:"prompt"`
-	HostIDs     []string         `json:"host_ids,omitempty"`
-	AllHosts    bool             `json:"all_hosts,omitempty"`
-	Fanout      int              `json:"fanout,omitempty"`
-	Workdir     string           `json:"workdir,omitempty"`
-	MaxOutputKB int              `json:"max_output_kb,omitempty"`
-	Codex       *CodexRunOptions `json:"codex,omitempty"`
+	Runtime        string           `json:"runtime"`
+	Prompt         string           `json:"prompt"`
+	HostIDs        []string         `json:"host_ids,omitempty"`
+	AllHosts       bool             `json:"all_hosts,omitempty"`
+	Fanout         int              `json:"fanout,omitempty"`
+	Workdir        string           `json:"workdir,omitempty"`
+	MaxOutputKB    int              `json:"max_output_kb,omitempty"`
+	RetryCount     int              `json:"retry_count,omitempty"`
+	RetryBackoffMS int              `json:"retry_backoff_ms,omitempty"`
+	Codex          *CodexRunOptions `json:"codex,omitempty"`
 }
 
 type CodexRunOptions struct {
@@ -73,9 +76,10 @@ type RunTarget struct {
 		StdoutTruncated bool  `json:"stdout_truncated"`
 		StderrTruncated bool  `json:"stderr_truncated"`
 	} `json:"result"`
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
-	Codex *struct {
+	OK       bool   `json:"ok"`
+	Error    string `json:"error"`
+	Attempts int    `json:"attempts"`
+	Codex    *struct {
 		JSONL         bool   `json:"jsonl"`
 		EventCount    int    `json:"event_count"`
 		InvalidLines  int    `json:"invalid_lines"`
@@ -87,11 +91,13 @@ type RunTarget struct {
 type RunResponse struct {
 	Runtime string `json:"runtime"`
 	Summary struct {
-		Total      int   `json:"total"`
-		Succeeded  int   `json:"succeeded"`
-		Failed     int   `json:"failed"`
-		Fanout     int   `json:"fanout"`
-		DurationMS int64 `json:"duration_ms"`
+		Total          int   `json:"total"`
+		Succeeded      int   `json:"succeeded"`
+		Failed         int   `json:"failed"`
+		Fanout         int   `json:"fanout"`
+		RetryCount     int   `json:"retry_count"`
+		RetryBackoffMS int64 `json:"retry_backoff_ms"`
+		DurationMS     int64 `json:"duration_ms"`
 	} `json:"summary"`
 	Targets []RunTarget `json:"targets"`
 }

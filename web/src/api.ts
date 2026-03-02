@@ -31,6 +31,8 @@ export type RunRequest = {
   extra_args?: string[];
   timeout_sec?: number;
   max_output_kb?: number;
+  retry_count?: number;
+  retry_backoff_ms?: number;
   codex?: {
     mode?: "exec" | "resume" | "review";
     session_id?: string;
@@ -77,6 +79,7 @@ export type RunTargetResult = {
   };
   ok: boolean;
   error?: string | null;
+  attempts?: number;
   codex?: {
     jsonl: boolean;
     event_count: number;
@@ -93,6 +96,39 @@ export type RunResponse = {
     succeeded: number;
     failed: number;
     fanout: number;
+    retry_count?: number;
+    retry_backoff_ms?: number;
+    duration_ms: number;
+    started_at: string;
+    finished_at: string;
+  };
+  targets: RunTargetResult[];
+};
+
+export type SyncRequest = {
+  host_id?: string;
+  host_ids?: string[];
+  all_hosts?: boolean;
+  fanout?: number;
+  timeout_sec?: number;
+  max_output_kb?: number;
+  retry_count?: number;
+  retry_backoff_ms?: number;
+  src: string;
+  dst: string;
+  delete?: boolean;
+  excludes?: string[];
+};
+
+export type SyncResponse = {
+  operation: "sync";
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    fanout: number;
+    retry_count?: number;
+    retry_backoff_ms?: number;
     duration_ms: number;
     started_at: string;
     finished_at: string;
@@ -186,6 +222,19 @@ export async function runFanout(token: string, request: RunRequest): Promise<{ s
   const body = await res.json();
   if (!res.ok && !body?.summary) {
     throw new Error(`run failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return { status: res.status, body };
+}
+
+export async function syncHosts(token: string, request: SyncRequest): Promise<{ status: number; body: SyncResponse }> {
+  const res = await fetch(`${API_BASE}/v1/sync`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok && !body?.summary) {
+    throw new Error(`sync failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return { status: res.status, body };
 }
