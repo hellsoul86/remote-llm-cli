@@ -80,7 +80,9 @@ Default API URL is `http://localhost:8080`.
 - `r`: execute run
 - `u`: toggle run mode (`async job` / `sync request`)
 - `h`: reload run/audit history
-- `Tab`: switch pane (`control` / `runs` / `audit`)
+- `Tab`: switch pane (`control` / `runs` / `audit` / `jobs`)
+- `J`: reload jobs list (in `jobs` pane)
+- `Enter` / `w`: watch selected job (in `jobs` pane)
 - `a`: toggle all-host mode
 - `space`: toggle selected host (when all-host mode is off)
 - `p`: edit prompt
