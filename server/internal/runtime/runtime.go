@@ -27,6 +27,10 @@ type Adapter interface {
 	BuildProbeCommand() CommandSpec
 }
 
+type ContractAware interface {
+	Contract() model.RuntimeContract
+}
+
 type Registry struct {
 	adapters map[string]Adapter
 }
@@ -72,9 +76,19 @@ func (r *Registry) List() []model.RuntimeInfo {
 	out := make([]model.RuntimeInfo, 0, len(names))
 	for _, name := range names {
 		a := r.adapters[name]
+		contract := model.RuntimeContract{
+			Version:           "v1",
+			PromptRequired:    true,
+			SupportsWorkdir:   true,
+			SupportsExtraArgs: true,
+		}
+		if v2, ok := a.(ContractAware); ok {
+			contract = v2.Contract()
+		}
 		out = append(out, model.RuntimeInfo{
 			Name:         a.Name(),
 			Capabilities: a.Capabilities(),
+			Contract:     contract,
 		})
 	}
 	return out

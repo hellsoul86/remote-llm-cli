@@ -23,6 +23,12 @@ export type RuntimeInfo = {
     supports_file_patch_mode: boolean;
     supports_cost_metrics: boolean;
   };
+  contract?: {
+    version: string;
+    prompt_required: boolean;
+    supports_workdir: boolean;
+    supports_extra_args: boolean;
+  };
 };
 
 export type RunRequest = {

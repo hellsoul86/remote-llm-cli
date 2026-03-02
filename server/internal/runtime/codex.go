@@ -23,6 +23,15 @@ func (a *CodexAdapter) Capabilities() model.RuntimeCapabilities {
 	}
 }
 
+func (a *CodexAdapter) Contract() model.RuntimeContract {
+	return model.RuntimeContract{
+		Version:           "v2",
+		PromptRequired:    false,
+		SupportsWorkdir:   true,
+		SupportsExtraArgs: true,
+	}
+}
+
 func (a *CodexAdapter) BuildProbeCommand() CommandSpec {
 	return CommandSpec{Program: "codex", Args: []string{"--version"}}
 }

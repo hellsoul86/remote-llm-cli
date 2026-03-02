@@ -26,7 +26,10 @@ func main() {
 		log.Fatalf("open store: %v", err)
 	}
 
-	rt := runtime.NewRegistry(runtime.NewCodexAdapter())
+	rt := runtime.NewRegistry(
+		runtime.NewCodexAdapter(),
+		runtime.NewClaudeCodeAdapter(),
+	)
 	if path := strings.TrimSpace(*runtimeConfig); path != "" {
 		adapters, err := runtime.LoadTemplateAdaptersFromFile(path)
 		if err != nil {
