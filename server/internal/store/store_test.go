@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -151,5 +152,67 @@ func TestRunJobLifecycleAndOrdering(t *testing.T) {
 	}
 	if string(gotBAgain.Request) != `{"runtime":"codex","prompt":"b"}` {
 		t.Fatalf("request bytes were unexpectedly mutated: %s", string(gotBAgain.Request))
+	}
+}
+
+func TestRetentionPolicyUpdateCapsRecords(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	now := time.Now().UTC()
+	for i := 0; i < 150; i++ {
+		if err := st.AddRunRecord(model.RunRecord{
+			ID:         fmt.Sprintf("run_%03d", i),
+			Runtime:    "codex",
+			StartedAt:  now.Add(time.Duration(i) * time.Second),
+			FinishedAt: now.Add(time.Duration(i+1) * time.Second),
+		}); err != nil {
+			t.Fatalf("add run record %d: %v", i, err)
+		}
+	}
+	policy, err := st.UpdateRetentionPolicy(model.RetentionPolicy{
+		RunRecordsMax:  100,
+		RunJobsMax:     100,
+		AuditEventsMax: 100,
+	})
+	if err != nil {
+		t.Fatalf("update retention: %v", err)
+	}
+	if policy.RunRecordsMax != 100 {
+		t.Fatalf("run_records_max=%d want=100", policy.RunRecordsMax)
+	}
+	if got := st.ListRunRecords(0); len(got) != 100 {
+		t.Fatalf("run records count=%d want=100", len(got))
+	}
+}
+
+func TestRunJobHostIDsAreCloned(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job := model.RunJobRecord{
+		ID:       "job_hosts",
+		Type:     "run",
+		Status:   "pending",
+		Runtime:  "codex",
+		QueuedAt: time.Now().UTC(),
+		HostIDs:  []string{"h_1", "h_2"},
+	}
+	if err := st.AddRunJob(job); err != nil {
+		t.Fatalf("add run job: %v", err)
+	}
+	got, ok := st.GetRunJob(job.ID)
+	if !ok {
+		t.Fatalf("job not found")
+	}
+	got.HostIDs[0] = "mutated"
+	again, ok := st.GetRunJob(job.ID)
+	if !ok {
+		t.Fatalf("job not found on second read")
+	}
+	if again.HostIDs[0] != "h_1" {
+		t.Fatalf("host ids unexpectedly mutated: %#v", again.HostIDs)
 	}
 }

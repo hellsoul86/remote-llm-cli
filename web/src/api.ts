@@ -174,6 +174,7 @@ export type RunJobRecord = {
   status: "pending" | "running" | "succeeded" | "failed" | "canceled";
   runtime: string;
   prompt_preview: string;
+  host_ids?: string[];
   created_by_key_id?: string;
   queued_at: string;
   started_at?: string;
@@ -199,6 +200,31 @@ export type AuditEvent = {
   remote_addr?: string;
   created_by_key_id?: string;
   action: string;
+};
+
+export type RetentionPolicy = {
+  run_records_max: number;
+  run_jobs_max: number;
+  audit_events_max: number;
+};
+
+export type MetricsResponse = {
+  jobs: {
+    total: number;
+    pending: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    canceled: number;
+    retry_attempts: number;
+  };
+  queue: {
+    depth: number;
+    workers_total: number;
+    workers_active: number;
+    worker_utilization: number;
+  };
+  success_rate: number;
 };
 
 export type CodexSessionInfo = {
@@ -296,8 +322,24 @@ export async function enqueueSyncJob(token: string, request: SyncRequest): Promi
   return { status: res.status, body };
 }
 
-export async function listRunJobs(token: string, limit = 30): Promise<RunJobRecord[]> {
-  const res = await fetch(`${API_BASE}/v1/jobs?limit=${encodeURIComponent(String(limit))}`, { headers: headers(token) });
+type JobListFilters = {
+  status?: string[];
+  type?: string[];
+  runtime?: string[];
+  host_id?: string;
+  from?: string;
+  to?: string;
+};
+
+export async function listRunJobs(token: string, limit = 30, filters?: JobListFilters): Promise<RunJobRecord[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (filters?.status && filters.status.length > 0) params.set("status", filters.status.join(","));
+  if (filters?.type && filters.type.length > 0) params.set("type", filters.type.join(","));
+  if (filters?.runtime && filters.runtime.length > 0) params.set("runtime", filters.runtime.join(","));
+  if (filters?.host_id) params.set("host_id", filters.host_id);
+  if (filters?.from) params.set("from", filters.from);
+  if (filters?.to) params.set("to", filters.to);
+  const res = await fetch(`${API_BASE}/v1/jobs?${params.toString()}`, { headers: headers(token) });
   if (!res.ok) throw new Error(`list jobs failed: ${res.status}`);
   const body = await res.json();
   return body.jobs ?? [];
@@ -362,9 +404,49 @@ export async function listRuns(token: string, limit = 20): Promise<RunRecord[]> 
   return body.runs ?? [];
 }
 
-export async function listAudit(token: string, limit = 100): Promise<AuditEvent[]> {
-  const res = await fetch(`${API_BASE}/v1/audit?limit=${encodeURIComponent(String(limit))}`, { headers: headers(token) });
+type AuditListFilters = {
+  status?: number;
+  action?: string;
+  method?: string;
+  path_prefix?: string;
+  from?: string;
+  to?: string;
+};
+
+export async function listAudit(token: string, limit = 100, filters?: AuditListFilters): Promise<AuditEvent[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (filters?.status) params.set("status", String(filters.status));
+  if (filters?.action) params.set("action", filters.action);
+  if (filters?.method) params.set("method", filters.method);
+  if (filters?.path_prefix) params.set("path_prefix", filters.path_prefix);
+  if (filters?.from) params.set("from", filters.from);
+  if (filters?.to) params.set("to", filters.to);
+  const res = await fetch(`${API_BASE}/v1/audit?${params.toString()}`, { headers: headers(token) });
   if (!res.ok) throw new Error(`list audit failed: ${res.status}`);
   const body = await res.json();
   return body.events ?? [];
+}
+
+export async function getMetrics(token: string): Promise<MetricsResponse> {
+  const res = await fetch(`${API_BASE}/v1/metrics`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`metrics failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getRetentionPolicy(token: string): Promise<RetentionPolicy> {
+  const res = await fetch(`${API_BASE}/v1/admin/retention`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`get retention failed: ${res.status}`);
+  const body = await res.json();
+  return body.retention;
+}
+
+export async function setRetentionPolicy(token: string, retention: RetentionPolicy): Promise<RetentionPolicy> {
+  const res = await fetch(`${API_BASE}/v1/admin/retention`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(retention)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.retention) throw new Error(`set retention failed: ${res.status} ${JSON.stringify(body)}`);
+  return body.retention;
 }

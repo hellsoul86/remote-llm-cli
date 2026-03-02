@@ -77,12 +77,16 @@ Default API URL is `http://localhost:8080`.
 - Async sync jobs on the same scheduler (`POST /v1/jobs/sync`)
 - Job cancellation API (`POST /v1/jobs/{id}/cancel`)
 - Codex session discovery and cleanup (`POST /v1/codex/sessions/discover`, `POST /v1/codex/sessions/cleanup`)
+- Filterable jobs and audit APIs (`status`/`runtime`/`type`/`host_id`/time range)
+- Retention policy API for runs/jobs/audit (`GET/POST /v1/admin/retention`)
+- Metrics API for queue depth, worker utilization, and success rate (`GET /v1/metrics`)
 - Retry policy for run/sync (`retry_count`, `retry_backoff_ms`)
 - Safe output capture limit (`max_output_kb`, includes truncation metadata in response)
 - Run history API (`GET /v1/runs`)
 - Audit event API (`GET /v1/audit`)
 - Go TUI CLI for terminal-first operations (`server/cmd/remote-llm-cli`)
 - Web console MVP (health, runtime list, host list/add)
+- Operational runbook: [`docs/operations-runbook.md`](docs/operations-runbook.md)
 
 ## TUI controls
 
@@ -221,6 +225,40 @@ curl -X POST http://localhost:8080/v1/codex/sessions/cleanup \
     "all_hosts": true,
     "older_than_hours": 168,
     "dry_run": true
+  }'
+```
+
+## Jobs & Audit Filter API example
+
+```bash
+# jobs: only failed+running sync/codex jobs for one host
+curl -X GET "http://localhost:8080/v1/jobs?limit=100&status=failed,running&type=run,sync&runtime=codex,sync&host_id=h_123" \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY"
+
+# audit: only cancel events with 2xx status
+curl -X GET "http://localhost:8080/v1/audit?limit=100&action=job.cancel&status=200" \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY"
+```
+
+## Metrics & Retention API example
+
+```bash
+# metrics snapshot
+curl -X GET "http://localhost:8080/v1/metrics" \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY"
+
+# read retention policy
+curl -X GET "http://localhost:8080/v1/admin/retention" \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY"
+
+# update retention policy
+curl -X POST "http://localhost:8080/v1/admin/retention" \
+  -H "Authorization: Bearer $REMOTE_LLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "run_records_max": 1000,
+    "run_jobs_max": 5000,
+    "audit_events_max": 10000
   }'
 ```
 

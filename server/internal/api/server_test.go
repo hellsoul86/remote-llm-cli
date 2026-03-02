@@ -79,6 +79,9 @@ func TestInferAction(t *testing.T) {
 		{name: "sync execute", method: http.MethodPost, path: "/v1/sync", want: "sync.execute"},
 		{name: "codex sessions discover", method: http.MethodPost, path: "/v1/codex/sessions/discover", want: "codex.sessions.discover"},
 		{name: "codex sessions cleanup", method: http.MethodPost, path: "/v1/codex/sessions/cleanup", want: "codex.sessions.cleanup"},
+		{name: "metrics get", method: http.MethodGet, path: "/v1/metrics", want: "metrics.get"},
+		{name: "retention get", method: http.MethodGet, path: "/v1/admin/retention", want: "retention.get"},
+		{name: "retention set", method: http.MethodPost, path: "/v1/admin/retention", want: "retention.set"},
 		{name: "run list", method: http.MethodGet, path: "/v1/runs", want: "run.list"},
 		{name: "audit list", method: http.MethodGet, path: "/v1/audit", want: "audit.list"},
 		{name: "unknown", method: http.MethodPatch, path: "/v1/other", want: "request"},
@@ -190,6 +193,26 @@ func TestErrorDetailsFromClassifiedError(t *testing.T) {
 	}
 	if hint != "verify key" {
 		t.Fatalf("hint=%q want=verify key", hint)
+	}
+}
+
+func TestSplitQueryCSV(t *testing.T) {
+	set := splitQueryCSV("running, failed ,")
+	if !setContains(set, "running") || !setContains(set, "failed") {
+		t.Fatalf("unexpected set contents: %#v", set)
+	}
+	if setContains(set, "pending") {
+		t.Fatalf("pending should not be present")
+	}
+}
+
+func TestJobMatchesHost(t *testing.T) {
+	job := model.RunJobRecord{HostIDs: []string{"h_1", "h_2"}}
+	if !jobMatchesHost(job, "h_2") {
+		t.Fatalf("job should match host h_2")
+	}
+	if jobMatchesHost(job, "h_3") {
+		t.Fatalf("job should not match host h_3")
 	}
 }
 
