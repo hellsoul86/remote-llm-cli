@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
   enqueueRunJob,
+  enqueueSyncJob,
   getRunJob,
   healthz,
   listAudit,
@@ -54,6 +55,7 @@ export function App() {
   const [activeRunJob, setActiveRunJob] = useState<RunJobRecord | null>(null);
   const [runJobPolling, setRunJobPolling] = useState(false);
   const [syncLoading, setSyncLoading] = useState(false);
+  const [syncAsyncMode, setSyncAsyncMode] = useState(true);
   const [syncAllHosts, setSyncAllHosts] = useState(true);
   const [syncSelectedHostIDs, setSyncSelectedHostIDs] = useState<string[]>([]);
   const [syncSrc, setSyncSrc] = useState("./");
@@ -78,6 +80,11 @@ export function App() {
   function isRunJobActive(job: RunJobRecord | null | undefined): boolean {
     if (!job) return false;
     return job.status === "pending" || job.status === "running";
+  }
+
+  function isRunResponsePayload(v: unknown): v is RunResponse {
+    if (!v || typeof v !== "object") return false;
+    return "runtime" in v && "summary" in v && "targets" in v && !("operation" in v);
   }
 
   async function refresh() {
@@ -130,7 +137,7 @@ export function App() {
         if (!isRunJobActive(job)) {
           setRunJobPolling(false);
           setRunStatus(job.result_status ?? null);
-          if (job.response) setRunResult(job.response);
+          if (isRunResponsePayload(job.response)) setRunResult(job.response);
           const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
           if (canceled) return;
           setRunHistory(nextRuns);
@@ -288,7 +295,7 @@ export function App() {
     setSyncResult(null);
     setMessage("");
     try {
-      const { status, body } = await syncHosts(token, {
+      const syncRequest = {
         src: syncSrc.trim(),
         dst: syncDst.trim(),
         fanout,
@@ -299,13 +306,25 @@ export function App() {
         host_ids: syncAllHosts ? undefined : syncSelectedHostIDs,
         delete: syncDelete,
         excludes: excludes.length > 0 ? excludes : undefined
-      });
-      setSyncStatus(status);
-      setSyncResult(body);
-      setMessage(`sync finished with HTTP ${status}, failed=${body.summary.failed}`);
-      const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
-      setRunHistory(nextRuns);
-      setAuditEvents(nextAudit);
+      };
+      if (syncAsyncMode) {
+        const { status, body } = await enqueueSyncJob(token, syncRequest);
+        setActiveRunJobID(body.job.id);
+        setActiveRunJob(body.job);
+        setRunJobPolling(isRunJobActive(body.job));
+        setMessage(`sync job accepted with HTTP ${status}: ${body.job.id}`);
+        const [nextJobs, nextAudit] = await Promise.all([listRunJobs(token, 30), listAudit(token, 80)]);
+        setRunJobs(nextJobs);
+        setAuditEvents(nextAudit);
+      } else {
+        const { status, body } = await syncHosts(token, syncRequest);
+        setSyncStatus(status);
+        setSyncResult(body);
+        setMessage(`sync finished with HTTP ${status}, failed=${body.summary.failed}`);
+        const [nextRuns, nextAudit] = await Promise.all([listRuns(token, 20), listAudit(token, 80)]);
+        setRunHistory(nextRuns);
+        setAuditEvents(nextAudit);
+      }
     } catch (err) {
       setMessage(String(err));
     } finally {
@@ -542,7 +561,7 @@ export function App() {
                 >
                   watch
                 </button>{" "}
-                <strong>{job.id}</strong> status={job.status} runtime={job.runtime} hosts={job.total_hosts ?? 0} ok=
+                <strong>{job.id}</strong> type={job.type} status={job.status} runtime={job.runtime} hosts={job.total_hosts ?? 0} ok=
                 {job.succeeded_hosts ?? 0} failed={job.failed_hosts ?? 0} http={job.result_status ?? "n/a"} dur=
                 {job.duration_ms ?? 0}ms
                 {job.error ? ` error=${job.error}` : ""}
@@ -584,11 +603,15 @@ export function App() {
             all hosts
           </label>
           <label className="inline">
+            <input type="checkbox" checked={syncAsyncMode} onChange={(e) => setSyncAsyncMode(e.target.checked)} />
+            async job mode
+          </label>
+          <label className="inline">
             <input type="checkbox" checked={syncDelete} onChange={(e) => setSyncDelete(e.target.checked)} />
             delete extra remote files
           </label>
           <button type="submit" disabled={syncLoading}>
-            {syncLoading ? "Syncing..." : "Sync"}
+            {syncLoading ? (syncAsyncMode ? "Queueing..." : "Syncing...") : syncAsyncMode ? "Queue Sync Job" : "Sync"}
           </button>
         </form>
 

@@ -598,8 +598,9 @@ func (m Model) viewControlPane(b *strings.Builder) {
 	}
 	if m.activeJob != nil {
 		b.WriteString(fmt.Sprintf(
-			"\nActive Job: id=%s status=%s runtime=%s total=%d ok=%d failed=%d http=%d dur=%dms\n",
+			"\nActive Job: id=%s type=%s status=%s runtime=%s total=%d ok=%d failed=%d http=%d dur=%dms\n",
 			m.activeJob.ID,
+			m.activeJob.Type,
 			m.activeJob.Status,
 			m.activeJob.Runtime,
 			m.activeJob.TotalHosts,
@@ -713,11 +714,12 @@ func (m Model) viewJobsPane(b *strings.Builder) {
 			tail = " err=" + clamp(strings.TrimSpace(job.Error), 80)
 		}
 		b.WriteString(fmt.Sprintf(
-			"%s%s %2d. id=%s status=%s runtime=%s hosts=%d ok=%d failed=%d http=%d dur=%dms prompt=%q%s\n",
+			"%s%s %2d. id=%s type=%s status=%s runtime=%s hosts=%d ok=%d failed=%d http=%d dur=%dms prompt=%q%s\n",
 			cursor,
 			active,
 			i+1,
 			job.ID,
+			job.Type,
 			job.Status,
 			job.Runtime,
 			job.TotalHosts,

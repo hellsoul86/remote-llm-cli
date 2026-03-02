@@ -66,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/hosts/{id}/probe", s.withAuth(http.HandlerFunc(s.handleProbeHost)))
 	mux.Handle("POST /v1/run", s.withAuth(http.HandlerFunc(s.handleRun)))
 	mux.Handle("POST /v1/jobs/run", s.withAuth(http.HandlerFunc(s.handleEnqueueRunJob)))
+	mux.Handle("POST /v1/jobs/sync", s.withAuth(http.HandlerFunc(s.handleEnqueueSyncJob)))
 	mux.Handle("GET /v1/jobs", s.withAuth(http.HandlerFunc(s.handleListRunJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
@@ -210,10 +211,22 @@ type syncRequest struct {
 	Excludes []string `json:"excludes,omitempty"`
 }
 
+type syncResponse struct {
+	Operation string             `json:"operation"`
+	Runtime   string             `json:"runtime"`
+	Summary   runResponseSummary `json:"summary"`
+	Targets   []runTargetResult  `json:"targets"`
+}
+
 type preparedRun struct {
 	Request runRequest
 	Hosts   []model.Host
 	Spec    runtime.CommandSpec
+}
+
+type preparedSync struct {
+	Request syncRequest
+	Hosts   []model.Host
 }
 
 type apiError struct {
@@ -275,18 +288,64 @@ func (s *Server) handleEnqueueRunJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	select {
-	case s.runJobs <- job.ID:
+	if s.enqueueStoredJob(job.ID) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"job": compactRunJob(job)})
-	default:
-		finished := time.Now().UTC()
-		job.Status = runJobStatusFailed
-		job.ResultStatus = http.StatusServiceUnavailable
-		job.Error = "run job queue is full"
-		job.FinishedAt = &finished
-		_ = s.store.UpdateRunJob(job)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": job.Error, "job": compactRunJob(job)})
+		return
 	}
+	finished := time.Now().UTC()
+	job.Status = runJobStatusFailed
+	job.ResultStatus = http.StatusServiceUnavailable
+	job.Error = "job queue is full"
+	job.FinishedAt = &finished
+	_ = s.store.UpdateRunJob(job)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": job.Error, "job": compactRunJob(job)})
+}
+
+func (s *Server) handleEnqueueSyncJob(w http.ResponseWriter, r *http.Request) {
+	var req syncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	prepared, err := s.prepareSync(req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	rawReq, err := json.Marshal(req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "encode sync request failed"})
+		return
+	}
+	now := time.Now().UTC()
+	identity, _ := authIdentityFromContext(r.Context())
+	job := model.RunJobRecord{
+		ID:             fmt.Sprintf("job_%d", now.UnixNano()),
+		Type:           "sync",
+		Status:         runJobStatusPending,
+		Runtime:        "sync",
+		PromptPreview:  syncPreview(req.Src, req.Dst),
+		CreatedByKeyID: identity.KeyID,
+		QueuedAt:       now,
+		TotalHosts:     len(prepared.Hosts),
+		Fanout:         normalizeFanout(prepared.Request.Fanout, len(prepared.Hosts)),
+		Request:        rawReq,
+	}
+	if err := s.store.AddRunJob(job); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if s.enqueueStoredJob(job.ID) {
+		writeJSON(w, http.StatusAccepted, map[string]any{"job": compactRunJob(job)})
+		return
+	}
+	finished := time.Now().UTC()
+	job.Status = runJobStatusFailed
+	job.ResultStatus = http.StatusServiceUnavailable
+	job.Error = "job queue is full"
+	job.FinishedAt = &finished
+	_ = s.store.UpdateRunJob(job)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": job.Error, "job": compactRunJob(job)})
 }
 
 func (s *Server) handleListRunJobs(w http.ResponseWriter, r *http.Request) {
@@ -458,29 +517,37 @@ func (s *Server) recoverRunJobs() {
 }
 
 func (s *Server) enqueueRecoveredRunJob(jobID string) {
+	if s.enqueueStoredJob(jobID) {
+		return
+	}
+	job, ok := s.store.GetRunJob(jobID)
+	if !ok {
+		return
+	}
+	finished := time.Now().UTC()
+	job.Status = runJobStatusFailed
+	job.ResultStatus = http.StatusServiceUnavailable
+	job.Error = "job queue is full during startup recovery"
+	job.FinishedAt = &finished
+	_ = s.store.UpdateRunJob(job)
+}
+
+func (s *Server) enqueueStoredJob(jobID string) bool {
 	select {
 	case s.runJobs <- jobID:
+		return true
 	default:
-		job, ok := s.store.GetRunJob(jobID)
-		if !ok {
-			return
-		}
-		finished := time.Now().UTC()
-		job.Status = runJobStatusFailed
-		job.ResultStatus = http.StatusServiceUnavailable
-		job.Error = "run job queue is full during startup recovery"
-		job.FinishedAt = &finished
-		_ = s.store.UpdateRunJob(job)
+		return false
 	}
 }
 
 func (s *Server) runJobWorker() {
 	for jobID := range s.runJobs {
-		s.executeRunJob(jobID)
+		s.executeQueuedJob(jobID)
 	}
 }
 
-func (s *Server) executeRunJob(jobID string) {
+func (s *Server) executeQueuedJob(jobID string) {
 	job, ok := s.store.GetRunJob(jobID)
 	if !ok || job.Status != runJobStatusPending {
 		return
@@ -493,6 +560,22 @@ func (s *Server) executeRunJob(jobID string) {
 		return
 	}
 
+	switch job.Type {
+	case "run":
+		s.executeQueuedRunJob(job)
+	case "sync":
+		s.executeQueuedSyncJob(job)
+	default:
+		finished := time.Now().UTC()
+		job.Status = runJobStatusFailed
+		job.ResultStatus = http.StatusBadRequest
+		job.Error = fmt.Sprintf("unsupported job type: %s", job.Type)
+		job.FinishedAt = &finished
+		_ = s.store.UpdateRunJob(job)
+	}
+}
+
+func (s *Server) executeQueuedRunJob(job model.RunJobRecord) {
 	var req runRequest
 	if err := json.Unmarshal(job.Request, &req); err != nil {
 		finished := time.Now().UTC()
@@ -526,6 +609,53 @@ func (s *Server) executeRunJob(jobID string) {
 		job.Status = runJobStatusFailed
 		job.ResultStatus = http.StatusInternalServerError
 		job.Error = fmt.Sprintf("encode run response: %v", err)
+		_ = s.store.UpdateRunJob(job)
+		return
+	}
+	job.Status = runJobStatusSucceeded
+	job.Error = ""
+	job.Response = rawResp
+	job.TotalHosts = resp.Summary.Total
+	job.SucceededHosts = resp.Summary.Succeeded
+	job.FailedHosts = resp.Summary.Failed
+	job.Fanout = resp.Summary.Fanout
+	job.DurationMS = resp.Summary.DurationMS
+	_ = s.store.UpdateRunJob(job)
+}
+
+func (s *Server) executeQueuedSyncJob(job model.RunJobRecord) {
+	var req syncRequest
+	if err := json.Unmarshal(job.Request, &req); err != nil {
+		finished := time.Now().UTC()
+		job.Status = runJobStatusFailed
+		job.ResultStatus = http.StatusBadRequest
+		job.Error = fmt.Sprintf("decode sync request: %v", err)
+		job.FinishedAt = &finished
+		_ = s.store.UpdateRunJob(job)
+		return
+	}
+	status, resp, err := s.executeSyncRequest(context.Background(), req)
+	finished := time.Now().UTC()
+	job.ResultStatus = status
+	job.FinishedAt = &finished
+	if err != nil {
+		var badReq apiError
+		if errors.As(err, &badReq) {
+			job.ResultStatus = badReq.StatusCode
+		}
+		if job.ResultStatus == 0 {
+			job.ResultStatus = http.StatusInternalServerError
+		}
+		job.Status = runJobStatusFailed
+		job.Error = err.Error()
+		_ = s.store.UpdateRunJob(job)
+		return
+	}
+	rawResp, err := json.Marshal(resp)
+	if err != nil {
+		job.Status = runJobStatusFailed
+		job.ResultStatus = http.StatusInternalServerError
+		job.Error = fmt.Sprintf("encode sync response: %v", err)
 		_ = s.store.UpdateRunJob(job)
 		return
 	}
@@ -577,38 +707,54 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
 		return
 	}
-	if strings.TrimSpace(req.Src) == "" || strings.TrimSpace(req.Dst) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "src and dst are required"})
+	status, resp, err := s.executeSyncRequest(r.Context(), req)
+	if err != nil {
+		writeError(w, err)
 		return
 	}
+	writeJSON(w, status, resp)
+}
+
+func (s *Server) prepareSync(req syncRequest) (preparedSync, error) {
+	if strings.TrimSpace(req.Src) == "" || strings.TrimSpace(req.Dst) == "" {
+		return preparedSync{}, apiError{StatusCode: http.StatusBadRequest, Message: "src and dst are required"}
+	}
 	if _, err := os.Stat(req.Src); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("invalid src path: %v", err)})
-		return
+		return preparedSync{}, apiError{StatusCode: http.StatusBadRequest, Message: fmt.Sprintf("invalid src path: %v", err)}
 	}
 	hosts, err := s.resolveHosts(req.HostID, req.HostIDs, req.AllHosts)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
+		return preparedSync{}, apiError{StatusCode: http.StatusBadRequest, Message: err.Error()}
 	}
+	return preparedSync{
+		Request: req,
+		Hosts:   hosts,
+	}, nil
+}
 
+func (s *Server) executeSyncRequest(parentCtx context.Context, req syncRequest) (int, syncResponse, error) {
+	prepared, err := s.prepareSync(req)
+	if err != nil {
+		return 0, syncResponse{}, err
+	}
+	status, resp := s.executePreparedSync(parentCtx, prepared)
+	return status, resp, nil
+}
+
+func (s *Server) executePreparedSync(parentCtx context.Context, prepared preparedSync) (int, syncResponse) {
+	req := prepared.Request
 	timeout := 1800 * time.Second
 	if req.TimeoutSec > 0 {
 		timeout = time.Duration(req.TimeoutSec) * time.Second
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
 	startedAt := time.Now().UTC()
-	fanout := req.Fanout
-	if fanout <= 0 {
-		fanout = 3
-	}
-	if fanout > len(hosts) {
-		fanout = len(hosts)
-	}
+	fanout := normalizeFanout(req.Fanout, len(prepared.Hosts))
 	retryCount, retryBackoff := resolveRetryPolicy(req.RetryCount, req.RetryBackoffMS)
 	maxOutputBytes := resolveMaxOutputBytes(req.MaxOutputKB)
-	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) runTargetResult {
+	targets := s.runFanout(ctx, prepared.Hosts, fanout, func(host model.Host) runTargetResult {
 		dst := resolveSyncDst(req.Dst, host.Workspace)
 		res, syncErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func() (executor.ExecResult, error) {
 			return executor.RunRsyncViaSSH(
@@ -646,21 +792,23 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	if failed > 0 {
 		status = http.StatusBadGateway
 	}
-	writeJSON(w, status, map[string]any{
-		"operation": "sync",
-		"summary": map[string]any{
-			"total":            len(targets),
-			"succeeded":        len(targets) - failed,
-			"failed":           failed,
-			"fanout":           fanout,
-			"retry_count":      retryCount,
-			"retry_backoff_ms": retryBackoff.Milliseconds(),
-			"duration_ms":      finishedAt.Sub(startedAt).Milliseconds(),
-			"started_at":       startedAt,
-			"finished_at":      finishedAt,
+	resp := syncResponse{
+		Operation: "sync",
+		Runtime:   "sync",
+		Summary: runResponseSummary{
+			Total:          len(targets),
+			Succeeded:      len(targets) - failed,
+			Failed:         failed,
+			Fanout:         fanout,
+			RetryCount:     retryCount,
+			RetryBackoffMS: retryBackoff.Milliseconds(),
+			DurationMS:     finishedAt.Sub(startedAt).Milliseconds(),
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAt,
 		},
-		"targets": targets,
-	})
+		Targets: targets,
+	}
+	return status, resp
 }
 
 func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
@@ -1006,6 +1154,8 @@ func inferAction(method string, path string) string {
 		return "run.execute"
 	case method == http.MethodPost && path == "/v1/jobs/run":
 		return "job.run.enqueue"
+	case method == http.MethodPost && path == "/v1/jobs/sync":
+		return "job.sync.enqueue"
 	case method == http.MethodGet && path == "/v1/jobs":
 		return "job.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/"):
@@ -1054,6 +1204,14 @@ func promptPreview(prompt string) string {
 		return trimmed
 	}
 	return trimmed[:240]
+}
+
+func syncPreview(src string, dst string) string {
+	preview := strings.TrimSpace(src) + " -> " + strings.TrimSpace(dst)
+	if len(preview) <= 240 {
+		return preview
+	}
+	return preview[:240]
 }
 
 func parseLimit(r *http.Request, fallback int, max int) int {
