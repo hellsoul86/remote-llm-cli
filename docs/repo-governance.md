@@ -1,0 +1,51 @@
+# Repo Governance
+
+## Branches
+
+Long-lived branches:
+
+- `main`: production-ready branch
+- `staging`: integration and pre-release validation branch
+
+Short-lived branches:
+
+- `feat/issue-xxx-...`
+- `fix/issue-xxx-...`
+- `chore/issue-xxx-...`
+- `hotfix/issue-xxx-...`
+
+## PR target rules
+
+- Feature/fix/chore PRs target `staging`
+- Release PR targets `main` from `staging`
+- Emergency hotfix PRs can target `main` from `hotfix/*`
+- Hotfix changes must be back-merged/cherry-picked to `staging` after `main` merge
+
+## Merge strategy
+
+- Feature/fix/chore into `staging`: `squash merge`
+- `staging` into `main` release PR: `merge commit`
+- Hotfix into `main`: `merge commit` preferred for audit clarity
+
+## CI policy
+
+Required checks for PRs to `staging`/`main`:
+
+- `Server Test` (Go test)
+- `Web Build` (TypeScript + Vite build)
+- `Target Branch Rules` (PR target governance)
+
+Workflows:
+
+- `.github/workflows/ci.yml`
+- `.github/workflows/pr-governance.yml`
+
+## Current merge order (active stacked PRs)
+
+1. `#4` `feat/issue-1-2-3-mvp-controller` -> `staging`
+2. `#6` `feat/issue-5-runtime-adapter-sdk` -> `feat/issue-1-2-3-mvp-controller`
+3. `#8` `feat/issue-7-codex-runtime-deepening` -> `feat/issue-5-runtime-adapter-sdk`
+
+After `#4/#6/#8` are merged sequentially, open release PR:
+
+- `staging` -> `main`
