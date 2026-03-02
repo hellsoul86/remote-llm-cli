@@ -151,3 +151,15 @@ Sensitive values must be redacted in logs.
 1. Should `runtime` be required on every run, or host-level default?
 2. Need per-runtime environment injection (`OPENAI_API_KEY`, etc.) in v1?
 3. Do we want adapter-specific args passthrough in v1?
+
+## 11. Runtime SDK (current implementation)
+
+Current implementation supports template-driven adapters loaded from JSON at server startup.
+
+- CLI flag: `remote-llm-server --runtime-config <path>`
+- template placeholders in `run_args`:
+  - `{{prompt}}`
+  - `{{workdir}}`
+  - `{{extra_args}}`
+- validation command:
+  - `remote-llm-admin runtime validate --config <path>`

@@ -5,8 +5,7 @@ Universal remote controller for agent CLIs over SSH.
 Current runtime support:
 
 - `codex` (implemented)
-- `claude` (planned adapter)
-- `gemini` (planned adapter)
+- template-based custom runtimes via JSON config (adapter SDK)
 
 ## Stack
 
@@ -25,6 +24,16 @@ make key-create
 
 ```bash
 make server-run
+```
+
+Optional: start server with external runtime definitions:
+
+```bash
+cd server
+go run ./cmd/remote-llm-server \
+  --addr :8080 \
+  --data ./data/state.json \
+  --runtime-config ../examples/runtimes.example.json
 ```
 
 3. Start web console:
@@ -48,6 +57,7 @@ Default API URL is `http://localhost:8080`.
 - Access-key auth (`Bearer`)
 - Runtime registry abstraction
 - `codex` runtime adapter (`probe` + remote `codex exec`)
+- Template runtime adapter SDK (`run_args` placeholders + config loading)
 - Host CRUD API (JSON file persistence)
 - Host probe (`ssh` + `codex --version`)
 - Multi-host fanout execution (`POST /v1/run` with `host_ids` or `all_hosts`)
@@ -81,6 +91,33 @@ curl -X POST http://localhost:8080/v1/run \
     "fanout": 3,
     "prompt": "summarize git status and risks"
   }'
+```
+
+## Runtime Adapter SDK
+
+Runtime config file format (JSON):
+
+- top-level `runtimes` array
+- each runtime:
+  - `name`: runtime key used by API `runtime` field
+  - `program`: remote executable
+  - `run_args`: command template args
+  - `probe_program` / `probe_args` (optional)
+  - `capabilities` (optional)
+  - `append_extra_args` (optional, default `true`)
+
+Supported placeholders in `run_args`:
+
+- `{{prompt}}`: required prompt text
+- `{{workdir}}`: workdir value from run request (errors if empty)
+- `{{extra_args}}`: expands `extra_args` list; must be standalone token
+
+Validate runtime config:
+
+```bash
+cd server
+go run ./cmd/remote-llm-admin runtime validate \
+  --config ../examples/runtimes.example.json
 ```
 
 ## Workflow

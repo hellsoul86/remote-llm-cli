@@ -1,0 +1,37 @@
+{
+  "runtimes": [
+    {
+      "name": "claudecode",
+      "program": "claude",
+      "run_args": [
+        "exec",
+        "--prompt",
+        "{{prompt}}",
+        "{{extra_args}}"
+      ],
+      "probe_args": [
+        "--version"
+      ],
+      "capabilities": {
+        "supports_non_interactive_exec": true,
+        "supports_interactive_session": false,
+        "supports_structured_output": false,
+        "supports_file_patch_mode": false,
+        "supports_cost_metrics": false
+      }
+    },
+    {
+      "name": "geminicli",
+      "program": "gemini",
+      "run_args": [
+        "run",
+        "--prompt",
+        "{{prompt}}",
+        "{{extra_args}}"
+      ],
+      "probe_args": [
+        "--version"
+      ]
+    }
+  ]
+}
