@@ -165,6 +165,11 @@ type getRunJobResponse struct {
 	Job RunJobRecord `json:"job"`
 }
 
+type cancelRunJobResponse struct {
+	State string       `json:"state"`
+	Job   RunJobRecord `json:"job"`
+}
+
 func (c *APIClient) ListHosts() ([]Host, error) {
 	url := c.BaseURL + "/v1/hosts"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -268,6 +273,29 @@ func (c *APIClient) GetRunJob(id string) (RunJobRecord, error) {
 		return RunJobRecord{}, err
 	}
 	return out.Job, nil
+}
+
+func (c *APIClient) CancelRunJob(id string) (string, RunJobRecord, error) {
+	url := fmt.Sprintf("%s/v1/jobs/%s/cancel", c.BaseURL, id)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return "", RunJobRecord{}, err
+	}
+	c.applyAuth(req)
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", RunJobRecord{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", RunJobRecord{}, fmt.Errorf("cancel run job failed: http %d", res.StatusCode)
+	}
+	var out cancelRunJobResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return "", RunJobRecord{}, err
+	}
+	return out.State, out.Job, nil
 }
 
 func (c *APIClient) ListRunJobs(limit int) ([]RunJobRecord, error) {

@@ -163,7 +163,7 @@ export type RunRecord = {
 export type RunJobRecord = {
   id: string;
   type: string;
-  status: "pending" | "running" | "succeeded" | "failed";
+  status: "pending" | "running" | "succeeded" | "failed" | "canceled";
   runtime: string;
   prompt_preview: string;
   created_by_key_id?: string;
@@ -290,6 +290,18 @@ export async function getRunJob(token: string, id: string): Promise<RunJobRecord
   const body = await res.json();
   if (!body?.job) throw new Error("get job failed: invalid response");
   return body.job;
+}
+
+export async function cancelRunJob(token: string, id: string): Promise<{ state: string; job: RunJobRecord }> {
+  const res = await fetch(`${API_BASE}/v1/jobs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+    headers: headers(token)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.job) {
+    throw new Error(`cancel job failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
 }
 
 export async function syncHosts(token: string, request: SyncRequest): Promise<{ status: number; body: SyncResponse }> {

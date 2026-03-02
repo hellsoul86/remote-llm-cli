@@ -53,6 +53,12 @@ type pollRunJobMsg struct {
 	err error
 }
 
+type cancelRunJobMsg struct {
+	state string
+	job   RunJobRecord
+	err   error
+}
+
 type shellDoneMsg struct {
 	host Host
 	err  error
@@ -231,6 +237,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			job.FailedHosts,
 		)
 		return m, tea.Batch(m.loadHistoryCmd(), m.loadJobsCmd())
+	case cancelRunJobMsg:
+		if msg.err != nil {
+			m.message = "cancel failed: " + msg.err.Error()
+			return m, nil
+		}
+		job := msg.job
+		m.activeJob = &job
+		m.upsertRunJob(job)
+		if !isRunJobActive(job) {
+			m.running = false
+		}
+		m.message = fmt.Sprintf("job %s: %s", job.ID, msg.state)
+		return m, m.loadJobsCmd()
 	case shellDoneMsg:
 		if msg.err != nil {
 			m.message = "shell ended with error: " + msg.err.Error()
@@ -343,6 +362,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					next, err := m.client.GetRunJob(job.ID)
 					return pollRunJobMsg{job: next, err: err}
 				}
+			case "c":
+				if len(m.runJobs) == 0 {
+					m.message = "no jobs available"
+					return m, nil
+				}
+				m.jobCursor = clampCursor(m.jobCursor, len(m.runJobs))
+				job := m.runJobs[m.jobCursor]
+				if !isRunJobActive(job) {
+					m.message = "selected job is not cancelable"
+					return m, nil
+				}
+				m.message = "canceling job: " + job.ID
+				return m, m.cancelRunJobCmd(job.ID)
 			case "J":
 				if m.jobsLoading {
 					return m, nil
@@ -503,7 +535,7 @@ func (m Model) View() string {
 		"all_hosts=%t fanout=%d max_output_kb=%d retries=%d backoff_ms=%d async=%t pane=%s\n",
 		m.allHosts, m.fanout, m.maxOutputKB, m.retryCount, m.retryBackoffMS, m.runAsync, paneLabel(m.activePane),
 	))
-	b.WriteString("keys: q quit | R reload all | r run | u async toggle | h history | Tab pane | jobs-pane: up/down select, Enter/w watch, J refresh | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | ./, retries | n/b backoff | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id | o shell\n")
+	b.WriteString("keys: q quit | R reload all | r run | u async toggle | h history | Tab pane | jobs-pane: up/down select, Enter/w watch, c cancel, J refresh | a all-hosts | space select host | p prompt | w workdir | +/- fanout | [/] output limit | ./, retries | n/b backoff | t mode | m model | x sandbox | y json | g skip-git | e ephemeral | l resume-last | s session-id | o shell\n")
 
 	if m.loading {
 		b.WriteString("[loading hosts...]\n")
@@ -797,6 +829,17 @@ func (m Model) pollRunJobCmd(after time.Duration) tea.Cmd {
 		job, err := m.client.GetRunJob(jobID)
 		return pollRunJobMsg{job: job, err: err}
 	})
+}
+
+func (m Model) cancelRunJobCmd(jobID string) tea.Cmd {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		state, job, err := m.client.CancelRunJob(jobID)
+		return cancelRunJobMsg{state: state, job: job, err: err}
+	}
 }
 
 func (m Model) buildRunRequest() RunRequest {
