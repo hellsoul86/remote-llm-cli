@@ -153,6 +153,10 @@ type listAuditResponse struct {
 	Events []AuditEvent `json:"events"`
 }
 
+type listRunJobsResponse struct {
+	Jobs []RunJobRecord `json:"jobs"`
+}
+
 type enqueueRunJobResponse struct {
 	Job RunJobRecord `json:"job"`
 }
@@ -264,6 +268,33 @@ func (c *APIClient) GetRunJob(id string) (RunJobRecord, error) {
 		return RunJobRecord{}, err
 	}
 	return out.Job, nil
+}
+
+func (c *APIClient) ListRunJobs(limit int) ([]RunJobRecord, error) {
+	url := fmt.Sprintf("%s/v1/jobs?limit=%d", c.BaseURL, limit)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.applyAuth(req)
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("list run jobs failed: http %d", res.StatusCode)
+	}
+
+	var out listRunJobsResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if out.Jobs == nil {
+		return []RunJobRecord{}, nil
+	}
+	return out.Jobs, nil
 }
 
 func (c *APIClient) ListRuns(limit int) ([]RunRecord, error) {
