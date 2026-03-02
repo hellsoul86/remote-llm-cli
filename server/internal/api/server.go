@@ -24,14 +24,16 @@ import (
 )
 
 type Server struct {
-	store         *store.Store
-	runtimes      *runtime.Registry
-	runJobs       chan string
-	runJobWorkers int
-	activeWorkers int64
-	mu            sync.Mutex
-	cancels       map[string]context.CancelFunc
-	cancelRq      map[string]bool
+	store          *store.Store
+	runtimes       *runtime.Registry
+	runJobs        chan string
+	runJobWorkers  int
+	activeWorkers  int64
+	runViaSSH      func(ctx context.Context, h model.Host, spec runtime.CommandSpec, workdir string, opts executor.ExecOptions) (executor.ExecResult, error)
+	runRsyncViaSSH func(ctx context.Context, h model.Host, src string, dst string, opts executor.SyncOptions, execOpts executor.ExecOptions) (executor.ExecResult, error)
+	mu             sync.Mutex
+	cancels        map[string]context.CancelFunc
+	cancelRq       map[string]bool
 }
 
 type authIdentity struct {
@@ -54,11 +56,13 @@ const (
 
 func New(st *store.Store, rt *runtime.Registry) *Server {
 	s := &Server{
-		store:    st,
-		runtimes: rt,
-		runJobs:  make(chan string, runJobQueueSize),
-		cancels:  map[string]context.CancelFunc{},
-		cancelRq: map[string]bool{},
+		store:          st,
+		runtimes:       rt,
+		runJobs:        make(chan string, runJobQueueSize),
+		cancels:        map[string]context.CancelFunc{},
+		cancelRq:       map[string]bool{},
+		runViaSSH:      executor.RunViaSSH,
+		runRsyncViaSSH: executor.RunRsyncViaSSH,
 	}
 	s.startRunJobWorkers(defaultRunJobWorkers)
 	s.recoverRunJobs()
@@ -721,7 +725,7 @@ func (s *Server) executePreparedRun(parentCtx context.Context, prepared prepared
 	maxOutputBytes := resolveMaxOutputBytes(req.MaxOutputKB)
 	targets := s.runFanout(ctx, prepared.Hosts, fanout, func(host model.Host) runTargetResult {
 		res, runErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func() (executor.ExecResult, error) {
-			return executor.RunViaSSH(
+			return s.runViaSSH(
 				ctx,
 				host,
 				prepared.Spec,
@@ -1122,7 +1126,7 @@ func (s *Server) executePreparedSync(parentCtx context.Context, prepared prepare
 	targets := s.runFanout(ctx, prepared.Hosts, fanout, func(host model.Host) runTargetResult {
 		dst := resolveSyncDst(req.Dst, host.Workspace)
 		res, syncErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func() (executor.ExecResult, error) {
-			return executor.RunRsyncViaSSH(
+			return s.runRsyncViaSSH(
 				ctx,
 				host,
 				req.Src,
@@ -1207,7 +1211,7 @@ func (s *Server) handleDiscoverCodexSessions(w http.ResponseWriter, r *http.Requ
 	startedAt := time.Now().UTC()
 	spec := buildCodexSessionDiscoverSpec(limit)
 	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) runTargetResult {
-		res, runErr := executor.RunViaSSH(
+		res, runErr := s.runViaSSH(
 			ctx,
 			host,
 			spec,
@@ -1293,7 +1297,7 @@ func (s *Server) handleCleanupCodexSessions(w http.ResponseWriter, r *http.Reque
 	startedAt := time.Now().UTC()
 	spec := buildCodexSessionCleanupSpec(olderHours, req.DryRun)
 	targets := s.runFanout(ctx, hosts, fanout, func(host model.Host) runTargetResult {
-		res, runErr := executor.RunViaSSH(
+		res, runErr := s.runViaSSH(
 			ctx,
 			host,
 			spec,
@@ -1482,13 +1486,13 @@ func (s *Server) handleProbeHost(w http.ResponseWriter, r *http.Request) {
 
 	probeOutputOpts := executor.ExecOptions{MaxStdoutBytes: 64 * 1024, MaxStderrBytes: 64 * 1024}
 	sshSpec := runtime.CommandSpec{Program: "echo", Args: []string{"ssh-ok"}}
-	sshRes, sshErr := executor.RunViaSSH(r.Context(), h, sshSpec, "", probeOutputOpts)
+	sshRes, sshErr := s.runViaSSH(r.Context(), h, sshSpec, "", probeOutputOpts)
 
 	codexVersionSpec := runtime.CommandSpec{Program: "codex", Args: []string{"--version"}}
-	codexVersionRes, codexVersionErr := executor.RunViaSSH(r.Context(), h, codexVersionSpec, resolveWorkdir("", h.Workspace), probeOutputOpts)
+	codexVersionRes, codexVersionErr := s.runViaSSH(r.Context(), h, codexVersionSpec, resolveWorkdir("", h.Workspace), probeOutputOpts)
 
 	codexLoginSpec := runtime.CommandSpec{Program: "codex", Args: []string{"login", "status"}}
-	codexLoginRes, codexLoginErr := executor.RunViaSSH(r.Context(), h, codexLoginSpec, resolveWorkdir("", h.Workspace), probeOutputOpts)
+	codexLoginRes, codexLoginErr := s.runViaSSH(r.Context(), h, codexLoginSpec, resolveWorkdir("", h.Workspace), probeOutputOpts)
 
 	var preflight executor.SSHPreflightReport
 	if req.Preflight {

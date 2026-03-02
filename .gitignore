@@ -16,6 +16,8 @@ server/data/
 web/node_modules/
 web/dist/
 web/.vite/
+web/test-results/
+web/playwright-report/
 *.tsbuildinfo
 
 # Runtime artifacts

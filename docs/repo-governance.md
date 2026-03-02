@@ -33,6 +33,7 @@ Required checks for PRs to `staging`/`main`:
 
 - `Server Test` (Go test)
 - `Web Build` (TypeScript + Vite build)
+- `Web E2E Smoke` (Playwright async-job UI smoke)
 - `Target Branch Rules` (PR target governance)
 
 Workflows:
