@@ -649,6 +649,27 @@ pre {
   font-size: 0.82rem;
 }
 
+.thread-rename-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.thread-rename-form button {
+  padding: 8px 12px;
+}
+
+.session-keymap {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 0.73rem;
+  color: #405672;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
 .job-card {
   display: grid;
   gap: 6px;
@@ -820,6 +841,10 @@ pre {
   }
 
   .composer-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .thread-rename-form {
     grid-template-columns: 1fr;
   }
 }
