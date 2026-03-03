@@ -11,7 +11,7 @@ test("queues async run job and observes terminal success", async ({ page }) => {
       await route.fulfill({
         status: 200,
         json: {
-          hosts: [{ id: "h_1", name: "host-1", host: "10.0.0.1", user: "ecs-user", port: 22, workspace: "/srv/work" }]
+          hosts: [{ id: "local_1", name: "local-default", connection_mode: "local", host: "localhost", user: "", port: 22, workspace: "/srv/work" }]
         }
       });
       return;

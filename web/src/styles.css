@@ -179,6 +179,42 @@ pre {
   gap: 12px;
 }
 
+.session-alert-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 30;
+  display: grid;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 24px));
+}
+
+.session-alert {
+  display: grid;
+  gap: 4px;
+  border-radius: 12px;
+  border: 1px solid #d6c69f;
+  background: #fff8ea;
+  color: #3c2b0f;
+  padding: 10px 12px;
+  box-shadow: var(--shadow-soft);
+  text-align: left;
+}
+
+.session-alert:hover {
+  background: #fff2d4;
+  transform: none;
+}
+
+.session-alert strong {
+  font-size: 0.83rem;
+}
+
+.session-alert span {
+  font-size: 0.75rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
 .app-topbar {
   border-radius: 18px;
   border: 1px solid #cbdbec;

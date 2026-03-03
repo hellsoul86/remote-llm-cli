@@ -34,6 +34,13 @@ type QuickCommand = {
   template: string;
 };
 
+type SessionAlert = {
+  id: string;
+  threadID: string;
+  title: string;
+  body: string;
+};
+
 const QUICK_COMMANDS: QuickCommand[] = [
   { label: "/status", template: "report controller status, queue depth, and active jobs" },
   { label: "/hosts", template: "list all configured hosts with connectivity summary" },
@@ -140,8 +147,6 @@ export function App() {
     setFanoutValue,
     maxOutputKB,
     setMaxOutputKB,
-    isSubmitting,
-    setIsSubmitting,
     isRefreshing,
     setIsRefreshing,
     activeJobID,
@@ -187,6 +192,7 @@ export function App() {
     threads,
     activeThreadID,
     setActiveThreadID,
+    activateThread,
     threadRenameDraft,
     setThreadRenameDraft,
     activeJobThreadID,
@@ -213,6 +219,8 @@ export function App() {
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
     typeof Notification === "undefined" ? "denied" : Notification.permission
   );
+  const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
+  const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
 
@@ -225,6 +233,25 @@ export function App() {
     [runtimes, selectedRuntime]
   );
   const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
+  const threadWorkspaceMap = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const workspace of workspaces) {
+      for (const thread of workspace.sessions) {
+        out.set(thread.id, workspace.id);
+      }
+    }
+    return out;
+  }, [workspaces]);
+  const threadTitleMap = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const workspace of workspaces) {
+      for (const thread of workspace.sessions) {
+        out.set(thread.id, thread.title);
+      }
+    }
+    return out;
+  }, [workspaces]);
+  const activeThreadBusy = Boolean(activeThread?.activeJobID) || (activeThread ? submittingThreadID === activeThread.id : false);
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -292,6 +319,23 @@ export function App() {
     }
   }
 
+  function pushSessionAlert(alert: Omit<SessionAlert, "id">) {
+    const id = `alert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const next: SessionAlert = { id, ...alert };
+    setSessionAlerts((prev) => [...prev, next]);
+    window.setTimeout(() => {
+      setSessionAlerts((prev) => prev.filter((item) => item.id !== id));
+    }, 7000);
+  }
+
+  function openSessionFromAlert(alert: SessionAlert) {
+    if (threadWorkspaceMap.has(alert.threadID)) {
+      activateThread(alert.threadID);
+      switchMode("session");
+    }
+    setSessionAlerts((prev) => prev.filter((item) => item.id !== alert.id));
+  }
+
   async function onEnableNotifications() {
     if (typeof Notification === "undefined") {
       setNotificationPermission("denied");
@@ -302,7 +346,7 @@ export function App() {
   }
 
   async function ensureLocalCodexHost(authToken: string, currentHosts: Host[]): Promise<Host[]> {
-    if (currentHosts.length > 0 || currentHosts.some((host) => host.connection_mode === "local")) {
+    if (currentHosts.some((host) => host.connection_mode === "local")) {
       return currentHosts;
     }
     await upsertHost(authToken, {
@@ -348,7 +392,10 @@ export function App() {
           return [];
         });
       }
-      if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
+      const codexRuntime = nextRuntimes.find((runtime) => runtime.name === "codex");
+      if (codexRuntime) {
+        setSelectedRuntime("codex");
+      } else if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
 
@@ -497,7 +544,7 @@ export function App() {
   }, [authPhase, appMode, threads, activeThreadID]);
 
   useEffect(() => {
-    if (authPhase !== "ready" || !token.trim() || appMode !== "session") return;
+    if (authPhase !== "ready" || !token.trim()) return;
     if (runningThreadJobs.length === 0) return;
 
     let canceled = false;
@@ -547,7 +594,6 @@ export function App() {
           if (item.threadID !== activeThreadID) {
             setThreadUnread(item.threadID, true);
           }
-          setIsSubmitting(false);
 
           if (!completedJobsRef.current.has(job.id)) {
             completedJobsRef.current.add(job.id);
@@ -572,8 +618,13 @@ export function App() {
                 item.threadID
               );
             }
-            const sessionTitle = threads.find((thread) => thread.id === item.threadID)?.title ?? "Session";
+            const sessionTitle = threadTitleMap.get(item.threadID) ?? "Session";
             notifySessionDone(`Codex ${job.status}`, `${sessionTitle}: ${job.id}`);
+            pushSessionAlert({
+              threadID: item.threadID,
+              title: `${sessionTitle} finished`,
+              body: `job=${job.id} status=${job.status}`
+            });
           }
         }
 
@@ -602,7 +653,7 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, appMode, runningThreadJobs, activeThreadID, threads]);
+  }, [authPhase, token, runningThreadJobs, activeThreadID, threadTitleMap]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
@@ -659,6 +710,8 @@ export function App() {
     localStorage.removeItem(TOKEN_KEY);
     resetOpsDomain();
     resetSessionDomain();
+    setSubmittingThreadID("");
+    setSessionAlerts([]);
     setToken("");
     setTokenInput("");
     setAuthError("");
@@ -681,6 +734,18 @@ export function App() {
   async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    if (activeThread.activeJobID || submittingThreadID === activeThread.id) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "running",
+          title: "Session Busy",
+          body: "This session already has a running job. Switch to another session or wait for completion."
+        },
+        activeThread.id
+      );
+      return;
+    }
 
     const trimmedPrompt = activeThread.draft.trim();
     if (!trimmedPrompt) {
@@ -756,7 +821,7 @@ export function App() {
       activeThread.id
     );
 
-    setIsSubmitting(true);
+    setSubmittingThreadID(activeThread.id);
     try {
       if (runAsyncMode) {
         const { body } = await enqueueRunJob(token, request);
@@ -765,6 +830,7 @@ export function App() {
         setActiveJob(body.job);
         setThreadJobState(activeThread.id, body.job.id, "running");
         setJobs((prev) => [body.job, ...prev.filter((job) => job.id !== body.job.id)]);
+        setSubmittingThreadID("");
         addTimelineEntry(
           {
             kind: "system",
@@ -797,12 +863,12 @@ export function App() {
         setAuditEvents(nextAudit);
         setMetrics(nextMetrics);
         setThreadJobState(activeThread.id, "", status >= 400 ? "failed" : "succeeded");
-        setIsSubmitting(false);
+        setSubmittingThreadID("");
       }
     } catch (error) {
       addTimelineEntry({ kind: "system", state: "error", title: "Run Failed", body: String(error) }, activeThread.id);
       setThreadJobState(activeThread.id, "", "failed");
-      setIsSubmitting(false);
+      setSubmittingThreadID("");
     }
   }
 
@@ -1071,8 +1137,16 @@ export function App() {
                     onClick={() => setActiveThreadID(thread.id)}
                     title={`${thread.title} (${thread.timeline.length} messages)`}
                   >
-                    <span>{thread.unreadDone ? `* ${thread.title}` : thread.title}</span>
-                    <small>{thread.activeJobID ? "run" : thread.lastJobStatus === "idle" ? thread.timeline.length : thread.lastJobStatus}</small>
+                    <span>{thread.activeJobID ? `● ${thread.title}` : thread.unreadDone ? `* ${thread.title}` : thread.title}</span>
+                    <small>
+                      {thread.activeJobID
+                        ? "running"
+                        : thread.unreadDone
+                          ? "done"
+                          : thread.lastJobStatus === "idle"
+                            ? thread.timeline.length
+                            : thread.lastJobStatus}
+                    </small>
                   </button>
                 ))}
               </div>
@@ -1236,8 +1310,8 @@ export function App() {
               />
 
               <div className="composer-controls">
-                <button type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? "Running..." : "Send"}
+                <button type="submit" disabled={activeThreadBusy}>
+                  {activeThreadBusy ? "Running..." : "Send"}
                 </button>
               </div>
             </form>
@@ -1619,6 +1693,17 @@ export function App() {
           </aside>
         </div>
       )}
+
+      {sessionAlerts.length > 0 ? (
+        <div className="session-alert-stack" role="status" aria-live="polite">
+          {sessionAlerts.map((alert) => (
+            <button key={alert.id} type="button" className="session-alert" onClick={() => openSessionFromAlert(alert)}>
+              <strong>{alert.title}</strong>
+              <span>{alert.body}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
