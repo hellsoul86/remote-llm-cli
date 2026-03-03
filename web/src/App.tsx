@@ -169,6 +169,7 @@ export function App() {
 
   const [threads, setThreads] = useState<ConversationThread[]>(() => [createInitialThread()]);
   const [activeThreadID, setActiveThreadID] = useState("thread_1");
+  const [threadRenameDraft, setThreadRenameDraft] = useState("Thread 1");
 
   const completedJobsRef = useRef<Set<string>>(new Set());
   const entryCounter = useRef(0);
@@ -255,7 +256,36 @@ export function App() {
     };
     setThreads((prev) => [...prev, next]);
     setActiveThreadID(next.id);
+    setThreadRenameDraft(next.title);
     promptInputRef.current?.focus();
+  }
+
+  function renameThread(threadID: string, nextTitle: string) {
+    const trimmed = nextTitle.trim();
+    if (!trimmed) return;
+    const now = new Date().toISOString();
+    setThreads((prev) =>
+      prev.map((thread) =>
+        thread.id === threadID
+          ? {
+              ...thread,
+              title: trimmed,
+              updatedAt: now
+            }
+          : thread
+      )
+    );
+    setThreadRenameDraft(trimmed);
+  }
+
+  function switchThreadByOffset(offset: number) {
+    if (threads.length === 0) return;
+    const currentIndex = Math.max(
+      0,
+      threads.findIndex((thread) => thread.id === activeThreadID)
+    );
+    const nextIndex = (currentIndex + offset + threads.length) % threads.length;
+    setActiveThreadID(threads[nextIndex].id);
   }
 
   function applyQuickCommand(command: QuickCommand) {
@@ -379,6 +409,10 @@ export function App() {
   }, [threads, activeThreadID]);
 
   useEffect(() => {
+    setThreadRenameDraft(activeThread?.title ?? "");
+  }, [activeThreadID, activeThread?.title]);
+
+  useEffect(() => {
     timelineBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [activeTimeline.length, activeThreadID]);
 
@@ -389,6 +423,26 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         promptInputRef.current?.focus();
+        return;
+      }
+
+      if (appMode !== "session") return;
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        createThread();
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "ArrowUp" || event.key === "[")) {
+        event.preventDefault();
+        switchThreadByOffset(-1);
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "ArrowDown" || event.key === "]")) {
+        event.preventDefault();
+        switchThreadByOffset(1);
       }
     };
 
@@ -396,7 +450,7 @@ export function App() {
     return () => {
       window.removeEventListener("keydown", handleGlobalKeydown);
     };
-  }, [authPhase]);
+  }, [authPhase, appMode, threads, activeThreadID]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || !activeJobID) return;
@@ -653,6 +707,12 @@ export function App() {
     }
   }
 
+  function onRenameActiveThread(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!activeThread) return;
+    renameThread(activeThread.id, threadRenameDraft);
+  }
+
   if (authPhase !== "ready") {
     return (
       <div className="gate-shell">
@@ -726,6 +786,7 @@ export function App() {
                     type="button"
                     className={`thread-chip ${thread.id === activeThreadID ? "active" : ""}`}
                     onClick={() => setActiveThreadID(thread.id)}
+                    title={`${thread.title} (${thread.timeline.length} messages)`}
                   >
                     <span>{thread.title}</span>
                     <small>{thread.timeline.length}</small>
@@ -773,7 +834,7 @@ export function App() {
                     {command.label}
                   </button>
                 ))}
-                <span className="shortcut-hint">Ctrl/Cmd+K focus</span>
+                <span className="shortcut-hint">Ctrl/Cmd+K focus, Ctrl/Cmd+Shift+N new thread</span>
               </div>
 
               <textarea
@@ -813,6 +874,21 @@ export function App() {
                 <li>threads={threads.length}</li>
                 <li>targets={selectedHostCount}</li>
                 <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
+              </ul>
+              <form className="thread-rename-form" onSubmit={onRenameActiveThread}>
+                <input
+                  value={threadRenameDraft}
+                  onChange={(event) => setThreadRenameDraft(event.target.value)}
+                  placeholder="thread name"
+                  maxLength={48}
+                />
+                <button type="submit">Rename</button>
+              </form>
+              <ul className="session-keymap">
+                <li>Ctrl/Cmd + K: focus prompt</li>
+                <li>Ctrl/Cmd + Shift + N: new thread</li>
+                <li>Ctrl/Cmd + Shift + [ or ArrowUp: previous thread</li>
+                <li>Ctrl/Cmd + Shift + ] or ArrowDown: next thread</li>
               </ul>
               <button type="button" className="ghost" onClick={() => switchMode("ops")}>
                 Open Remote Ops
