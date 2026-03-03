@@ -175,13 +175,97 @@ pre {
   min-height: 100vh;
   padding: 14px;
   display: grid;
-  grid-template-columns: 292px minmax(560px, 1fr) 334px;
+  grid-template-rows: auto 1fr;
+  gap: 12px;
+}
+
+.app-topbar {
+  border-radius: 18px;
+  border: 1px solid #cbdbec;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow-soft);
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.topbar-title {
+  display: grid;
+  gap: 3px;
+}
+
+.topbar-eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.69rem;
+  color: var(--muted);
+}
+
+.topbar-title h1 {
+  font-size: clamp(1.02rem, 1.7vw, 1.26rem);
+  color: #132843;
+}
+
+.topbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-switch {
+  display: inline-flex;
+  gap: 4px;
+  border: 1px solid #d0dbe8;
+  border-radius: 999px;
+  padding: 3px;
+  background: #f6faff;
+}
+
+.mode-btn {
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #39506e;
+  font-size: 0.8rem;
+  transform: none;
+}
+
+.mode-btn:hover {
+  background: #eef5ff;
+  transform: none;
+}
+
+.mode-btn.active {
+  background: #133155;
+  color: #eff6ff;
+  transform: none;
+}
+
+.mode-btn.active:hover {
+  background: #133155;
+}
+
+.session-stage {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(580px, 1fr) 320px;
+  gap: 12px;
+}
+
+.ops-stage {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 312px minmax(560px, 1fr);
   gap: 12px;
 }
 
 .nav-pane,
 .chat-pane,
-.inspect-pane {
+.inspect-pane,
+.session-side {
   border-radius: 18px;
   min-height: 0;
   box-shadow: var(--shadow-soft);
@@ -332,6 +416,13 @@ pre {
 .chat-head-actions {
   display: flex;
   gap: 8px;
+}
+
+.chat-health {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
 .thread-bar {
@@ -511,6 +602,16 @@ pre {
   gap: 8px;
 }
 
+.session-side {
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-alt) 100%);
+  border: 1px solid #cbdbec;
+  padding: 14px;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
 .inspect-pane {
   background: linear-gradient(180deg, var(--panel) 0%, var(--panel-alt) 100%);
   border: 1px solid #cbdbec;
@@ -530,8 +631,22 @@ pre {
   gap: 8px;
 }
 
+.focus-block {
+  border-color: #9ecfc5;
+  background: #f2fcf9;
+}
+
 .inspect-block h3 {
   font-size: 0.9rem;
+}
+
+.metric-list-light {
+  color: #2f425c;
+}
+
+.pane-subtle-light {
+  color: #6c7f98;
+  font-size: 0.82rem;
 }
 
 .job-card {
@@ -640,28 +755,29 @@ pre {
 }
 
 @media (max-width: 1320px) {
-  .workspace-shell {
-    grid-template-columns: 270px minmax(460px, 1fr) 308px;
+  .session-stage {
+    grid-template-columns: minmax(460px, 1fr) 300px;
+  }
+
+  .ops-stage {
+    grid-template-columns: 286px minmax(420px, 1fr);
   }
 }
 
 @media (max-width: 1080px) {
-  .workspace-shell {
+  .session-stage,
+  .ops-stage {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(560px, 1fr) auto auto;
   }
 
   .chat-pane {
-    order: 1;
-    min-height: 620px;
+    min-height: 560px;
   }
 
-  .nav-pane {
-    order: 2;
-  }
-
+  .nav-pane,
+  .session-side,
   .inspect-pane {
-    order: 3;
+    min-height: 260px;
   }
 }
 
@@ -675,9 +791,9 @@ pre {
     align-items: flex-start;
   }
 
-  .chat-head-actions {
-    width: 100%;
-    flex-wrap: wrap;
+  .app-topbar {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .thread-bar {
@@ -696,6 +812,11 @@ pre {
   .shortcut-hint {
     margin-left: 0;
     width: 100%;
+  }
+
+  .topbar-controls {
+    width: 100%;
+    flex-wrap: wrap;
   }
 
   .composer-controls {
