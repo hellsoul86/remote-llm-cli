@@ -80,6 +80,7 @@ func TestInferAction(t *testing.T) {
 		{name: "job events", method: http.MethodGet, path: "/v1/jobs/job_1/events", want: "job.events.list"},
 		{name: "job cancel", method: http.MethodPost, path: "/v1/jobs/job_1/cancel", want: "job.cancel"},
 		{name: "sync execute", method: http.MethodPost, path: "/v1/sync", want: "sync.execute"},
+		{name: "codex models discover", method: http.MethodGet, path: "/v1/codex/models", want: "codex.models.discover"},
 		{name: "codex sessions discover", method: http.MethodPost, path: "/v1/codex/sessions/discover", want: "codex.sessions.discover"},
 		{name: "codex sessions cleanup", method: http.MethodPost, path: "/v1/codex/sessions/cleanup", want: "codex.sessions.cleanup"},
 		{name: "metrics get", method: http.MethodGet, path: "/v1/metrics", want: "metrics.get"},
