@@ -1,39 +1,35 @@
 # Merge-Triggered Deploy
 
-This repository supports auto-deploy after merge via GitHub Actions:
+This repository deploys with one workflow (`.github/workflows/deploy.yml`) after merge/push:
 
-- merge/push to `staging` -> deploy to GitHub Environment `staging`
-- merge/push to `main` -> deploy to GitHub Environment `production`
+- `staging` -> GitHub Environment `staging`
+- `main` -> GitHub Environment `production`
 
-Workflow file: `.github/workflows/deploy.yml`
+Deploy strategy:
 
-## 1. Target host prerequisites
+- API: SSH deploy to target servers (`remote-llm-server` systemd service)
+- Web: deploy `web/dist` to Cloudflare Pages
 
-Each target server should have:
+## 1. API deploy configuration (SSH)
+
+### 1.1 Host prerequisites
+
+Each API target server should have:
 
 1. Linux with `systemd`
 2. `tar`
 3. `curl` or `wget` (for health check)
-4. `sudo` with non-interactive privilege for deploy user (`sudo -n`)
-5. SSH connectivity from GitHub Actions runner
+4. `sudo -n` capability for deploy user
+5. SSH reachable from GitHub Actions runner
 
-## 2. GitHub Environment configuration
+### 1.2 Environment variable: `DEPLOY_TARGETS`
 
-Create two environments in GitHub:
-
-1. `staging`
-2. `production`
-
-Set the following in each environment.
-
-### 2.1 Variable: `DEPLOY_TARGETS`
-
-`DEPLOY_TARGETS` is a JSON array. Each item is one host target:
+Set `DEPLOY_TARGETS` as JSON array:
 
 ```json
 [
   {
-    "name": "prod-a",
+    "name": "api-prod-a",
     "host": "203.0.113.10",
     "port": 22,
     "user": "ecs-user",
@@ -43,14 +39,12 @@ Set the following in each environment.
     "data_path": "/opt/remote-llm-cli/shared/state.json",
     "runtime_config_path": "/opt/remote-llm-cli/shared/runtimes.json",
     "healthcheck_url": "http://127.0.0.1:8080/v1/healthz",
-    "web_root": "/var/www/remote-llm",
-    "web_reload_cmd": "systemctl reload nginx",
     "keep_releases": 5
   }
 ]
 ```
 
-Required keys per item:
+Required keys:
 
 - `name`
 - `host`
@@ -66,33 +60,36 @@ Optional keys:
 - `runtime_config_path` (default empty)
 - `healthcheck_url` (default `http://127.0.0.1:8080/v1/healthz`)
 - `keep_releases` (default `5`)
-- `web_root` (optional static site publish directory, e.g. `/var/www/remote-llm`)
-- `web_reload_cmd` (optional command after web publish, e.g. `systemctl reload nginx`)
 
-`web_root` must be a dedicated static directory (the deploy script rejects unsafe system paths like `/`, `/var`, `/usr`).
+### 1.3 Environment secret: `DEPLOY_SSH_PRIVATE_KEY`
 
-### 2.2 Secret: `DEPLOY_SSH_PRIVATE_KEY`
+Private key content for SSH login to all hosts in `DEPLOY_TARGETS`.
 
-SSH private key content used by workflow to connect target hosts.
+## 2. Web deploy configuration (Cloudflare Pages)
 
-## 3. Deployment behavior
+### 2.1 Environment variables
 
-Per workflow run:
+- `CF_PAGES_PROJECT`: Cloudflare Pages project name (required)
+- `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account id (required)
+- `CF_PAGES_BRANCH`: Pages branch override (optional; default `github.ref_name`)
 
-1. Build release artifact once (`remote-llm-server`, `remote-llm-admin`, startup wrapper script, and `web/dist`).
-2. Fan out deploy over host matrix from `DEPLOY_TARGETS`.
-3. Upload artifact to target host via SSH/SCP.
-4. Extract to release directory: `${deploy_path}/releases/<git-sha>`.
-5. Atomically switch `${deploy_path}/current` symlink to new release.
-6. Write `${deploy_path}/shared/server.env`.
-7. Create/update `systemd` service unit and restart.
-8. If `web_root` is configured, publish static files to `web_root` and optionally execute `web_reload_cmd`.
-9. Health-check with retries.
-10. Keep only latest `keep_releases` release directories.
+### 2.2 Environment secret
+
+- `CLOUDFLARE_API_TOKEN`: API token with Pages deploy permission (required)
+
+## 3. Workflow behavior
+
+Per run:
+
+1. Build API release artifact (`remote-llm-server`, `remote-llm-admin`, startup script)
+2. Fan out API deployment over `DEPLOY_TARGETS`
+3. Upload/extract release, switch `current` symlink, restart systemd, health-check, trim old releases
+4. Build web (`web/dist`)
+5. Deploy web to Cloudflare Pages (`wrangler pages deploy`)
 
 ## 4. Manual redeploy
 
-Workflow also supports manual trigger (`workflow_dispatch`) with:
+`workflow_dispatch` is supported with:
 
 1. `environment`: `staging` or `production`
 2. `ref` (optional): branch/tag/sha to deploy

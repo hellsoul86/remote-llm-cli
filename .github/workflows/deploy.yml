@@ -41,13 +41,6 @@ jobs:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
       - name: Build binaries
         working-directory: server
         run: |
@@ -55,19 +48,12 @@ jobs:
           go build -trimpath -o ../dist/release/bin/remote-llm-server ./cmd/remote-llm-server
           go build -trimpath -o ../dist/release/bin/remote-llm-admin ./cmd/remote-llm-admin
 
-      - name: Build web dist
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
-
       - name: Package release
         run: |
-          mkdir -p dist/release/examples dist/release/web
+          mkdir -p dist/release/examples
           cp scripts/run-remote-llm-server.sh dist/release/bin/run-remote-llm-server.sh
           chmod +x dist/release/bin/run-remote-llm-server.sh
           cp examples/runtimes.example.json dist/release/examples/runtimes.example.json
-          cp -R web/dist/. dist/release/web/
           tar -C dist/release -czf dist/remote-llm-release.tgz .
 
       - name: Upload release artifact
@@ -122,6 +108,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
 
       - name: Download release artifact
         uses: actions/download-artifact@v4
@@ -153,8 +141,58 @@ jobs:
           DEPLOY_RUNTIME_CONFIG_PATH: ${{ matrix.target.runtime_config_path }}
           DEPLOY_KEEP_RELEASES: ${{ matrix.target.keep_releases || 5 }}
           DEPLOY_HEALTHCHECK_URL: ${{ matrix.target.healthcheck_url || 'http://127.0.0.1:8080/v1/healthz' }}
-          DEPLOY_WEB_ROOT: ${{ matrix.target.web_root }}
-          DEPLOY_WEB_RELOAD_CMD: ${{ matrix.target.web_reload_cmd }}
         run: |
           chmod +x scripts/deploy_release_via_ssh.sh
           scripts/deploy_release_via_ssh.sh
+
+  deploy-web-pages:
+    name: Deploy Web (Cloudflare Pages)
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Validate Cloudflare config
+        env:
+          CF_PAGES_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "${CF_PAGES_PROJECT}" ]; then
+            echo "::error::missing environment variable CF_PAGES_PROJECT"
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "::error::missing environment variable CLOUDFLARE_ACCOUNT_ID"
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::error::missing environment secret CLOUDFLARE_API_TOKEN"
+            exit 1
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy web/dist
+            --project-name=${{ vars.CF_PAGES_PROJECT }}
+            --branch=${{ vars.CF_PAGES_BRANCH != '' && vars.CF_PAGES_BRANCH || github.ref_name }}
