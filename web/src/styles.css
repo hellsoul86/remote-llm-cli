@@ -523,7 +523,7 @@ button.ghost.danger-ghost:hover {
   border-bottom: 1px solid #d3e0ef;
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   background: #ffffff;
 }
@@ -535,23 +535,6 @@ button.ghost.danger-ghost:hover {
 
 .chat-head .pane-eyebrow {
   color: var(--muted);
-}
-
-.chat-head-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.chat-health {
-  margin: 0;
-  color: #4c5f7a;
-  font-size: 0.8rem;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  text-transform: lowercase;
-}
-
-.chat-health.is-error {
-  color: #8d2828;
 }
 
 .thread-bar {
@@ -686,22 +669,6 @@ button.ghost.danger-ghost:hover {
   gap: 8px;
 }
 
-.session-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.session-strip span {
-  border-radius: 999px;
-  border: 1px solid #dbe4f0;
-  background: #ffffff;
-  font-size: 0.72rem;
-  padding: 4px 9px;
-  color: #334964;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-}
-
 .quick-strip {
   display: flex;
   align-items: center;
@@ -739,10 +706,13 @@ button.ghost.danger-ghost:hover {
   resize: vertical;
 }
 
-.composer-controls {
-  display: grid;
-  grid-template-columns: 1fr 172px;
-  gap: 8px;
+.composer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.composer-actions button {
+  min-width: 118px;
 }
 
 .session-side {
@@ -789,6 +759,17 @@ button.ghost.danger-ghost:hover {
 
 .compact-session-meta {
   gap: 10px;
+}
+
+.session-setting-row {
+  display: grid;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #334964;
+}
+
+.session-setting-row select {
+  width: 100%;
 }
 
 .pane-subtle-light {
@@ -1045,8 +1026,8 @@ button.ghost.danger-ghost:hover {
     text-align: center;
   }
 
-  .composer-controls {
-    grid-template-columns: 1fr;
+  .composer-actions button {
+    width: 100%;
   }
 
   .thread-rename-form {
