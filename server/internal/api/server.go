@@ -108,6 +108,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/run", s.withAuth(http.HandlerFunc(s.handleRun)))
 	mux.Handle("POST /v1/jobs/run", s.withAuth(http.HandlerFunc(s.handleEnqueueRunJob)))
 	mux.Handle("POST /v1/jobs/sync", s.withAuth(http.HandlerFunc(s.handleEnqueueSyncJob)))
+	mux.Handle("GET /v1/projects", s.withAuth(http.HandlerFunc(s.handleListProjects)))
+	mux.Handle("GET /v1/sessions", s.withAuth(http.HandlerFunc(s.handleListSessions)))
+	mux.Handle("GET /v1/sessions/{id}", s.withAuth(http.HandlerFunc(s.handleGetSession)))
 	mux.Handle("GET /v1/jobs", s.withAuth(http.HandlerFunc(s.handleListRunJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
 	mux.Handle("GET /v1/jobs/{id}/events", s.withAuth(http.HandlerFunc(s.handleListRunJobEvents)))
@@ -263,6 +266,68 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r, 20, 200)
 	writeJSON(w, http.StatusOK, map[string]any{"runs": s.store.ListRunRecords(limit)})
+}
+
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimit(r, 200, 5000)
+	projects := s.store.ListProjects(limit)
+	hostIDFilter := strings.TrimSpace(r.URL.Query().Get("host_id"))
+	pathFilter := strings.TrimSpace(r.URL.Query().Get("path"))
+	runtimeFilter := strings.TrimSpace(r.URL.Query().Get("runtime"))
+	filtered := make([]model.ProjectRecord, 0, len(projects))
+	for _, project := range projects {
+		if hostIDFilter != "" && strings.TrimSpace(project.HostID) != hostIDFilter {
+			continue
+		}
+		if pathFilter != "" && strings.TrimSpace(project.Path) != pathFilter {
+			continue
+		}
+		if runtimeFilter != "" && strings.TrimSpace(project.Runtime) != runtimeFilter {
+			continue
+		}
+		filtered = append(filtered, project)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"projects": filtered})
+}
+
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimit(r, 200, 5000)
+	sessions := s.store.ListSessions(limit)
+	projectIDFilter := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	hostIDFilter := strings.TrimSpace(r.URL.Query().Get("host_id"))
+	pathFilter := strings.TrimSpace(r.URL.Query().Get("path"))
+	runtimeFilter := strings.TrimSpace(r.URL.Query().Get("runtime"))
+	filtered := make([]model.SessionRecord, 0, len(sessions))
+	for _, session := range sessions {
+		if projectIDFilter != "" && strings.TrimSpace(session.ProjectID) != projectIDFilter {
+			continue
+		}
+		if hostIDFilter != "" && strings.TrimSpace(session.HostID) != hostIDFilter {
+			continue
+		}
+		if pathFilter != "" && strings.TrimSpace(session.Path) != pathFilter {
+			continue
+		}
+		if runtimeFilter != "" && strings.TrimSpace(session.Runtime) != runtimeFilter {
+			continue
+		}
+		filtered = append(filtered, session)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": filtered})
+}
+
+func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session id"})
+		return
+	}
+	session, ok := s.store.GetSession(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session": session})
 }
 
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
@@ -602,11 +667,21 @@ func (s *Server) handleEnqueueRunJob(w http.ResponseWriter, r *http.Request) {
 		Fanout:         fanout,
 		Request:        rawReq,
 	}
+	titleUpdated, titleValue, err := s.ensureSessionBinding(job, prepared.Request, prepared.Hosts)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
 	if err := s.store.AddRunJob(job); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
 	s.appendRunJobEventForJob(job, runJobEvent{Type: "job.queued", Status: runJobStatusPending})
+	if titleUpdated {
+		s.appendSessionStructuredEvent(job, "session.title.updated", map[string]any{
+			"title": titleValue,
+		})
+	}
 	if s.enqueueStoredJob(job.ID) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"job": compactRunJob(job)})
 		return
@@ -617,6 +692,7 @@ func (s *Server) handleEnqueueRunJob(w http.ResponseWriter, r *http.Request) {
 	job.Error = "job queue is full"
 	job.FinishedAt = &finished
 	_ = s.store.UpdateRunJob(job)
+	_ = s.updateSessionRunState(job)
 	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": job.Error, "job": compactRunJob(job)})
 }
 
@@ -668,6 +744,7 @@ func (s *Server) handleEnqueueSyncJob(w http.ResponseWriter, r *http.Request) {
 	job.Error = "job queue is full"
 	job.FinishedAt = &finished
 	_ = s.store.UpdateRunJob(job)
+	_ = s.updateSessionRunState(job)
 	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": job.Error, "job": compactRunJob(job)})
 }
 
@@ -937,6 +1014,7 @@ func (s *Server) handleCancelRunJob(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		_ = s.updateSessionRunState(job)
 		s.appendRunJobEventForJob(job, runJobEvent{Type: "job.canceled", Status: runJobStatusCanceled, Error: job.Error})
 		writeJSON(w, http.StatusOK, map[string]any{"state": "canceled", "job": compactRunJob(job)})
 		return
@@ -1141,6 +1219,7 @@ func (s *Server) enqueueRecoveredRunJob(jobID string) {
 	job.Error = "job queue is full during startup recovery"
 	job.FinishedAt = &finished
 	_ = s.store.UpdateRunJob(job)
+	_ = s.updateSessionRunState(job)
 }
 
 func (s *Server) enqueueStoredJob(jobID string) bool {
@@ -1189,7 +1268,7 @@ func (s *Server) appendSessionEventForJob(job model.RunJobRecord, event runJobEv
 	if sessionID == "" {
 		return
 	}
-	payload, err := json.Marshal(map[string]any{
+	payloadMap := map[string]any{
 		"job_id":    strings.TrimSpace(job.ID),
 		"host_id":   strings.TrimSpace(event.HostID),
 		"host_name": strings.TrimSpace(event.HostName),
@@ -1198,7 +1277,8 @@ func (s *Server) appendSessionEventForJob(job model.RunJobRecord, event runJobEv
 		"exit_code": event.ExitCode,
 		"error":     strings.TrimSpace(event.Error),
 		"status":    strings.TrimSpace(event.Status),
-	})
+	}
+	payload, err := json.Marshal(payloadMap)
 	if err != nil {
 		return
 	}
@@ -1213,6 +1293,57 @@ func (s *Server) appendSessionEventForJob(job model.RunJobRecord, event runJobEv
 		return
 	}
 	s.publishSessionEvent(persisted)
+	if mappedType := mapSessionLifecycleEventType(job, event); mappedType != "" && mappedType != strings.TrimSpace(event.Type) {
+		s.appendSessionStructuredEventAt(job, mappedType, payloadMap, event.CreatedAt)
+	}
+}
+
+func (s *Server) appendSessionStructuredEvent(job model.RunJobRecord, eventType string, payload any) {
+	s.appendSessionStructuredEventAt(job, eventType, payload, time.Now().UTC())
+}
+
+func (s *Server) appendSessionStructuredEventAt(job model.RunJobRecord, eventType string, payload any, createdAt time.Time) {
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		return
+	}
+	sessionID := normalizeSessionID(job.SessionID, job.ID)
+	if sessionID == "" {
+		return
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	persisted, err := s.store.AppendSessionEvent(model.SessionEvent{
+		SessionID: sessionID,
+		RunID:     strings.TrimSpace(job.ID),
+		Type:      eventType,
+		Payload:   rawPayload,
+		CreatedAt: createdAt,
+	})
+	if err != nil {
+		return
+	}
+	s.publishSessionEvent(persisted)
+}
+
+func mapSessionLifecycleEventType(job model.RunJobRecord, event runJobEvent) string {
+	switch strings.TrimSpace(event.Type) {
+	case "job.running":
+		return "run.started"
+	case "job.succeeded":
+		return "run.completed"
+	case "job.failed":
+		return "run.failed"
+	case "job.canceled":
+		return "run.canceled"
+	case "target.stdout":
+		if strings.TrimSpace(job.Runtime) == "codex" {
+			return "assistant.delta"
+		}
+	}
+	return ""
 }
 
 func (s *Server) subscribeSessionStream(sessionID string, buffer int) (<-chan model.SessionEvent, func()) {
@@ -1374,6 +1505,7 @@ func (s *Server) executeQueuedJob(jobID string) {
 	if err := s.store.UpdateRunJob(job); err != nil {
 		return
 	}
+	_ = s.updateSessionRunState(job)
 	s.appendRunJobEventForJob(job, runJobEvent{Type: "job.running", Status: runJobStatusRunning})
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerRunningJob(jobID, cancel)
@@ -1391,6 +1523,7 @@ func (s *Server) executeQueuedJob(jobID string) {
 		job.Error = fmt.Sprintf("unsupported job type: %s", job.Type)
 		job.FinishedAt = &finished
 		_ = s.store.UpdateRunJob(job)
+		_ = s.updateSessionRunState(job)
 		s.appendRunJobEventForJob(job, runJobEvent{Type: "job.failed", Status: runJobStatusFailed, Error: job.Error})
 	}
 }
@@ -1404,6 +1537,7 @@ func (s *Server) executeQueuedRunJob(ctx context.Context, job model.RunJobRecord
 		job.Error = fmt.Sprintf("decode run request: %v", err)
 		job.FinishedAt = &finished
 		_ = s.store.UpdateRunJob(job)
+		_ = s.updateSessionRunState(job)
 		s.appendRunJobEventForJob(job, runJobEvent{Type: "job.failed", Status: runJobStatusFailed, Error: job.Error})
 		return
 	}
@@ -1416,6 +1550,7 @@ func (s *Server) executeQueuedRunJob(ctx context.Context, job model.RunJobRecord
 		job.Error = err.Error()
 		job.FinishedAt = &finished
 		_ = s.store.UpdateRunJob(job)
+		_ = s.updateSessionRunState(job)
 		s.appendRunJobEventForJob(job, runJobEvent{Type: "job.failed", Status: runJobStatusFailed, Error: job.Error})
 		return
 	}
@@ -1481,6 +1616,7 @@ func (s *Server) executeQueuedRunJob(ctx context.Context, job model.RunJobRecord
 		job.ResultStatus = http.StatusInternalServerError
 		job.Error = fmt.Sprintf("encode run response: %v", err)
 		_ = s.store.UpdateRunJob(job)
+		_ = s.updateSessionRunState(job)
 		s.appendRunJobEventForJob(job, runJobEvent{Type: "job.failed", Status: runJobStatusFailed, Error: job.Error})
 		return
 	}
@@ -1493,6 +1629,9 @@ func (s *Server) executeQueuedRunJob(ctx context.Context, job model.RunJobRecord
 		job.Status = runJobStatusSucceeded
 		job.Error = ""
 		s.appendRunJobEventForJob(job, runJobEvent{Type: "job.succeeded", Status: runJobStatusSucceeded})
+		s.appendSessionStructuredEvent(job, "assistant.completed", map[string]any{
+			"run_id": strings.TrimSpace(job.ID),
+		})
 	}
 	job.Response = rawResp
 	job.TotalHosts = resp.Summary.Total
@@ -1501,6 +1640,7 @@ func (s *Server) executeQueuedRunJob(ctx context.Context, job model.RunJobRecord
 	job.Fanout = resp.Summary.Fanout
 	job.DurationMS = resp.Summary.DurationMS
 	_ = s.store.UpdateRunJob(job)
+	_ = s.updateSessionRunState(job)
 }
 
 func (s *Server) executeQueuedSyncJob(ctx context.Context, job model.RunJobRecord) {
@@ -1512,6 +1652,7 @@ func (s *Server) executeQueuedSyncJob(ctx context.Context, job model.RunJobRecor
 		job.Error = fmt.Sprintf("decode sync request: %v", err)
 		job.FinishedAt = &finished
 		_ = s.store.UpdateRunJob(job)
+		_ = s.updateSessionRunState(job)
 		return
 	}
 	status, resp, err := s.executeSyncRequest(ctx, req)
@@ -1525,6 +1666,7 @@ func (s *Server) executeQueuedSyncJob(ctx context.Context, job model.RunJobRecor
 			job.ResultStatus = jobResultCanceled
 			job.Error = "canceled while running"
 			_ = s.store.UpdateRunJob(job)
+			_ = s.updateSessionRunState(job)
 			return
 		}
 		var badReq apiError
@@ -1537,6 +1679,7 @@ func (s *Server) executeQueuedSyncJob(ctx context.Context, job model.RunJobRecor
 		job.Status = runJobStatusFailed
 		job.Error = err.Error()
 		_ = s.store.UpdateRunJob(job)
+		_ = s.updateSessionRunState(job)
 		return
 	}
 	rawResp, err := json.Marshal(resp)
@@ -1545,6 +1688,7 @@ func (s *Server) executeQueuedSyncJob(ctx context.Context, job model.RunJobRecor
 		job.ResultStatus = http.StatusInternalServerError
 		job.Error = fmt.Sprintf("encode sync response: %v", err)
 		_ = s.store.UpdateRunJob(job)
+		_ = s.updateSessionRunState(job)
 		return
 	}
 	if canceled {
@@ -1562,6 +1706,7 @@ func (s *Server) executeQueuedSyncJob(ctx context.Context, job model.RunJobRecor
 	job.Fanout = resp.Summary.Fanout
 	job.DurationMS = resp.Summary.DurationMS
 	_ = s.store.UpdateRunJob(job)
+	_ = s.updateSessionRunState(job)
 }
 
 func compactRunJob(job model.RunJobRecord) model.RunJobRecord {
@@ -2760,6 +2905,10 @@ func inferAction(method string, path string) string {
 		return "job.run.enqueue"
 	case method == http.MethodPost && path == "/v1/jobs/sync":
 		return "job.sync.enqueue"
+	case method == http.MethodGet && path == "/v1/projects":
+		return "project.list"
+	case method == http.MethodGet && path == "/v1/sessions":
+		return "session.list"
 	case method == http.MethodGet && path == "/v1/jobs":
 		return "job.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/events"):
@@ -2768,6 +2917,8 @@ func inferAction(method string, path string) string {
 		return "session.events.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/sessions/") && strings.HasSuffix(path, "/stream"):
 		return "session.stream.open"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v1/sessions/"):
+		return "session.get"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/"):
 		return "job.get"
 	case method == http.MethodPost && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/cancel"):
@@ -2827,6 +2978,98 @@ func normalizeSessionID(sessionID string, fallback string) string {
 		return trimmed
 	}
 	return strings.TrimSpace(fallback)
+}
+
+func projectBindingID(hostID string, pathValue string) string {
+	hostID = strings.TrimSpace(hostID)
+	if hostID == "" {
+		hostID = "local"
+	}
+	pathValue = strings.TrimSpace(pathValue)
+	if pathValue == "" {
+		pathValue = "/"
+	}
+	return "project_" + hostID + "::" + pathValue
+}
+
+func deriveSessionTitle(promptPreview string, sessionID string) string {
+	title := strings.TrimSpace(promptPreview)
+	if title == "" {
+		return strings.TrimSpace(sessionID)
+	}
+	if len(title) <= 80 {
+		return title
+	}
+	return strings.TrimSpace(title[:80])
+}
+
+func (s *Server) ensureSessionBinding(job model.RunJobRecord, req runRequest, hosts []model.Host) (bool, string, error) {
+	sessionID := normalizeSessionID(job.SessionID, job.ID)
+	if sessionID == "" {
+		return false, "", nil
+	}
+	primaryHost := model.Host{}
+	if len(hosts) > 0 {
+		primaryHost = hosts[0]
+	}
+	projectPath := strings.TrimSpace(resolveWorkdir(req.Workdir, primaryHost.Workspace))
+	if projectPath == "" {
+		projectPath = "/home/ecs-user"
+	}
+	project := model.ProjectRecord{
+		ID:       projectBindingID(primaryHost.ID, projectPath),
+		HostID:   strings.TrimSpace(primaryHost.ID),
+		HostName: strings.TrimSpace(primaryHost.Name),
+		Path:     projectPath,
+		Runtime:  strings.TrimSpace(job.Runtime),
+	}
+	projectRecord, err := s.store.UpsertProject(project)
+	if err != nil {
+		return false, "", fmt.Errorf("upsert project binding: %w", err)
+	}
+
+	existing, exists := s.store.GetSession(sessionID)
+	title := deriveSessionTitle(job.PromptPreview, sessionID)
+	if exists && strings.TrimSpace(existing.Title) != "" {
+		title = strings.TrimSpace(existing.Title)
+	}
+	titleUpdated := !exists
+	if exists && strings.TrimSpace(existing.Title) != strings.TrimSpace(title) {
+		titleUpdated = true
+	}
+	session := model.SessionRecord{
+		ID:               sessionID,
+		ProjectID:        projectRecord.ID,
+		HostID:           strings.TrimSpace(primaryHost.ID),
+		Path:             projectPath,
+		Runtime:          strings.TrimSpace(job.Runtime),
+		RuntimeSessionID: existing.RuntimeSessionID,
+		Title:            title,
+		LastRunID:        strings.TrimSpace(job.ID),
+		LastStatus:       strings.TrimSpace(job.Status),
+	}
+	if _, err := s.store.UpsertSession(session); err != nil {
+		return false, "", fmt.Errorf("upsert session binding: %w", err)
+	}
+	return titleUpdated, title, nil
+}
+
+func (s *Server) updateSessionRunState(job model.RunJobRecord) error {
+	sessionID := normalizeSessionID(job.SessionID, job.ID)
+	if sessionID == "" {
+		return nil
+	}
+	session, ok := s.store.GetSession(sessionID)
+	if !ok {
+		return nil
+	}
+	session.LastRunID = strings.TrimSpace(job.ID)
+	session.LastStatus = strings.TrimSpace(job.Status)
+	if strings.TrimSpace(session.Runtime) == "" {
+		session.Runtime = strings.TrimSpace(job.Runtime)
+	}
+	_, err := s.store.UpsertSession(session)
+	return err
 }
 
 func toRunTargetSummaries(targets []runTargetResult) []model.RunTargetSummary {

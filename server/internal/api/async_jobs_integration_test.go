@@ -370,6 +370,133 @@ func TestSessionSSEStreamReceivesLivePublish(t *testing.T) {
 	}
 }
 
+func TestSessionBindingAndNormalizedLifecycleEvents(t *testing.T) {
+	srv, httpSrv, token, host := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	srv.runViaSSH = func(_ context.Context, _ model.Host, _ runtime.CommandSpec, _ string, opts executor.ExecOptions) (executor.ExecResult, error) {
+		if opts.OnStdoutChunk != nil {
+			opts.OnStdoutChunk([]byte("{\"type\":\"assistant.delta\",\"delta\":\"hello\"}\n"))
+		}
+		now := time.Now().UTC()
+		return executor.ExecResult{
+			ExitCode:   0,
+			Stdout:     "{\"type\":\"assistant.completed\",\"text\":\"done\"}\n",
+			DurationMS: 5,
+			StartedAt:  now,
+			FinishedAt: now,
+		}, nil
+	}
+
+	const sessionID = "session_binding_1"
+	enqueueBody := map[string]any{
+		"runtime":    "codex",
+		"prompt":     "Investigate deployment health and summarize",
+		"host_id":    host.ID,
+		"session_id": sessionID,
+		"fanout":     1,
+	}
+	var enqueueResp struct {
+		Job model.RunJobRecord `json:"job"`
+	}
+	status := doJSON(t, httpSrv.Client(), http.MethodPost, httpSrv.URL+"/v1/jobs/run", token, enqueueBody, &enqueueResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("enqueue status=%d want=202", status)
+	}
+	final := waitJobTerminal(t, httpSrv, token, enqueueResp.Job.ID, 3*time.Second)
+	if final.Status != runJobStatusSucceeded {
+		t.Fatalf("job status=%q want=%q", final.Status, runJobStatusSucceeded)
+	}
+
+	var getSessionResp struct {
+		Session model.SessionRecord `json:"session"`
+	}
+	getStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/sessions/%s", httpSrv.URL, sessionID),
+		token,
+		nil,
+		&getSessionResp,
+	)
+	if getStatus != http.StatusOK {
+		t.Fatalf("get session status=%d want=200", getStatus)
+	}
+	if getSessionResp.Session.LastStatus != runJobStatusSucceeded {
+		t.Fatalf("session last_status=%q want=succeeded", getSessionResp.Session.LastStatus)
+	}
+	if getSessionResp.Session.ProjectID == "" {
+		t.Fatalf("session project_id should not be empty")
+	}
+	if getSessionResp.Session.Title == "" {
+		t.Fatalf("session title should not be empty")
+	}
+
+	var listProjectsResp struct {
+		Projects []model.ProjectRecord `json:"projects"`
+	}
+	projectStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/projects?host_id=%s", httpSrv.URL, host.ID),
+		token,
+		nil,
+		&listProjectsResp,
+	)
+	if projectStatus != http.StatusOK {
+		t.Fatalf("list projects status=%d want=200", projectStatus)
+	}
+	if len(listProjectsResp.Projects) == 0 {
+		t.Fatalf("expected at least one project")
+	}
+
+	var listSessionsResp struct {
+		Sessions []model.SessionRecord `json:"sessions"`
+	}
+	sessionsStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/sessions?project_id=%s", httpSrv.URL, getSessionResp.Session.ProjectID),
+		token,
+		nil,
+		&listSessionsResp,
+	)
+	if sessionsStatus != http.StatusOK {
+		t.Fatalf("list sessions status=%d want=200", sessionsStatus)
+	}
+	if len(listSessionsResp.Sessions) == 0 {
+		t.Fatalf("expected sessions in project")
+	}
+
+	var eventsResp struct {
+		Events []model.SessionEvent `json:"events"`
+	}
+	eventsStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/sessions/%s/events?after=0&limit=500", httpSrv.URL, sessionID),
+		token,
+		nil,
+		&eventsResp,
+	)
+	if eventsStatus != http.StatusOK {
+		t.Fatalf("session events status=%d want=200", eventsStatus)
+	}
+	seen := map[string]bool{}
+	for _, event := range eventsResp.Events {
+		seen[event.Type] = true
+	}
+	for _, typ := range []string{"run.started", "assistant.delta", "assistant.completed", "run.completed", "session.title.updated"} {
+		if !seen[typ] {
+			t.Fatalf("missing normalized event type %q in %#v", typ, seen)
+		}
+	}
+}
+
 func TestDiscoverCodexModels(t *testing.T) {
 	srv, httpSrv, token, host := newAuthedTestServer(t)
 	defer httpSrv.Close()

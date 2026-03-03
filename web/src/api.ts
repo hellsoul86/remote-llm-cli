@@ -273,6 +273,30 @@ export type CodexModelCatalog = {
   warning?: string;
 };
 
+export type ProjectRecord = {
+  id: string;
+  host_id: string;
+  host_name?: string;
+  path: string;
+  runtime: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SessionRecord = {
+  id: string;
+  project_id: string;
+  host_id: string;
+  path: string;
+  runtime: string;
+  runtime_session_id?: string;
+  title: string;
+  last_run_id?: string;
+  last_status?: string;
+  created_at: string;
+  updated_at: string;
+};
+
 const ENV_API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
 const IS_DEV = import.meta.env.DEV;
 
@@ -582,4 +606,43 @@ export async function setRetentionPolicy(token: string, retention: RetentionPoli
   const body = await res.json();
   if (!res.ok || !body?.retention) throw new Error(`set retention failed: ${res.status} ${JSON.stringify(body)}`);
   return body.retention;
+}
+
+export async function listProjects(
+  token: string,
+  limit = 200,
+  filters?: { host_id?: string; path?: string; runtime?: string }
+): Promise<ProjectRecord[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (filters?.host_id) params.set("host_id", filters.host_id);
+  if (filters?.path) params.set("path", filters.path);
+  if (filters?.runtime) params.set("runtime", filters.runtime);
+  const res = await fetch(`${API_BASE}/v1/projects?${params.toString()}`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`list projects failed: ${res.status}`);
+  const body = await res.json();
+  return body.projects ?? [];
+}
+
+export async function listSessions(
+  token: string,
+  limit = 200,
+  filters?: { project_id?: string; host_id?: string; path?: string; runtime?: string }
+): Promise<SessionRecord[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (filters?.project_id) params.set("project_id", filters.project_id);
+  if (filters?.host_id) params.set("host_id", filters.host_id);
+  if (filters?.path) params.set("path", filters.path);
+  if (filters?.runtime) params.set("runtime", filters.runtime);
+  const res = await fetch(`${API_BASE}/v1/sessions?${params.toString()}`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`list sessions failed: ${res.status}`);
+  const body = await res.json();
+  return body.sessions ?? [];
+}
+
+export async function getSession(token: string, sessionID: string): Promise<SessionRecord> {
+  const res = await fetch(`${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`get session failed: ${res.status}`);
+  const body = await res.json();
+  if (!body?.session) throw new Error("get session failed: invalid response");
+  return body.session;
 }

@@ -279,3 +279,61 @@ func TestSessionEventsPersistAndPaginateBySeq(t *testing.T) {
 		t.Fatalf("third seq=%d want=3", third.Seq)
 	}
 }
+
+func TestProjectAndSessionBindingLifecycle(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	project, err := st.UpsertProject(model.ProjectRecord{
+		ID:       "project_h1::/srv/app",
+		HostID:   "h1",
+		HostName: "staging",
+		Path:     "/srv/app",
+		Runtime:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	if project.ID == "" || project.CreatedAt.IsZero() {
+		t.Fatalf("invalid project: %#v", project)
+	}
+	session, err := st.UpsertSession(model.SessionRecord{
+		ID:         "session_1",
+		ProjectID:  project.ID,
+		HostID:     "h1",
+		Path:       "/srv/app",
+		Runtime:    "codex",
+		Title:      "Initial",
+		LastRunID:  "job_1",
+		LastStatus: "pending",
+	})
+	if err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+	if session.ID != "session_1" {
+		t.Fatalf("session id=%q", session.ID)
+	}
+	got, ok := st.GetSession("session_1")
+	if !ok {
+		t.Fatalf("session not found")
+	}
+	if got.ProjectID != project.ID || got.LastRunID != "job_1" {
+		t.Fatalf("unexpected session state: %#v", got)
+	}
+	got.LastStatus = "succeeded"
+	if _, err := st.UpsertSession(got); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+	projects := st.ListProjects(10)
+	if len(projects) != 1 {
+		t.Fatalf("projects=%d want=1", len(projects))
+	}
+	sessions := st.ListSessions(10)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions=%d want=1", len(sessions))
+	}
+	if sessions[0].LastStatus != "succeeded" {
+		t.Fatalf("session last_status=%q want=succeeded", sessions[0].LastStatus)
+	}
+}
