@@ -1,6 +1,6 @@
 # remote-llm-cli
 
-Universal remote controller for agent CLIs over SSH.
+Universal controller for agent CLIs over SSH or local-controller execution.
 
 Current runtime support:
 
@@ -65,7 +65,8 @@ Default API URL is `http://localhost:8080`.
 - Template runtime adapter SDK (`run_args` placeholders + config loading)
 - Built-in `claudecode` adapter path through the same controller pipeline
 - Host CRUD API (JSON file persistence)
-- Host probe (`ssh` + codex diagnostics)
+- Host probe (`ssh`/`local` preflight + codex diagnostics)
+- Per-host connection mode (`connection_mode=ssh|local`, default `ssh`)
 - SSH transport hardening per host:
   - `ssh_proxy_jump`
   - `ssh_connect_timeout_sec`
@@ -73,7 +74,7 @@ Default API URL is `http://localhost:8080`.
   - `ssh_server_alive_count_max`
   - `ssh_host_key_policy` (`accept-new` / `strict` / `insecure-ignore`)
 - Structured transport error classification (`error_class`, `error_hint`) for run/sync/probe targets
-- Probe preflight checks for controller toolchain and SSH key accessibility
+- Probe preflight checks for controller toolchain and SSH key accessibility (SSH mode) or local shell/rsync readiness (local mode)
 - Multi-host fanout execution (`POST /v1/run` with `host_ids` or `all_hosts`)
 - Async run jobs with reconnectable polling (`POST /v1/jobs/run`, `GET /v1/jobs`, `GET /v1/jobs/{id}`)
 - Multi-host file sync over rsync (`POST /v1/sync`)
@@ -119,7 +120,7 @@ Default API URL is `http://localhost:8080`.
 - `e`: toggle `--ephemeral`
 - `l`: toggle resume `--last`
 - `s`: edit resume session id (when `resume_last=false`)
-- `o`: open interactive SSH shell on current host (with workspace cd)
+- `o`: open interactive shell on current host (SSH shell or local shell with workspace cd)
 
 ## Fanout API example
 
@@ -135,13 +136,14 @@ curl -X POST http://localhost:8080/v1/run \
   }'
 ```
 
-## Host SSH hardening fields
+## Host connection fields
 
-Host upsert accepts optional SSH transport settings:
+Host upsert accepts `connection_mode` and optional SSH transport settings:
 
 ```json
 {
   "name": "prod-a",
+  "connection_mode": "ssh",
   "host": "10.0.0.12",
   "user": "ecs-user",
   "identity_file": "/home/ecs-user/.ssh/id_ed25519",
@@ -152,6 +154,20 @@ Host upsert accepts optional SSH transport settings:
   "ssh_host_key_policy": "strict"
 }
 ```
+
+For local-controller execution:
+
+```json
+{
+  "name": "local-dev",
+  "connection_mode": "local",
+  "workspace": "/home/ecs-user/projects/remote-llm-cli"
+}
+```
+
+- `connection_mode` defaults to `ssh`.
+- In `ssh` mode, `host` is required.
+- In `local` mode, empty `host` is normalized to `localhost`.
 
 `POST /v1/hosts/{id}/probe` also supports optional body:
 

@@ -18,6 +18,11 @@ import (
 
 const defaultMaxOutputBytes = 256 * 1024
 
+const (
+	HostConnectionModeSSH   = "ssh"
+	HostConnectionModeLocal = "local"
+)
+
 type ErrorClass string
 
 const (
@@ -130,6 +135,9 @@ type SSHPreflightReport struct {
 }
 
 func RunViaSSH(ctx context.Context, h model.Host, spec runtime.CommandSpec, workdir string, opts ExecOptions) (ExecResult, error) {
+	if isLocalHostMode(h) {
+		return runViaLocalShell(ctx, spec, workdir, opts)
+	}
 	started := time.Now().UTC()
 	remoteCmd := renderRemoteCommand(spec, workdir)
 	sshArgs := buildSSHArgs(h, remoteCmd)
@@ -165,6 +173,44 @@ func RunViaSSH(ctx context.Context, h model.Host, spec runtime.CommandSpec, work
 	}
 	res.ExitCode = -1
 	return res, classifySSHRunError(err, res.ExitCode, res.Stderr)
+}
+
+func runViaLocalShell(ctx context.Context, spec runtime.CommandSpec, workdir string, opts ExecOptions) (ExecResult, error) {
+	started := time.Now().UTC()
+	localCmd := renderRemoteCommand(spec, workdir)
+	args := []string{"-lc", localCmd}
+	cmd := exec.CommandContext(ctx, "sh", args...)
+
+	normOpts := normalizeExecOptions(opts)
+	stdoutBuffer := newLimitedBuffer(normOpts.MaxStdoutBytes)
+	stderrBuffer := newLimitedBuffer(normOpts.MaxStderrBytes)
+	cmd.Stdout = stdoutBuffer
+	cmd.Stderr = stderrBuffer
+
+	err := cmd.Run()
+	finished := time.Now().UTC()
+	res := ExecResult{
+		Command:         "local sh -lc " + shellQuote(localCmd),
+		Stdout:          stdoutBuffer.String(),
+		Stderr:          stderrBuffer.String(),
+		StdoutBytes:     stdoutBuffer.TotalBytes(),
+		StderrBytes:     stderrBuffer.TotalBytes(),
+		StdoutTruncated: stdoutBuffer.Truncated(),
+		StderrTruncated: stderrBuffer.Truncated(),
+		ExitCode:        0,
+		DurationMS:      finished.Sub(started).Milliseconds(),
+		StartedAt:       started,
+		FinishedAt:      finished,
+	}
+	if err == nil {
+		return res, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		res.ExitCode = exitErr.ExitCode()
+		return res, classifyLocalRunError(err, res.ExitCode, res.Stderr)
+	}
+	res.ExitCode = -1
+	return res, classifyLocalRunError(err, res.ExitCode, res.Stderr)
 }
 
 func renderRemoteCommand(spec runtime.CommandSpec, workdir string) string {
@@ -239,6 +285,9 @@ func clampInt(v int, fallback int, min int, max int) int {
 }
 
 func RunSSHPreflight(h model.Host) SSHPreflightReport {
+	if isLocalHostMode(h) {
+		return runLocalPreflight()
+	}
 	checks := make([]PreflightCheck, 0, 4)
 	sshPath, sshErr := exec.LookPath("ssh")
 	checks = append(checks, PreflightCheck{
@@ -292,6 +341,38 @@ func RunSSHPreflight(h model.Host) SSHPreflightReport {
 		OK:     true,
 		Detail: policy,
 		Hint:   hostKeyPolicyHint(policy),
+	})
+	ok := true
+	for _, item := range checks {
+		if !item.OK {
+			ok = false
+			break
+		}
+	}
+	return SSHPreflightReport{OK: ok, Checks: checks}
+}
+
+func runLocalPreflight() SSHPreflightReport {
+	checks := make([]PreflightCheck, 0, 3)
+	shellPath, shellErr := exec.LookPath("sh")
+	checks = append(checks, PreflightCheck{
+		Name:   "shell_binary",
+		OK:     shellErr == nil,
+		Detail: toolDetail("sh", shellPath, shellErr),
+		Hint:   toolHint("sh", shellErr),
+	})
+	rsyncPath, rsyncErr := exec.LookPath("rsync")
+	checks = append(checks, PreflightCheck{
+		Name:   "rsync_binary",
+		OK:     rsyncErr == nil,
+		Detail: toolDetail("rsync", rsyncPath, rsyncErr),
+		Hint:   toolHint("rsync", rsyncErr),
+	})
+	checks = append(checks, PreflightCheck{
+		Name:   "connection_mode",
+		OK:     true,
+		Detail: HostConnectionModeLocal,
+		Hint:   "local mode executes commands on the controller machine",
 	})
 	ok := true
 	for _, item := range checks {
@@ -392,6 +473,44 @@ func classifySSHRunError(runErr error, exitCode int, stderr string) error {
 	}
 }
 
+func classifyLocalRunError(runErr error, exitCode int, stderr string) error {
+	if runErr == nil {
+		return nil
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		return &ClassifiedError{
+			Class:   ErrorClassCommand,
+			Hint:    "local command timed out or was canceled; verify timeout settings",
+			Message: fmt.Sprintf("local execution canceled: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+	var execErr *exec.Error
+	if errors.As(runErr, &execErr) {
+		return &ClassifiedError{
+			Class:   ErrorClassToolchain,
+			Hint:    "install required local CLI binary on controller host",
+			Message: fmt.Sprintf("local binary execution failed: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+	if exitCode >= 0 {
+		return &ClassifiedError{
+			Class:   ErrorClassCommand,
+			Hint:    "local command exited non-zero; inspect stderr/stdout",
+			Message: fmt.Sprintf("local command failed: %v", runErr),
+			Cause:   runErr,
+		}
+	}
+	_ = stderr
+	return &ClassifiedError{
+		Class:   ErrorClassUnknown,
+		Hint:    "inspect stderr and command output",
+		Message: fmt.Sprintf("local execution failed: %v", runErr),
+		Cause:   runErr,
+	}
+}
+
 func classifyRsyncRunError(runErr error, exitCode int, stderr string) error {
 	if runErr == nil {
 		return nil
@@ -460,6 +579,21 @@ func hasAny(text string, subs ...string) bool {
 		}
 	}
 	return false
+}
+
+func isLocalHostMode(h model.Host) bool {
+	return normalizeHostConnectionMode(h.ConnectionMode) == HostConnectionModeLocal
+}
+
+func normalizeHostConnectionMode(v string) string {
+	mode := strings.ToLower(strings.TrimSpace(v))
+	if mode == "" {
+		return HostConnectionModeSSH
+	}
+	if mode == HostConnectionModeLocal {
+		return HostConnectionModeLocal
+	}
+	return HostConnectionModeSSH
 }
 
 func hostTarget(h model.Host) string {

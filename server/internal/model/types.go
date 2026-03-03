@@ -8,6 +8,7 @@ import (
 type Host struct {
 	ID                        string    `json:"id"`
 	Name                      string    `json:"name"`
+	ConnectionMode            string    `json:"connection_mode,omitempty"`
 	Host                      string    `json:"host"`
 	User                      string    `json:"user"`
 	Port                      int       `json:"port"`

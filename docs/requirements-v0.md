@@ -40,7 +40,8 @@ Need one local CLI to control multiple remote servers and run workflows nearly l
 - Config file path: `~/.config/remote-llm-cli/hosts.yaml` (default).
 - Fields per host:
   - `name`
-  - `host`
+  - `connection_mode` (`ssh` default, `local` optional)
+  - `host` (required for `ssh`, optional for `local`)
   - `user`
   - `port` (default 22)
   - `identity_file` (optional)

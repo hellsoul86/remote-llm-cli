@@ -44,3 +44,12 @@ func TestBuildRunRequestUsesSelectedHosts(t *testing.T) {
 		t.Fatalf("HostIDs not sorted: %#v", req.HostIDs)
 	}
 }
+
+func TestHostConnectionMode(t *testing.T) {
+	if got := hostConnectionMode(Host{}); got != "ssh" {
+		t.Fatalf("default mode=%q want=ssh", got)
+	}
+	if got := hostConnectionMode(Host{ConnectionMode: "local"}); got != "local" {
+		t.Fatalf("mode=%q want=local", got)
+	}
+}

@@ -219,7 +219,10 @@ export function App() {
     e.preventDefault();
     const form = new FormData(e.currentTarget);
     const name = String(form.get("name") ?? "").trim();
-    const host = String(form.get("host") ?? "").trim();
+    const hostRaw = String(form.get("host") ?? "").trim();
+    const connectionModeRaw = String(form.get("connection_mode") ?? "").trim();
+    const connectionMode: "ssh" | "local" = connectionModeRaw === "local" ? "local" : "ssh";
+    const host = connectionMode === "local" ? hostRaw || "localhost" : hostRaw;
     const user = String(form.get("user") ?? "").trim();
     const workspace = String(form.get("workspace") ?? "").trim();
     const identityFile = String(form.get("identity_file") ?? "").trim();
@@ -228,8 +231,12 @@ export function App() {
     const sshConnectTimeoutRaw = String(form.get("ssh_connect_timeout_sec") ?? "").trim();
     const sshAliveIntervalRaw = String(form.get("ssh_server_alive_interval_sec") ?? "").trim();
     const sshAliveCountRaw = String(form.get("ssh_server_alive_count_max") ?? "").trim();
-    if (!name || !host) {
-      setMessage("name and host are required");
+    if (!name) {
+      setMessage("name is required");
+      return;
+    }
+    if (connectionMode === "ssh" && !host) {
+      setMessage("host is required for ssh mode");
       return;
     }
     const parseOptionalInt = (raw: string, field: string, min: number, max: number): number | undefined => {
@@ -254,6 +261,7 @@ export function App() {
       }
       await upsertHost(token, {
         name,
+        connection_mode: connectionMode,
         host,
         user,
         workspace,
@@ -642,7 +650,14 @@ export function App() {
         <h2>Add Host</h2>
         <form onSubmit={onAddHost} className="grid">
           <input name="name" placeholder="name" required />
-          <input name="host" placeholder="hostname or ip" required />
+          <label>
+            connection mode
+            <select name="connection_mode" defaultValue="ssh">
+              <option value="ssh">ssh</option>
+              <option value="local">local</option>
+            </select>
+          </label>
+          <input name="host" placeholder="hostname or ip (local mode allows empty)" />
           <input name="user" placeholder="user" />
           <input name="workspace" placeholder="/home/user/workspace" />
           <input name="identity_file" placeholder="identity file (optional), e.g. ~/.ssh/id_ed25519" />
@@ -669,6 +684,7 @@ export function App() {
             <li key={h.id}>
               <strong>{h.name}</strong> {h.user ? `${h.user}@` : ""}
               {h.host}:{h.port}
+              {h.connection_mode ? ` mode=${h.connection_mode}` : " mode=ssh"}
               {h.workspace ? ` (${h.workspace})` : ""}
               {h.ssh_proxy_jump ? ` proxy_jump=${h.ssh_proxy_jump}` : ""}
               {h.ssh_host_key_policy ? ` host_key=${h.ssh_host_key_policy}` : ""}

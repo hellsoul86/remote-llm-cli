@@ -1,6 +1,7 @@
 export type Host = {
   id: string;
   name: string;
+  connection_mode?: "ssh" | "local";
   host: string;
   user: string;
   port: number;

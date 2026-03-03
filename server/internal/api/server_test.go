@@ -178,6 +178,35 @@ func TestNormalizeSSHHostKeyPolicy(t *testing.T) {
 	}
 }
 
+func TestNormalizeHostConnectionMode(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "", want: "ssh"},
+		{in: "ssh", want: "ssh"},
+		{in: "local", want: "local"},
+		{in: "LOCAL", want: "local"},
+		{in: "invalid", wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := normalizeHostConnectionMode(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("normalizeHostConnectionMode(%q) should fail", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("normalizeHostConnectionMode(%q) error: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("normalizeHostConnectionMode(%q)=%q want=%q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestErrorDetailsFromClassifiedError(t *testing.T) {
 	msg, class, hint := errorDetails(&executor.ClassifiedError{
 		Class:   executor.ErrorClassAuth,
