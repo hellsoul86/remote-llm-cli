@@ -80,6 +80,8 @@ Default API URL is `http://localhost:8080`.
 - Multi-host file sync over rsync (`POST /v1/sync`)
 - Async sync jobs on the same scheduler (`POST /v1/jobs/sync`)
 - Job cancellation API (`POST /v1/jobs/{id}/cancel`)
+- Session event cursor API (`GET /v1/sessions/{id}/events?after=&limit=`)
+- Session SSE stream API with resume (`GET /v1/sessions/{id}/stream`, supports `Last-Event-ID`)
 - Codex session discovery and cleanup (`POST /v1/codex/sessions/discover`, `POST /v1/codex/sessions/cleanup`)
 - Filterable jobs and audit APIs (`status`/`runtime`/`type`/`host_id`/time range)
 - Retention policy API for runs/jobs/audit (`GET/POST /v1/admin/retention`)
