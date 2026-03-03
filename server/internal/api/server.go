@@ -160,12 +160,25 @@ func (s *Server) handleUpsertHost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
 		return
 	}
-	if strings.TrimSpace(h.Name) == "" || strings.TrimSpace(h.Host) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name and host are required"})
+	if strings.TrimSpace(h.Name) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
 		return
 	}
 	h.Name = strings.TrimSpace(h.Name)
+	mode, err := normalizeHostConnectionMode(h.ConnectionMode)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	h.ConnectionMode = mode
 	h.Host = strings.TrimSpace(h.Host)
+	if h.ConnectionMode == "local" && h.Host == "" {
+		h.Host = "localhost"
+	}
+	if h.ConnectionMode == "ssh" && h.Host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "host is required for ssh mode"})
+		return
+	}
 	h.User = strings.TrimSpace(h.User)
 	h.Workspace = strings.TrimSpace(h.Workspace)
 	h.IdentityFile = strings.TrimSpace(h.IdentityFile)
@@ -176,17 +189,19 @@ func (s *Server) handleUpsertHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.SSHHostKeyPolicy = policy
-	if h.SSHConnectTimeoutSec < 0 || h.SSHConnectTimeoutSec > 300 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_connect_timeout_sec must be in [0,300]"})
-		return
-	}
-	if h.SSHServerAliveIntervalSec < 0 || h.SSHServerAliveIntervalSec > 300 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_server_alive_interval_sec must be in [0,300]"})
-		return
-	}
-	if h.SSHServerAliveCountMax < 0 || h.SSHServerAliveCountMax > 10 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_server_alive_count_max must be in [0,10]"})
-		return
+	if h.ConnectionMode == "ssh" {
+		if h.SSHConnectTimeoutSec < 0 || h.SSHConnectTimeoutSec > 300 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_connect_timeout_sec must be in [0,300]"})
+			return
+		}
+		if h.SSHServerAliveIntervalSec < 0 || h.SSHServerAliveIntervalSec > 300 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_server_alive_interval_sec must be in [0,300]"})
+			return
+		}
+		if h.SSHServerAliveCountMax < 0 || h.SSHServerAliveCountMax > 10 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ssh_server_alive_count_max must be in [0,10]"})
+			return
+		}
 	}
 	h, err = s.store.UpsertHost(h)
 	if err != nil {
@@ -1721,6 +1736,19 @@ func resolveSyncDst(requestDst string, hostWorkspace string) string {
 		return dst
 	}
 	return path.Join(strings.TrimSpace(hostWorkspace), dst)
+}
+
+func normalizeHostConnectionMode(v string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(v))
+	if mode == "" {
+		return "ssh", nil
+	}
+	switch mode {
+	case "ssh", "local":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid connection_mode: %q", v)
+	}
 }
 
 func normalizeSSHHostKeyPolicy(v string) (string, error) {

@@ -52,9 +52,15 @@ func RunRsyncViaSSH(
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		res.ExitCode = exitErr.ExitCode()
+		if isLocalHostMode(h) {
+			return res, classifyLocalRunError(err, res.ExitCode, res.Stderr)
+		}
 		return res, classifyRsyncRunError(err, res.ExitCode, res.Stderr)
 	}
 	res.ExitCode = -1
+	if isLocalHostMode(h) {
+		return res, classifyLocalRunError(err, res.ExitCode, res.Stderr)
+	}
 	return res, classifyRsyncRunError(err, res.ExitCode, res.Stderr)
 }
 
@@ -69,6 +75,10 @@ func buildRsyncArgs(h model.Host, src string, dst string, opts SyncOptions) []st
 			continue
 		}
 		args = append(args, "--exclude", pat)
+	}
+	if isLocalHostMode(h) {
+		args = append(args, src, dst)
+		return args
 	}
 	args = append(args, "-e", buildRsyncSSHCommand(h))
 	args = append(args, src, hostTarget(h)+":"+dst)

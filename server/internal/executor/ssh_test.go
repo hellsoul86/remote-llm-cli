@@ -1,11 +1,13 @@
 package executor
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
+	"github.com/hellsoul86/remote-llm-cli/server/internal/runtime"
 )
 
 func TestLimitedBufferTruncation(t *testing.T) {
@@ -107,5 +109,46 @@ func TestRunSSHPreflightIdentityFileMissing(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("identity_file check not found: %+v", report.Checks)
+	}
+}
+
+func TestRunViaSSHLocalMode(t *testing.T) {
+	res, err := RunViaSSH(
+		context.Background(),
+		model.Host{ConnectionMode: "local"},
+		runtime.CommandSpec{Program: "echo", Args: []string{"hello-local"}},
+		"",
+		ExecOptions{},
+	)
+	if err != nil {
+		t.Fatalf("RunViaSSH local err=%v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit=%d want=0", res.ExitCode)
+	}
+	if !strings.Contains(res.Stdout, "hello-local") {
+		t.Fatalf("stdout=%q should contain hello-local", res.Stdout)
+	}
+	if !strings.HasPrefix(res.Command, "local sh -lc ") {
+		t.Fatalf("command=%q should be local mode", res.Command)
+	}
+}
+
+func TestRunSSHPreflightLocalModeSkipsSSH(t *testing.T) {
+	report := RunSSHPreflight(model.Host{ConnectionMode: "local"})
+	if len(report.Checks) == 0 {
+		t.Fatalf("expected local preflight checks")
+	}
+	foundMode := false
+	for _, check := range report.Checks {
+		if check.Name == "connection_mode" && check.Detail == "local" {
+			foundMode = true
+		}
+		if check.Name == "ssh_binary" {
+			t.Fatalf("local mode preflight should not include ssh_binary check")
+		}
+	}
+	if !foundMode {
+		t.Fatalf("connection_mode check missing: %+v", report.Checks)
 	}
 }

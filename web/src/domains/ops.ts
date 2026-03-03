@@ -3,6 +3,7 @@ import type { AuditEvent, Host, MetricsResponse, RunJobRecord, RunRecord, Runtim
 
 export type AddHostForm = {
   name: string;
+  connectionMode: "ssh" | "local";
   host: string;
   user: string;
   workspace: string;
@@ -34,7 +35,7 @@ export function useOpsDomain() {
   const [activeJobID, setActiveJobID] = useState("");
   const [activeJob, setActiveJob] = useState<RunJobRecord | null>(null);
 
-  const [hostForm, setHostForm] = useState<AddHostForm>({ name: "", host: "", user: "", workspace: "" });
+  const [hostForm, setHostForm] = useState<AddHostForm>({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
   const [hostFilter, setHostFilter] = useState("");
   const [editingHostID, setEditingHostID] = useState("");
   const [addingHost, setAddingHost] = useState(false);
@@ -70,7 +71,7 @@ export function useOpsDomain() {
     setIsRefreshing(false);
     setActiveJobID("");
     setActiveJob(null);
-    setHostForm({ name: "", host: "", user: "", workspace: "" });
+    setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
     setHostFilter("");
     setEditingHostID("");
     setAddingHost(false);

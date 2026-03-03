@@ -608,7 +608,11 @@ func (m Model) viewControlPane(b *strings.Builder) {
 			if m.allHosts || m.selected[h.ID] {
 				mark = "x"
 			}
-			line := fmt.Sprintf("%s [%s] %s (%s@%s:%d)", cursor, mark, h.Name, safeUser(h.User), h.Host, safePort(h.Port))
+			targetLabel := fmt.Sprintf("%s@%s:%d", safeUser(h.User), h.Host, safePort(h.Port))
+			if hostConnectionMode(h) == "local" {
+				targetLabel = "local-controller"
+			}
+			line := fmt.Sprintf("%s [%s] %s (%s mode=%s)", cursor, mark, h.Name, targetLabel, hostConnectionMode(h))
 			if h.Workspace != "" {
 				line += " wd=" + h.Workspace
 			}
@@ -985,6 +989,16 @@ func (m *Model) syncActiveJobFromList() {
 }
 
 func (m Model) openShellCmd(host Host) tea.Cmd {
+	if hostConnectionMode(host) == "local" {
+		shellCmd := "exec ${SHELL:-bash} -l"
+		if strings.TrimSpace(host.Workspace) != "" {
+			shellCmd = "cd " + shellQuote(host.Workspace) + " && exec ${SHELL:-bash} -l"
+		}
+		cmd := exec.Command("sh", "-lc", shellCmd)
+		return tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return shellDoneMsg{host: host, err: err}
+		})
+	}
 	target := hostTarget(host)
 	if strings.TrimSpace(target) == "" {
 		return func() tea.Msg {
@@ -1113,6 +1127,14 @@ func hostTarget(h Host) string {
 		return strings.TrimSpace(h.Host)
 	}
 	return strings.TrimSpace(h.User) + "@" + strings.TrimSpace(h.Host)
+}
+
+func hostConnectionMode(h Host) string {
+	mode := strings.ToLower(strings.TrimSpace(h.ConnectionMode))
+	if mode == "local" {
+		return "local"
+	}
+	return "ssh"
 }
 
 func shellQuote(v string) string {

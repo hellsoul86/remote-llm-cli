@@ -223,7 +223,7 @@ export function App() {
     const query = hostFilter.trim().toLowerCase();
     if (!query) return hosts;
     return hosts.filter((host) => {
-      const text = `${host.name} ${host.host} ${host.user} ${host.workspace ?? ""}`.toLowerCase();
+      const text = `${host.name} ${host.host} ${host.user} ${host.workspace ?? ""} ${host.connection_mode ?? "ssh"}`.toLowerCase();
       return text.includes(query);
     });
   }, [hosts, hostFilter]);
@@ -669,8 +669,10 @@ export function App() {
     event.preventDefault();
     if (authPhase !== "ready" || !token.trim()) return;
 
-    if (!hostForm.name.trim() || !hostForm.host.trim()) {
-      addTimelineEntry({ kind: "system", state: "error", title: "Host Validation", body: "name and host are required." });
+    const mode = hostForm.connectionMode ?? "ssh";
+    if (!hostForm.name.trim() || (mode === "ssh" && !hostForm.host.trim())) {
+      const validationMessage = mode === "ssh" ? "name and host are required for ssh mode." : "name is required.";
+      addTimelineEntry({ kind: "system", state: "error", title: "Host Validation", body: validationMessage });
       return;
     }
 
@@ -682,11 +684,12 @@ export function App() {
       await upsertHost(token, {
         id: editing || undefined,
         name: hostName,
-        host: hostForm.host.trim(),
+        connection_mode: mode,
+        host: hostForm.host.trim() || undefined,
         user: hostForm.user.trim() || undefined,
         workspace: hostForm.workspace.trim() || undefined
       });
-      setHostForm({ name: "", host: "", user: "", workspace: "" });
+      setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
       setEditingHostID("");
       await loadWorkspace(token, false);
       addTimelineEntry({
@@ -707,6 +710,7 @@ export function App() {
     setEditingHostID(host.id);
     setHostForm({
       name: host.name,
+      connectionMode: host.connection_mode === "local" ? "local" : "ssh",
       host: host.host,
       user: host.user ?? "",
       workspace: host.workspace ?? ""
@@ -716,7 +720,7 @@ export function App() {
 
   function onCancelHostEdit() {
     setEditingHostID("");
-    setHostForm({ name: "", host: "", user: "", workspace: "" });
+    setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
     setOpsNotice("Canceled host edit.");
   }
 
@@ -1065,6 +1069,7 @@ export function App() {
                           <small>
                             {host.user ? `${host.user}@` : ""}
                             {host.host}:{host.port}
+                            {` mode=${host.connection_mode ?? "ssh"}`}
                           </small>
                         </span>
                       </label>
@@ -1354,8 +1359,18 @@ export function App() {
                   value={hostForm.name}
                   onChange={(event) => setHostForm((prev) => ({ ...prev, name: event.target.value }))}
                 />
+                <label>
+                  connection mode
+                  <select
+                    value={hostForm.connectionMode}
+                    onChange={(event) => setHostForm((prev) => ({ ...prev, connectionMode: event.target.value as "ssh" | "local" }))}
+                  >
+                    <option value="ssh">ssh</option>
+                    <option value="local">local</option>
+                  </select>
+                </label>
                 <input
-                  placeholder="host"
+                  placeholder={hostForm.connectionMode === "local" ? "host (optional for local mode)" : "host"}
                   value={hostForm.host}
                   onChange={(event) => setHostForm((prev) => ({ ...prev, host: event.target.value }))}
                 />

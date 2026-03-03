@@ -1,5 +1,6 @@
 hosts:
   - name: prod-a
+    connection_mode: ssh
     host: 203.0.113.10
     user: ubuntu
     port: 22
@@ -8,8 +9,14 @@ hosts:
     tags: [prod, api]
 
   - name: dev-a
+    connection_mode: ssh
     host: 198.51.100.20
     user: ecs-user
     port: 22
     workspace: /home/ecs-user/workspace
     tags: [dev]
+
+  - name: local-dev
+    connection_mode: local
+    workspace: /home/ecs-user/workspace
+    tags: [local]

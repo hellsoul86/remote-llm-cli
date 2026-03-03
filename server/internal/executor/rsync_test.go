@@ -38,3 +38,19 @@ func TestBuildRsyncArgs(t *testing.T) {
 		t.Fatalf("dst mismatch: %q", args[len(args)-1])
 	}
 }
+
+func TestBuildRsyncArgsLocalMode(t *testing.T) {
+	h := model.Host{ConnectionMode: "local"}
+	args := buildRsyncArgs(h, "./local", "/tmp/dst", SyncOptions{})
+	if len(args) < 3 {
+		t.Fatalf("args too short: %v", args)
+	}
+	if args[len(args)-2] != "./local" || args[len(args)-1] != "/tmp/dst" {
+		t.Fatalf("local src/dst mismatch: %v", args)
+	}
+	for _, arg := range args {
+		if arg == "-e" {
+			t.Fatalf("local mode args should not include ssh transport: %v", args)
+		}
+	}
+}
