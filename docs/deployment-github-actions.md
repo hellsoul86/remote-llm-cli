@@ -73,8 +73,10 @@ Private key content for SSH login to all hosts in `DEPLOY_TARGETS`.
 - `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account id (required)
 - `CLOUDFLARE_API_TOKEN`: API token with Pages deploy permission (required)
 
-### 2.2 Environment variable (optional)
+### 2.2 Environment variables
 
+- `VITE_API_BASE`: API base URL injected at web build time (required)
+  - example: `https://webcli-api-staging.royding.ai`
 - `CF_PAGES_BRANCH`: Pages branch override (optional; default `github.ref_name`)
 
 The deploy workflow will auto-create the Pages project on first deploy if it does not exist.

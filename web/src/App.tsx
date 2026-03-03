@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  API_BASE,
   enqueueRunJob,
   getMetrics,
   getRunJob,
@@ -640,7 +641,7 @@ export function App() {
             </button>
           </form>
           {authError ? <p className="gate-error">{authError}</p> : null}
-          <p className="gate-hint">API base: {(import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8080"}</p>
+          <p className="gate-hint">API base: {API_BASE || "not configured"}</p>
         </section>
       </div>
     );
