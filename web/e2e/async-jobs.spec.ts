@@ -51,6 +51,31 @@ test("queues async run job and observes terminal success", async ({ page }) => {
       }
     });
   });
+  await page.route("**/v1/codex/sessions/discover", async (route) => {
+    await route.fulfill({
+      status: 200,
+      json: {
+        operation: "codex_sessions_discover",
+        summary: { total: 1, succeeded: 1, failed: 0, fanout: 1, duration_ms: 5, started_at: "2026-03-02T00:00:00Z", finished_at: "2026-03-02T00:00:00Z" },
+        targets: [
+          {
+            host: { id: "local_1", name: "local-default", connection_mode: "local", host: "localhost", user: "", port: 22, workspace: "/srv/work" },
+            ok: true,
+            sessions: [
+              {
+                session_id: "session_cli_1",
+                thread_name: "Session 1",
+                cwd: "/srv/work",
+                path: "/home/ecs-user/.codex/sessions/rollout-session_cli_1.jsonl",
+                updated_at: "2026-03-02T00:00:00Z",
+                size_bytes: 128
+              }
+            ]
+          }
+        ]
+      }
+    });
+  });
   await page.route("**/v1/audit**", async (route) => {
     await route.fulfill({ status: 200, json: { events: [] } });
   });
@@ -221,15 +246,17 @@ test("queues async run job and observes terminal success", async ({ page }) => {
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
   await page.getByRole("button", { name: "Unlock Workspace" }).click();
 
-  await expect(page.getByText(/Connected\./)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Session 1" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await page.getByPlaceholder("Tell codex what to do in this workspace...").fill("smoke");
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.getByText(/stream-one/)).toBeVisible();
   await expect(
     page
       .locator("section")
-      .filter({ has: page.getByRole("heading", { name: "Sessions" }) })
-      .locator(".thread-chip.active small")
+      .filter({ has: page.getByRole("heading", { name: "Projects" }) })
+      .locator(".session-chip-tree.active small")
   ).toHaveText("succeeded");
   await expect(page.getByText(/Job job_1 succeeded/)).toHaveCount(0);
 });

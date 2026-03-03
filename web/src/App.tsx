@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE,
   cancelRunJob,
+  discoverCodexSessions,
   discoverCodexModels,
   deleteHost,
   enqueueRunJob,
@@ -37,6 +38,27 @@ type SessionAlert = {
   threadID: string;
   title: string;
   body: string;
+};
+
+type SessionTreeProject = {
+  id: string;
+  hostID: string;
+  path: string;
+  sessions: Array<{
+    id: string;
+    title: string;
+    activeJobID: string;
+    unreadDone: boolean;
+    lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
+    timelineSize: number;
+  }>;
+};
+
+type SessionTreeHost = {
+  hostID: string;
+  hostName: string;
+  hostAddress: string;
+  projects: SessionTreeProject[];
 };
 
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
@@ -187,18 +209,9 @@ export function App() {
     activeWorkspace,
     activeWorkspaceID,
     setActiveWorkspaceID,
-    workspacePathDraft,
-    setWorkspacePathDraft,
-    workspaceAddDraft,
-    setWorkspaceAddDraft,
-    addWorkspace,
-    updateActiveWorkspacePath,
     threads,
     activeThreadID,
-    setActiveThreadID,
     activateThread,
-    threadRenameDraft,
-    setThreadRenameDraft,
     activeJobThreadID,
     setActiveJobThreadID,
     completedJobsRef,
@@ -208,7 +221,6 @@ export function App() {
     updateThreadDraft,
     addTimelineEntry,
     createThread,
-    renameThread,
     switchThreadByOffset,
     setThreadModel,
     setThreadSandbox,
@@ -217,6 +229,7 @@ export function App() {
     setThreadJobState,
     setThreadUnread,
     runningThreadJobs,
+    syncProjectsFromDiscovery,
     resetSessionDomain
   } = session;
 
@@ -259,6 +272,49 @@ export function App() {
     }
     return out;
   }, [workspaces]);
+  const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
+  const sessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
+    const hostLookup = new Map<string, Host>();
+    for (const host of hosts) {
+      hostLookup.set(host.id, host);
+    }
+
+    const groups = new Map<string, SessionTreeHost>();
+    for (const workspace of workspaces) {
+      const hostID = workspace.hostID?.trim() || "unknown";
+      const host = hostLookup.get(hostID);
+      const group =
+        groups.get(hostID) ??
+        {
+          hostID,
+          hostName: workspace.hostName || host?.name || hostID,
+          hostAddress: host ? `${host.user ? `${host.user}@` : ""}${host.host}:${host.port}` : "",
+          projects: []
+        };
+
+      const project: SessionTreeProject = {
+        id: workspace.id,
+        hostID,
+        path: workspace.path,
+        sessions: workspace.sessions.map((sessionItem) => ({
+          id: sessionItem.id,
+          title: sessionItem.title,
+          activeJobID: sessionItem.activeJobID,
+          unreadDone: sessionItem.unreadDone,
+          lastJobStatus: sessionItem.lastJobStatus,
+          timelineSize: sessionItem.timeline.length
+        }))
+      };
+
+      group.projects.push(project);
+      groups.set(hostID, group);
+    }
+
+    return Array.from(groups.values()).map((group) => ({
+      ...group,
+      projects: group.projects.sort((a, b) => a.path.localeCompare(b.path))
+    }));
+  }, [hosts, workspaces]);
   const activeThreadBusy = Boolean(activeThread?.activeJobID) || (activeThread ? submittingThreadID === activeThread.id : false);
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
@@ -378,6 +434,68 @@ export function App() {
     return listHosts(authToken);
   }
 
+  function buildDiscoveredProjects(
+    sourceHosts: Host[],
+    targets: Array<{ host: Host; ok: boolean; sessions?: Array<{ session_id: string; cwd?: string; thread_name?: string; updated_at: string }> }>
+  ) {
+    const hostMap = new Map<string, Host>();
+    for (const host of sourceHosts) hostMap.set(host.id, host);
+
+    const grouped = new Map<string, Map<string, Array<{ id: string; title: string; updatedAt?: string }>>>();
+    for (const target of targets) {
+      const hostID = target.host?.id?.trim();
+      if (!hostID) continue;
+      if (!grouped.has(hostID)) grouped.set(hostID, new Map());
+      const pathMap = grouped.get(hostID)!;
+      const sessions = Array.isArray(target.sessions) ? target.sessions : [];
+      for (const sessionItem of sessions) {
+        const projectPath = sessionItem.cwd?.trim() || target.host.workspace?.trim() || hostMap.get(hostID)?.workspace?.trim() || "/home/ecs-user";
+        if (!pathMap.has(projectPath)) pathMap.set(projectPath, []);
+        pathMap.get(projectPath)!.push({
+          id: sessionItem.session_id,
+          title: sessionItem.thread_name?.trim() || sessionItem.session_id,
+          updatedAt: sessionItem.updated_at
+        });
+      }
+      if (sessions.length === 0) {
+        const fallbackPath = target.host.workspace?.trim() || hostMap.get(hostID)?.workspace?.trim();
+        if (fallbackPath && !pathMap.has(fallbackPath)) {
+          pathMap.set(fallbackPath, []);
+        }
+      }
+    }
+
+    const projects: Array<{ hostID: string; hostName: string; path: string; sessions: Array<{ id: string; title: string; updatedAt?: string }> }> = [];
+    for (const [hostID, pathMap] of grouped.entries()) {
+      const host = hostMap.get(hostID);
+      const hostName = host?.name ?? hostID;
+      for (const [projectPath, sessions] of pathMap.entries()) {
+        const orderedSessions = [...sessions].sort((a, b) => {
+          const left = a.updatedAt ?? "";
+          const right = b.updatedAt ?? "";
+          if (left === right) return a.title.localeCompare(b.title);
+          return left > right ? -1 : 1;
+        });
+        projects.push({
+          hostID,
+          hostName,
+          path: projectPath,
+          sessions: orderedSessions
+        });
+      }
+    }
+
+    if (projects.length > 0) return projects;
+
+    // Fallback: no discoverable sessions yet, still expose one default project per host.
+    return sourceHosts.map((host) => ({
+      hostID: host.id,
+      hostName: host.name,
+      path: host.workspace?.trim() || "/home/ecs-user",
+      sessions: []
+    }));
+  }
+
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
     setIsRefreshing(true);
     try {
@@ -420,14 +538,17 @@ export function App() {
       }
       if (nextRuntimes.some((runtime) => runtime.name === "codex")) {
         try {
-          const catalog = await discoverCodexModels(authToken, { host_id: localHost?.id || nextHosts[0]?.id });
-          const nextDefault = catalog.default_model?.trim() || "gpt-5-codex";
-          setSessionModelDefault(nextDefault);
-          const nextModels = Array.isArray(catalog.models) ? catalog.models.filter((modelName) => modelName.trim() !== "") : [];
-          setSessionModelOptions(nextModels.length > 0 ? nextModels : [nextDefault]);
+          const discovered = await discoverCodexSessions(authToken, {
+            all_hosts: true,
+            fanout: Math.max(1, Math.min(8, nextHosts.length || 1)),
+            limit_per_host: 120
+          });
+          syncProjectsFromDiscovery(buildDiscoveredProjects(nextHosts, discovered.body.targets ?? []));
         } catch {
-          // Keep cached model defaults/options on discovery failures.
+          syncProjectsFromDiscovery(buildDiscoveredProjects(nextHosts, []));
         }
+      } else {
+        syncProjectsFromDiscovery(buildDiscoveredProjects(nextHosts, []));
       }
 
       const running = nextJobs.find((job) => isJobActive(job));
@@ -512,6 +633,27 @@ export function App() {
     }
     void unlockWorkspace(cached);
   }, []);
+
+  useEffect(() => {
+    if (authPhase !== "ready" || !token.trim()) return;
+    if (!activeSessionHostID) return;
+    if (!runtimes.some((runtime) => runtime.name === "codex")) return;
+    let canceled = false;
+    void discoverCodexModels(token, { host_id: activeSessionHostID })
+      .then((catalog) => {
+        if (canceled) return;
+        const nextDefault = catalog.default_model?.trim() || "gpt-5-codex";
+        const nextModels = Array.isArray(catalog.models) ? catalog.models.filter((name) => name.trim() !== "") : [];
+        setSessionModelDefault(nextDefault);
+        setSessionModelOptions(nextModels.length > 0 ? nextModels : [nextDefault]);
+      })
+      .catch(() => {
+        if (canceled) return;
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [authPhase, token, activeSessionHostID, runtimes]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -847,16 +989,25 @@ export function App() {
       return;
     }
 
+    const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
     const localHostIDs = hosts.filter((host) => host.connection_mode === "local").map((host) => host.id);
     const targetHostIDs =
-      selectedHostIDs.length > 0 ? selectedHostIDs : localHostIDs.length > 0 ? localHostIDs : hosts.length > 0 ? [hosts[0].id] : [];
+      workspaceHostID !== ""
+        ? [workspaceHostID]
+        : selectedHostIDs.length > 0
+          ? selectedHostIDs
+          : localHostIDs.length > 0
+            ? localHostIDs
+            : hosts.length > 0
+              ? [hosts[0].id]
+              : [];
     if (targetHostIDs.length === 0) {
       addTimelineEntry(
         {
           kind: "system",
           state: "error",
           title: "No Target Host",
-          body: "No local host found. Add a local host first."
+          body: "No target server available for this session."
         },
         activeThread.id
       );
@@ -1081,22 +1232,6 @@ export function App() {
     }
   }
 
-  function onRenameActiveThread(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!activeThread) return;
-    renameThread(activeThread.id, threadRenameDraft);
-  }
-
-  function onSaveWorkspacePath(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    updateActiveWorkspacePath(workspacePathDraft);
-  }
-
-  function onAddWorkspace(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    addWorkspace(workspaceAddDraft);
-  }
-
   async function onUploadSessionImage(file: File) {
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
     setUploadingImage(true);
@@ -1172,114 +1307,79 @@ export function App() {
         <div className="session-stage">
           <aside className="session-side codex-sidebar">
             <section className="inspect-block focus-block">
-              <h3>Directories</h3>
-              <form className="thread-rename-form" onSubmit={onSaveWorkspacePath}>
-                <input
-                  value={workspacePathDraft}
-                  onChange={(event) => setWorkspacePathDraft(event.target.value)}
-                  placeholder="/absolute/workdir"
-                />
-                <button type="submit">Set Path</button>
-              </form>
-              <div className="thread-list workspace-list">
-                {workspaces.map((workspace) => (
-                  <button
-                    key={workspace.id}
-                    type="button"
-                    className={`thread-chip ${workspace.id === activeWorkspaceID ? "active" : ""}`}
-                    onClick={() => {
-                      setActiveWorkspaceID(workspace.id);
-                      setWorkspacePathDraft(workspace.path);
-                    }}
-                    title={workspace.path}
-                  >
-                    <span>{workspace.path}</span>
-                    <small>{workspace.sessions.length}</small>
-                  </button>
-                ))}
-              </div>
-              <form className="thread-rename-form" onSubmit={onAddWorkspace}>
-                <input
-                  value={workspaceAddDraft}
-                  onChange={(event) => setWorkspaceAddDraft(event.target.value)}
-                  placeholder="add another workdir"
-                />
-                <button type="submit">Add</button>
-              </form>
-            </section>
-
-            <section className="inspect-block">
               <div className="pane-title-line">
-                <h3>Sessions</h3>
+                <h3>Projects</h3>
                 <button type="button" className="ghost new-thread" onClick={createThreadAndFocus}>
                   New
                 </button>
               </div>
-              <div className="thread-list workspace-list">
-                {threads.map((thread) => (
-                  <button
-                    key={thread.id}
-                    type="button"
-                    className={`thread-chip ${thread.id === activeThreadID ? "active" : ""}`}
-                    onClick={() => setActiveThreadID(thread.id)}
-                    title={`${thread.title} (${thread.timeline.length} messages)`}
-                  >
-                    <span>{thread.activeJobID ? `● ${thread.title}` : thread.unreadDone ? `* ${thread.title}` : thread.title}</span>
-                    <small>
-                      {thread.activeJobID
-                        ? "running"
-                        : thread.unreadDone
-                          ? "done"
-                          : thread.lastJobStatus === "idle"
-                            ? thread.timeline.length
-                            : thread.lastJobStatus}
-                    </small>
-                  </button>
-                ))}
+              <div className="project-tree">
+                {sessionTreeHosts.length === 0 ? (
+                  <p className="pane-subtle-light">No servers/projects discovered yet.</p>
+                ) : (
+                  sessionTreeHosts.map((hostNode) => (
+                    <article key={hostNode.hostID} className="project-host-group">
+                      <header className="project-host-head">
+                        <strong>{hostNode.hostName}</strong>
+                        {hostNode.hostAddress ? <small>{hostNode.hostAddress}</small> : null}
+                      </header>
+                      {hostNode.projects.length === 0 ? (
+                        <p className="pane-subtle-light compact-empty">No projects available.</p>
+                      ) : (
+                        hostNode.projects.map((projectNode) => (
+                          <div key={projectNode.id} className="project-node">
+                            <button
+                              type="button"
+                              className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
+                              onClick={() => setActiveWorkspaceID(projectNode.id)}
+                              title={projectNode.path}
+                            >
+                              <span>{projectNode.path}</span>
+                              <small>{projectNode.sessions.length}</small>
+                            </button>
+                            <div className="project-session-list">
+                              {projectNode.sessions.length === 0 ? (
+                                <p className="pane-subtle-light compact-empty">No sessions in this project.</p>
+                              ) : (
+                                projectNode.sessions.map((sessionNode) => (
+                                  <button
+                                    key={sessionNode.id}
+                                    type="button"
+                                    className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
+                                    onClick={() => activateThread(sessionNode.id)}
+                                    title={sessionNode.title}
+                                  >
+                                    <span>
+                                      {sessionNode.activeJobID
+                                        ? `● ${sessionNode.title}`
+                                        : sessionNode.unreadDone
+                                          ? `* ${sessionNode.title}`
+                                          : sessionNode.title}
+                                    </span>
+                                    <small>
+                                      {sessionNode.activeJobID
+                                        ? "running"
+                                        : sessionNode.unreadDone
+                                          ? "done"
+                                          : sessionNode.lastJobStatus === "idle"
+                                            ? sessionNode.timelineSize
+                                            : sessionNode.lastJobStatus}
+                                    </small>
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </article>
+                  ))
+                )}
               </div>
-              <form className="thread-rename-form" onSubmit={onRenameActiveThread}>
-                <input
-                  value={threadRenameDraft}
-                  onChange={(event) => setThreadRenameDraft(event.target.value)}
-                  placeholder="session name"
-                  maxLength={48}
-                />
-                <button type="submit">Rename</button>
-              </form>
             </section>
 
             <section className="inspect-block compact-session-meta">
               <p className="pane-subtle-light">Ctrl/Cmd+K focus · Ctrl/Cmd+Enter send · Ctrl/Cmd+Shift+N new session</p>
-              <label className="session-setting-row">
-                model
-                <select
-                  value={activeThreadModelValue}
-                  onChange={(event) => {
-                    if (!activeThread) return;
-                    setThreadModel(activeThread.id, event.target.value);
-                  }}
-                >
-                  {sessionModelChoices.map((modelName) => (
-                    <option key={modelName} value={modelName}>
-                      {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="session-setting-row">
-                sandbox
-                <select
-                  value={activeThread?.sandbox ?? "workspace-write"}
-                  onChange={(event) =>
-                    activeThread &&
-                    setThreadSandbox(activeThread.id, event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
-                  }
-                >
-                  <option value="read-only">read-only</option>
-                  <option value="workspace-write">workspace-write</option>
-                  <option value="danger-full-access">danger-full-access</option>
-                </select>
-              </label>
               <div className="ops-actions-row">
                 <button type="button" className="ghost" onClick={() => void onEnableNotifications()}>
                   Alerts: {notificationPermission}
@@ -1322,12 +1422,47 @@ export function App() {
             </section>
 
             <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
+              <div className="session-inline-settings">
+                <label className="session-setting-row">
+                  model
+                  <select
+                    value={activeThreadModelValue}
+                    disabled={!activeThread}
+                    onChange={(event) => {
+                      if (!activeThread) return;
+                      setThreadModel(activeThread.id, event.target.value);
+                    }}
+                  >
+                    {sessionModelChoices.map((modelName) => (
+                      <option key={modelName} value={modelName}>
+                        {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="session-setting-row">
+                  sandbox
+                  <select
+                    value={activeThread?.sandbox ?? "workspace-write"}
+                    disabled={!activeThread}
+                    onChange={(event) =>
+                      activeThread &&
+                      setThreadSandbox(activeThread.id, event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                    }
+                  >
+                    <option value="read-only">read-only</option>
+                    <option value="workspace-write">workspace-write</option>
+                    <option value="danger-full-access">danger-full-access</option>
+                  </select>
+                </label>
+              </div>
+
               <div className="quick-strip">
                 <label className="quick-chip ghost file-chip">
                   <input
                     type="file"
                     accept="image/*"
-                    disabled={uploadingImage}
+                    disabled={uploadingImage || !activeThread}
                     onChange={(event) => {
                       const file = event.target.files?.[0];
                       if (!file) return;
@@ -1360,7 +1495,8 @@ export function App() {
                   }
                 }}
                 rows={5}
-                placeholder="Tell codex what to do in this workspace..."
+                placeholder={activeThread ? "Tell codex what to do in this workspace..." : "Select a session to start"}
+                disabled={!activeThread}
                 onKeyDown={(event) => {
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                     event.preventDefault();
@@ -1370,7 +1506,7 @@ export function App() {
               />
 
               <div className="composer-actions">
-                <button type="submit" disabled={activeThreadBusy}>
+                <button type="submit" disabled={activeThreadBusy || !activeThread}>
                   {activeThreadBusy ? "Running..." : "Send"}
                 </button>
               </div>

@@ -251,6 +251,8 @@ export type MetricsResponse = {
 export type CodexSessionInfo = {
   session_id: string;
   path: string;
+  cwd?: string;
+  thread_name?: string;
   updated_at: string;
   size_bytes: number;
 };

@@ -483,10 +483,12 @@ type retentionPolicyRequest struct {
 }
 
 type codexSessionInfo struct {
-	SessionID string    `json:"session_id"`
-	Path      string    `json:"path"`
-	UpdatedAt time.Time `json:"updated_at"`
-	SizeBytes int64     `json:"size_bytes"`
+	SessionID  string    `json:"session_id"`
+	Path       string    `json:"path"`
+	Cwd        string    `json:"cwd,omitempty"`
+	ThreadName string    `json:"thread_name,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	SizeBytes  int64     `json:"size_bytes"`
 }
 
 type codexSessionTarget struct {
@@ -1331,9 +1333,9 @@ func (s *Server) handleDiscoverCodexModels(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	defaultModel, probeErr := s.probeCodexDefaultModel(r.Context(), host)
+	defaultModel, discoveredModels, probeErr := s.probeCodexModelCatalog(r.Context(), host)
 	observed := s.collectObservedCodexModels(1000)
-	models := mergeModelCatalog(defaultModel, observed)
+	models := mergeModelCatalog(defaultModel, append(discoveredModels, observed...))
 	if len(models) == 0 {
 		models = []string{"gpt-5-codex", "gpt-5", "gpt-5-mini"}
 	}
@@ -1638,9 +1640,97 @@ func buildCodexSessionDiscoverSpec(limitPerHost int) runtime.CommandSpec {
 	script := fmt.Sprintf(`
 set -e
 limit=%d
-if [ -d "$HOME/.codex" ]; then
-  find "$HOME/.codex" -type f \( -name "*.jsonl" -o -name "*.json" -o -name "*.ndjson" \) -printf "%%T@|%%s|%%p\n" 2>/dev/null || true
-fi | sort -t'|' -k1,1nr | awk -F'|' '!seen[$3]++' | head -n "$limit"
+if command -v python3 >/dev/null 2>&1; then
+  py_exec=python3
+elif command -v python >/dev/null 2>&1; then
+  py_exec=python
+else
+  if [ -d "$HOME/.codex/sessions" ]; then
+    find "$HOME/.codex/sessions" -type f -name "*.jsonl" -printf "%%T@|%%s|%%p\n" 2>/dev/null | sort -t'|' -k1,1nr | head -n "$limit"
+  fi
+  exit 0
+fi
+
+"$py_exec" - "$limit" <<'PY'
+import json
+import os
+import sys
+
+def parse_limit(argv):
+    if len(argv) < 2:
+        return 20
+    try:
+        v = int(argv[1])
+        if v <= 0:
+            return 20
+        return min(v, 200)
+    except Exception:
+        return 20
+
+limit = parse_limit(sys.argv)
+home = os.path.expanduser("~")
+sessions_root = os.path.join(home, ".codex", "sessions")
+index_path = os.path.join(home, ".codex", "session_index.jsonl")
+
+thread_names = {}
+if os.path.isfile(index_path):
+    try:
+        with open(index_path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    row = json.loads(raw)
+                except Exception:
+                    continue
+                sid = str(row.get("id") or "").strip()
+                title = str(row.get("thread_name") or "").strip()
+                updated = str(row.get("updated_at") or "").strip()
+                if not sid or not title:
+                    continue
+                prev = thread_names.get(sid)
+                if prev is None or updated >= prev[1]:
+                    thread_names[sid] = (title, updated)
+    except Exception:
+        pass
+
+rows = []
+if os.path.isdir(sessions_root):
+    for root, _, files in os.walk(sessions_root):
+        for name in files:
+            if not name.endswith(".jsonl"):
+                continue
+            full = os.path.join(root, name)
+            try:
+                st = os.stat(full)
+            except Exception:
+                continue
+            rows.append((st.st_mtime, st.st_size, full))
+
+rows.sort(key=lambda item: item[0], reverse=True)
+for mtime, size, full in rows[:limit]:
+    sid = ""
+    cwd = ""
+    try:
+        with open(full, "r", encoding="utf-8") as fh:
+            first = fh.readline().strip()
+        if first:
+            item = json.loads(first)
+            payload = item.get("payload") if isinstance(item, dict) else {}
+            if isinstance(payload, dict):
+                sid = str(payload.get("id") or "").strip()
+                cwd = str(payload.get("cwd") or "").strip()
+    except Exception:
+        pass
+    if not sid:
+        base = os.path.basename(full)
+        if base.endswith(".jsonl"):
+            base = base[:-6]
+        sid = base.rsplit("-", 1)[-1] if base.startswith("rollout-") else base
+    title = thread_names.get(sid, ("", ""))[0] if sid else ""
+    print(f"{mtime}|{size}|{full}|{sid}|{cwd}|{title}")
+PY
 `, limitPerHost)
 	return runtime.CommandSpec{Program: "sh", Args: []string{"-lc", script}}
 }
@@ -1671,8 +1761,8 @@ func parseCodexSessionDiscoverOutput(stdout string) []codexSessionInfo {
 	lines := parsePathLines(stdout)
 	out := make([]codexSessionInfo, 0, len(lines))
 	for _, line := range lines {
-		parts := strings.SplitN(line, "|", 3)
-		if len(parts) != 3 {
+		parts := strings.SplitN(line, "|", 6)
+		if len(parts) < 3 {
 			continue
 		}
 		updated, err := parseEpochSeconds(parts[0])
@@ -1681,11 +1771,23 @@ func parseCodexSessionDiscoverOutput(stdout string) []codexSessionInfo {
 		}
 		size, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
 		path := strings.TrimSpace(parts[2])
+		sessionID := inferSessionIDFromPath(path)
+		cwd := ""
+		threadName := ""
+		if len(parts) >= 6 {
+			if trimmed := strings.TrimSpace(parts[3]); trimmed != "" {
+				sessionID = trimmed
+			}
+			cwd = strings.TrimSpace(parts[4])
+			threadName = strings.TrimSpace(parts[5])
+		}
 		out = append(out, codexSessionInfo{
-			SessionID: inferSessionIDFromPath(path),
-			Path:      path,
-			UpdatedAt: updated,
-			SizeBytes: size,
+			SessionID:  sessionID,
+			Path:       path,
+			Cwd:        cwd,
+			ThreadName: threadName,
+			UpdatedAt:  updated,
+			SizeBytes:  size,
 		})
 	}
 	return out
@@ -1704,6 +1806,15 @@ func parseEpochSeconds(raw string) (time.Time, error) {
 func inferSessionIDFromPath(p string) string {
 	base := path.Base(strings.TrimSpace(p))
 	base = strings.TrimSuffix(base, path.Ext(base))
+	if strings.HasPrefix(base, "rollout-") {
+		parts := strings.Split(base, "-")
+		if len(parts) >= 5 {
+			candidate := strings.Join(parts[len(parts)-5:], "-")
+			if strings.TrimSpace(candidate) != "" {
+				return strings.TrimSpace(candidate)
+			}
+		}
+	}
 	if base != "" {
 		return base
 	}
@@ -2040,12 +2151,58 @@ func (s *Server) resolveCodexModelHost(hostID string) (model.Host, error) {
 	return hosts[0], nil
 }
 
-func (s *Server) probeCodexDefaultModel(ctx context.Context, host model.Host) (string, error) {
+func (s *Server) probeCodexModelCatalog(ctx context.Context, host model.Host) (string, []string, error) {
 	script := `
-if [ -f "$HOME/.codex/config.toml" ]; then
-  grep -E '^[[:space:]]*model[[:space:]]*=' "$HOME/.codex/config.toml" | head -n1 \
-    | sed -E 's/^[[:space:]]*model[[:space:]]*=[[:space:]]*"?(.*)"?[[:space:]]*$/\1/'
+if command -v python3 >/dev/null 2>&1; then
+  py_exec=python3
+elif command -v python >/dev/null 2>&1; then
+  py_exec=python
+else
+  if [ -f "$HOME/.codex/config.toml" ]; then
+    grep -E '^[[:space:]]*model[[:space:]]*=' "$HOME/.codex/config.toml" | head -n1 \
+      | sed -E 's/^[[:space:]]*model[[:space:]]*=[[:space:]]*"?(.*)"?[[:space:]]*$/\1/'
+  fi
+  exit 0
 fi
+
+"$py_exec" - <<'PY'
+import json
+import os
+import re
+
+home = os.path.expanduser("~")
+config_path = os.path.join(home, ".codex", "config.toml")
+cache_path = os.path.join(home, ".codex", "models_cache.json")
+
+default_model = ""
+if os.path.isfile(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                m = re.match(r'^\s*model\s*=\s*"([^"]+)"\s*$', raw)
+                if m:
+                    default_model = m.group(1).strip()
+                    break
+    except Exception:
+        pass
+
+models = []
+if os.path.isfile(cache_path):
+    try:
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            cache = json.load(fh)
+        items = cache.get("models")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    slug = str(item.get("slug") or "").strip()
+                    if slug:
+                        models.append(slug)
+    except Exception:
+        pass
+
+print(json.dumps({"default_model": default_model, "models": models}))
+PY
 `
 	res, err := s.runViaSSH(
 		ctx,
@@ -2061,15 +2218,48 @@ fi
 		},
 	)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
+
+	type payload struct {
+		DefaultModel string   `json:"default_model"`
+		Models       []string `json:"models"`
+	}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		var parsed payload
+		if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+			return strings.TrimSpace(parsed.DefaultModel), normalizeModelList(parsed.Models), nil
+		}
+	}
+
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		trimmed := strings.Trim(strings.TrimSpace(line), "\"'")
 		if trimmed != "" {
-			return trimmed, nil
+			return trimmed, nil, nil
 		}
 	}
-	return "", nil
+	return "", nil, nil
+}
+
+func normalizeModelList(input []string) []string {
+	out := make([]string, 0, len(input))
+	seen := map[string]struct{}{}
+	for _, modelName := range input {
+		trimmed := strings.TrimSpace(modelName)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func (s *Server) collectObservedCodexModels(limit int) []string {

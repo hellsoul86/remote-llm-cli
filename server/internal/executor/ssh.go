@@ -267,7 +267,11 @@ func copyStreamToLimitedBuffer(src io.Reader, dst *limitedBuffer, onChunk func([
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+				return nil
+			}
+			// Some environments report a closed pipe with this text instead of io.EOF.
+			if strings.Contains(strings.ToLower(err.Error()), "file already closed") {
 				return nil
 			}
 			return err
