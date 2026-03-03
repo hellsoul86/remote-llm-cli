@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,10 +14,11 @@ import (
 )
 
 const (
-	defaultRunRecordsMax  = 500
-	defaultRunJobsMax     = 1000
-	defaultAuditEventsMax = 5000
-	maxRetentionLimit     = 50000
+	defaultRunRecordsMax    = 500
+	defaultRunJobsMax       = 1000
+	defaultAuditEventsMax   = 5000
+	defaultSessionEventsMax = 20000
+	maxRetentionLimit       = 50000
 )
 
 type State struct {
@@ -25,6 +27,8 @@ type State struct {
 	RunRecords      []model.RunRecord     `json:"run_records"`
 	RunJobs         []model.RunJobRecord  `json:"run_jobs"`
 	AuditEvents     []model.AuditEvent    `json:"audit_events"`
+	SessionEvents   []model.SessionEvent  `json:"session_events"`
+	SessionEventSeq map[string]int64      `json:"session_event_seq"`
 	RetentionPolicy model.RetentionPolicy `json:"retention_policy"`
 }
 
@@ -49,6 +53,8 @@ func Open(path string) (*Store, error) {
 			RunRecords:      []model.RunRecord{},
 			RunJobs:         []model.RunJobRecord{},
 			AuditEvents:     []model.AuditEvent{},
+			SessionEvents:   []model.SessionEvent{},
+			SessionEventSeq: map[string]int64{},
 			RetentionPolicy: defaultRetentionPolicy(),
 		},
 	}
@@ -89,10 +95,29 @@ func (s *Store) load() error {
 	if s.state.AuditEvents == nil {
 		s.state.AuditEvents = []model.AuditEvent{}
 	}
+	if s.state.SessionEvents == nil {
+		s.state.SessionEvents = []model.SessionEvent{}
+	}
+	if s.state.SessionEventSeq == nil {
+		s.state.SessionEventSeq = map[string]int64{}
+	}
 	s.state.RetentionPolicy = normalizeRetentionPolicy(s.state.RetentionPolicy)
 	s.state.RunRecords = capTail(s.state.RunRecords, s.state.RetentionPolicy.RunRecordsMax)
 	s.state.RunJobs = capTail(s.state.RunJobs, s.state.RetentionPolicy.RunJobsMax)
 	s.state.AuditEvents = capTail(s.state.AuditEvents, s.state.RetentionPolicy.AuditEventsMax)
+	s.state.SessionEvents = capTail(s.state.SessionEvents, s.state.RetentionPolicy.SessionEventsMax)
+	for _, event := range s.state.SessionEvents {
+		if event.Seq <= 0 {
+			continue
+		}
+		sessionID := strings.TrimSpace(event.SessionID)
+		if sessionID == "" {
+			continue
+		}
+		if event.Seq > s.state.SessionEventSeq[sessionID] {
+			s.state.SessionEventSeq[sessionID] = event.Seq
+		}
+	}
 	return nil
 }
 
@@ -311,6 +336,67 @@ func (s *Store) ListAuditEvents(limit int) []model.AuditEvent {
 	return copyTail(s.state.AuditEvents, limit)
 }
 
+func (s *Store) AppendSessionEvent(event model.SessionEvent) (model.SessionEvent, error) {
+	sessionID := strings.TrimSpace(event.SessionID)
+	if sessionID == "" {
+		return model.SessionEvent{}, errors.New("session_id is required")
+	}
+	eventType := strings.TrimSpace(event.Type)
+	if eventType == "" {
+		return model.SessionEvent{}, errors.New("type is required")
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	event.SessionID = sessionID
+	event.Type = eventType
+	event.RunID = strings.TrimSpace(event.RunID)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.SessionEventSeq == nil {
+		s.state.SessionEventSeq = map[string]int64{}
+	}
+	nextSeq := s.state.SessionEventSeq[event.SessionID] + 1
+	event.Seq = nextSeq
+	s.state.SessionEventSeq[event.SessionID] = nextSeq
+	s.state.SessionEvents = append(s.state.SessionEvents, cloneSessionEvent(event))
+	s.state.SessionEvents = capTail(s.state.SessionEvents, s.state.RetentionPolicy.SessionEventsMax)
+	if err := s.saveLocked(); err != nil {
+		return model.SessionEvent{}, err
+	}
+	return cloneSessionEvent(event), nil
+}
+
+func (s *Store) ListSessionEvents(sessionID string, after int64, limit int) []model.SessionEvent {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]model.SessionEvent, 0, limit)
+	for _, event := range s.state.SessionEvents {
+		if event.SessionID != sessionID {
+			continue
+		}
+		if event.Seq <= after {
+			continue
+		}
+		out = append(out, cloneSessionEvent(event))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
 func (s *Store) GetRetentionPolicy() model.RetentionPolicy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -325,14 +411,16 @@ func (s *Store) UpdateRetentionPolicy(next model.RetentionPolicy) (model.Retenti
 	s.state.RunRecords = capTail(s.state.RunRecords, normalized.RunRecordsMax)
 	s.state.RunJobs = capTail(s.state.RunJobs, normalized.RunJobsMax)
 	s.state.AuditEvents = capTail(s.state.AuditEvents, normalized.AuditEventsMax)
+	s.state.SessionEvents = capTail(s.state.SessionEvents, normalized.SessionEventsMax)
 	return normalized, s.saveLocked()
 }
 
 func defaultRetentionPolicy() model.RetentionPolicy {
 	return model.RetentionPolicy{
-		RunRecordsMax:  defaultRunRecordsMax,
-		RunJobsMax:     defaultRunJobsMax,
-		AuditEventsMax: defaultAuditEventsMax,
+		RunRecordsMax:    defaultRunRecordsMax,
+		RunJobsMax:       defaultRunJobsMax,
+		AuditEventsMax:   defaultAuditEventsMax,
+		SessionEventsMax: defaultSessionEventsMax,
 	}
 }
 
@@ -342,6 +430,7 @@ func normalizeRetentionPolicy(in model.RetentionPolicy) model.RetentionPolicy {
 	out.RunRecordsMax = normalizeRetentionLimit(out.RunRecordsMax, def.RunRecordsMax)
 	out.RunJobsMax = normalizeRetentionLimit(out.RunJobsMax, def.RunJobsMax)
 	out.AuditEventsMax = normalizeRetentionLimit(out.AuditEventsMax, def.AuditEventsMax)
+	out.SessionEventsMax = normalizeRetentionLimit(out.SessionEventsMax, def.SessionEventsMax)
 	return out
 }
 
@@ -381,5 +470,11 @@ func cloneRunJob(j model.RunJobRecord) model.RunJobRecord {
 	out.Request = append([]byte(nil), j.Request...)
 	out.Response = append([]byte(nil), j.Response...)
 	out.HostIDs = append([]string(nil), j.HostIDs...)
+	return out
+}
+
+func cloneSessionEvent(e model.SessionEvent) model.SessionEvent {
+	out := e
+	out.Payload = append([]byte(nil), e.Payload...)
 	return out
 }

@@ -216,3 +216,66 @@ func TestRunJobHostIDsAreCloned(t *testing.T) {
 		t.Fatalf("host ids unexpectedly mutated: %#v", again.HostIDs)
 	}
 }
+
+func TestSessionEventsPersistAndPaginateBySeq(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	st, err := Open(statePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	first, err := st.AppendSessionEvent(model.SessionEvent{
+		SessionID: "session_a",
+		RunID:     "job_1",
+		Type:      "run.started",
+		Payload:   json.RawMessage(`{"status":"running"}`),
+	})
+	if err != nil {
+		t.Fatalf("append first event: %v", err)
+	}
+	second, err := st.AppendSessionEvent(model.SessionEvent{
+		SessionID: "session_a",
+		RunID:     "job_1",
+		Type:      "assistant.delta",
+		Payload:   json.RawMessage(`{"chunk":"hello"}`),
+	})
+	if err != nil {
+		t.Fatalf("append second event: %v", err)
+	}
+	if _, err := st.AppendSessionEvent(model.SessionEvent{
+		SessionID: "session_b",
+		RunID:     "job_2",
+		Type:      "run.started",
+	}); err != nil {
+		t.Fatalf("append other session event: %v", err)
+	}
+	if first.Seq != 1 || second.Seq != 2 {
+		t.Fatalf("unexpected seqs: first=%d second=%d", first.Seq, second.Seq)
+	}
+	page := st.ListSessionEvents("session_a", 0, 10)
+	if len(page) != 2 {
+		t.Fatalf("session_a events=%d want=2", len(page))
+	}
+	if page[0].Seq != 1 || page[1].Seq != 2 {
+		t.Fatalf("session_a seq ordering mismatch: got=%d,%d", page[0].Seq, page[1].Seq)
+	}
+	nextPage := st.ListSessionEvents("session_a", 1, 10)
+	if len(nextPage) != 1 || nextPage[0].Seq != 2 {
+		t.Fatalf("after cursor mismatch: %#v", nextPage)
+	}
+
+	reopened, err := Open(statePath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	third, err := reopened.AppendSessionEvent(model.SessionEvent{
+		SessionID: "session_a",
+		RunID:     "job_3",
+		Type:      "run.completed",
+	})
+	if err != nil {
+		t.Fatalf("append third event after reopen: %v", err)
+	}
+	if third.Seq != 3 {
+		t.Fatalf("third seq=%d want=3", third.Seq)
+	}
+}

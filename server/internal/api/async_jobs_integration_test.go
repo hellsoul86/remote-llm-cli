@@ -134,6 +134,107 @@ func TestAsyncRunJobEvents(t *testing.T) {
 	}
 }
 
+func TestSessionEventsEndpointFromRunJob(t *testing.T) {
+	srv, httpSrv, token, host := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	srv.runViaSSH = func(_ context.Context, _ model.Host, _ runtime.CommandSpec, _ string, opts executor.ExecOptions) (executor.ExecResult, error) {
+		if opts.OnStdoutChunk != nil {
+			opts.OnStdoutChunk([]byte("{\"type\":\"thread.started\"}\n"))
+		}
+		now := time.Now().UTC()
+		return executor.ExecResult{
+			ExitCode:   0,
+			Stdout:     "{\"type\":\"assistant_message\",\"text\":\"ok\"}\n",
+			DurationMS: 5,
+			StartedAt:  now,
+			FinishedAt: now,
+		}, nil
+	}
+
+	const sessionID = "session_stream_1"
+	enqueueBody := map[string]any{
+		"runtime":    "codex",
+		"prompt":     "stream to session endpoint",
+		"host_id":    host.ID,
+		"session_id": sessionID,
+		"fanout":     1,
+	}
+	var enqueueResp struct {
+		Job model.RunJobRecord `json:"job"`
+	}
+	status := doJSON(t, httpSrv.Client(), http.MethodPost, httpSrv.URL+"/v1/jobs/run", token, enqueueBody, &enqueueResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("enqueue status=%d want=202", status)
+	}
+	final := waitJobTerminal(t, httpSrv, token, enqueueResp.Job.ID, 3*time.Second)
+	if final.Status != runJobStatusSucceeded {
+		t.Fatalf("job status=%q want=%q", final.Status, runJobStatusSucceeded)
+	}
+	if final.SessionID != sessionID {
+		t.Fatalf("job session_id=%q want=%q", final.SessionID, sessionID)
+	}
+
+	var eventResp struct {
+		SessionID string               `json:"session_id"`
+		After     int64                `json:"after"`
+		NextAfter int64                `json:"next_after"`
+		Events    []model.SessionEvent `json:"events"`
+	}
+	eventsStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/sessions/%s/events?after=0&limit=200", httpSrv.URL, sessionID),
+		token,
+		nil,
+		&eventResp,
+	)
+	if eventsStatus != http.StatusOK {
+		t.Fatalf("session events status=%d want=200", eventsStatus)
+	}
+	if eventResp.SessionID != sessionID {
+		t.Fatalf("session_id=%q want=%q", eventResp.SessionID, sessionID)
+	}
+	if len(eventResp.Events) == 0 {
+		t.Fatalf("expected non-empty session events")
+	}
+	has := map[string]bool{}
+	for _, event := range eventResp.Events {
+		has[event.Type] = true
+		if event.SessionID != sessionID {
+			t.Fatalf("event session_id=%q want=%q", event.SessionID, sessionID)
+		}
+	}
+	for _, typ := range []string{"job.queued", "job.running", "target.started", "target.stdout", "target.done", "job.succeeded"} {
+		if !has[typ] {
+			t.Fatalf("missing session event type %q in %#v", typ, has)
+		}
+	}
+	if eventResp.NextAfter <= 0 {
+		t.Fatalf("next_after=%d want>0", eventResp.NextAfter)
+	}
+
+	var cursorResp struct {
+		Events []model.SessionEvent `json:"events"`
+	}
+	cursorStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/sessions/%s/events?after=%d&limit=200", httpSrv.URL, sessionID, eventResp.NextAfter),
+		token,
+		nil,
+		&cursorResp,
+	)
+	if cursorStatus != http.StatusOK {
+		t.Fatalf("session events cursor status=%d want=200", cursorStatus)
+	}
+	if len(cursorResp.Events) != 0 {
+		t.Fatalf("expected no events after latest cursor, got=%d", len(cursorResp.Events))
+	}
+}
+
 func TestDiscoverCodexModels(t *testing.T) {
 	srv, httpSrv, token, host := newAuthedTestServer(t)
 	defer httpSrv.Close()

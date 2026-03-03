@@ -35,6 +35,7 @@ export type RuntimeInfo = {
 export type RunRequest = {
   runtime: string;
   prompt: string;
+  session_id?: string;
   host_id?: string;
   host_ids?: string[];
   all_hosts?: boolean;
@@ -181,6 +182,7 @@ export type RunJobRecord = {
   status: "pending" | "running" | "succeeded" | "failed" | "canceled";
   runtime: string;
   prompt_preview: string;
+  session_id?: string;
   host_ids?: string[];
   created_by_key_id?: string;
   queued_at: string;
