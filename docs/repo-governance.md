@@ -40,6 +40,7 @@ Workflows:
 
 - `.github/workflows/ci.yml`
 - `.github/workflows/pr-governance.yml`
+- `.github/workflows/deploy.yml` (post-merge deploy on `staging`/`main`)
 
 ## Current merge order (active stacked PRs)
 
