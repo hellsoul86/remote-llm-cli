@@ -37,6 +37,10 @@ func main() {
 		}
 		for _, adapter := range adapters {
 			if err := rt.Add(adapter); err != nil {
+				if strings.Contains(err.Error(), "runtime already registered") {
+					log.Printf("skip runtime %q from config: %v", adapter.Name(), err)
+					continue
+				}
 				log.Fatalf("register runtime %q: %v", adapter.Name(), err)
 			}
 		}
