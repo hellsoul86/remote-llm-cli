@@ -262,6 +262,13 @@ export type CodexSessionTarget = {
   sessions?: CodexSessionInfo[];
 };
 
+export type CodexModelCatalog = {
+  host: Host;
+  default_model: string;
+  models: string[];
+  warning?: string;
+};
+
 const ENV_API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
 const IS_DEV = import.meta.env.DEV;
 
@@ -488,6 +495,22 @@ export async function discoverCodexSessions(
     throw new Error(`discover codex sessions failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return { status: res.status, body };
+}
+
+export async function discoverCodexModels(
+  token: string,
+  request?: { host_id?: string }
+): Promise<CodexModelCatalog> {
+  const params = new URLSearchParams();
+  if (request?.host_id) params.set("host_id", request.host_id);
+  const query = params.toString();
+  const url = query ? `${API_BASE}/v1/codex/models?${query}` : `${API_BASE}/v1/codex/models`;
+  const res = await fetch(url, { headers: headers(token) });
+  const body = await res.json();
+  if (!res.ok || !Array.isArray(body?.models)) {
+    throw new Error(`discover codex models failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
 }
 
 export async function syncHosts(token: string, request: SyncRequest): Promise<{ status: number; body: SyncResponse }> {

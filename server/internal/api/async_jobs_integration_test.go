@@ -134,6 +134,68 @@ func TestAsyncRunJobEvents(t *testing.T) {
 	}
 }
 
+func TestDiscoverCodexModels(t *testing.T) {
+	srv, httpSrv, token, host := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	srv.runViaSSH = func(_ context.Context, _ model.Host, spec runtime.CommandSpec, _ string, _ executor.ExecOptions) (executor.ExecResult, error) {
+		now := time.Now().UTC()
+		if spec.Program == "sh" {
+			return executor.ExecResult{
+				ExitCode:   0,
+				Stdout:     "gpt-5-codex\n",
+				DurationMS: 1,
+				StartedAt:  now,
+				FinishedAt: now,
+			}, nil
+		}
+		return executor.ExecResult{
+			ExitCode:   0,
+			Stdout:     "ok",
+			DurationMS: 5,
+			StartedAt:  now,
+			FinishedAt: now,
+		}, nil
+	}
+
+	enqueueBody := map[string]any{
+		"runtime": "codex",
+		"prompt":  "model check",
+		"host_id": host.ID,
+		"fanout":  1,
+		"codex": map[string]any{
+			"model": "gpt-5-mini",
+		},
+	}
+	var enqueueResp struct {
+		Job model.RunJobRecord `json:"job"`
+	}
+	status := doJSON(t, httpSrv.Client(), http.MethodPost, httpSrv.URL+"/v1/jobs/run", token, enqueueBody, &enqueueResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("enqueue status=%d want=202", status)
+	}
+	_ = waitJobTerminal(t, httpSrv, token, enqueueResp.Job.ID, 3*time.Second)
+
+	var modelResp codexModelsResponse
+	modelStatus := doJSON(t, httpSrv.Client(), http.MethodGet, httpSrv.URL+"/v1/codex/models", token, nil, &modelResp)
+	if modelStatus != http.StatusOK {
+		t.Fatalf("model discover status=%d want=200", modelStatus)
+	}
+	if strings.TrimSpace(modelResp.DefaultModel) != "gpt-5-codex" {
+		t.Fatalf("default_model=%q want=gpt-5-codex", modelResp.DefaultModel)
+	}
+	foundObserved := false
+	for _, modelName := range modelResp.Models {
+		if modelName == "gpt-5-mini" {
+			foundObserved = true
+			break
+		}
+	}
+	if !foundObserved {
+		t.Fatalf("models should include observed gpt-5-mini: %#v", modelResp.Models)
+	}
+}
+
 func TestAsyncRunJobCancelFlow(t *testing.T) {
 	srv, httpSrv, token, host := newAuthedTestServer(t)
 	defer httpSrv.Close()

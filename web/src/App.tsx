@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE,
   cancelRunJob,
+  discoverCodexModels,
   deleteHost,
   enqueueRunJob,
   getMetrics,
@@ -234,6 +235,8 @@ export function App() {
   );
   const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
   const [submittingThreadID, setSubmittingThreadID] = useState("");
+  const [sessionModelDefault, setSessionModelDefault] = useState("gpt-5-codex");
+  const [sessionModelOptions, setSessionModelOptions] = useState<string[]>(["gpt-5-codex", "gpt-5", "gpt-5-mini"]);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
 
@@ -266,6 +269,25 @@ export function App() {
     return out;
   }, [workspaces]);
   const activeThreadBusy = Boolean(activeThread?.activeJobID) || (activeThread ? submittingThreadID === activeThread.id : false);
+  const activeThreadModelValue = useMemo(() => {
+    const current = activeThread?.model.trim() ?? "";
+    if (current) return current;
+    return sessionModelDefault;
+  }, [activeThread?.model, sessionModelDefault]);
+  const sessionModelChoices = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const push = (modelName: string) => {
+      const trimmed = modelName.trim();
+      if (!trimmed || seen.has(trimmed)) return;
+      seen.add(trimmed);
+      out.push(trimmed);
+    };
+    push(sessionModelDefault);
+    for (const modelName of sessionModelOptions) push(modelName);
+    if (activeThreadModelValue) push(activeThreadModelValue);
+    return out;
+  }, [sessionModelDefault, sessionModelOptions, activeThreadModelValue]);
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -404,6 +426,17 @@ export function App() {
         setSelectedRuntime("codex");
       } else if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
+      }
+      if (nextRuntimes.some((runtime) => runtime.name === "codex")) {
+        try {
+          const catalog = await discoverCodexModels(authToken, { host_id: localHost?.id || nextHosts[0]?.id });
+          const nextDefault = catalog.default_model?.trim() || "gpt-5-codex";
+          setSessionModelDefault(nextDefault);
+          const nextModels = Array.isArray(catalog.models) ? catalog.models.filter((modelName) => modelName.trim() !== "") : [];
+          setSessionModelOptions(nextModels.length > 0 ? nextModels : [nextDefault]);
+        } catch {
+          // Keep cached model defaults/options on discovery failures.
+        }
       }
 
       const running = nextJobs.find((job) => isJobActive(job));
@@ -788,6 +821,8 @@ export function App() {
     jobEventCursorRef.current.clear();
     setSubmittingThreadID("");
     setSessionAlerts([]);
+    setSessionModelDefault("gpt-5-codex");
+    setSessionModelOptions(["gpt-5-codex", "gpt-5", "gpt-5-mini"]);
     setToken("");
     setTokenInput("");
     setAuthError("");
@@ -862,7 +897,7 @@ export function App() {
 
     const fanout = Math.max(1, Number.parseInt(fanoutValue, 10) || 1);
     const outputCap = Math.max(32, Number.parseInt(maxOutputKB, 10) || 256);
-    const effectiveModel = activeThread.model.trim() || runModel.trim() || undefined;
+    const effectiveModel = activeThread.model.trim() || sessionModelDefault.trim() || undefined;
     const effectiveSandbox = activeThread.sandbox || runSandbox || "workspace-write";
     const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
 
@@ -877,7 +912,7 @@ export function App() {
       codex:
         (activeRuntime?.name ?? selectedRuntime) === "codex"
           ? {
-              mode: runMode,
+              mode: "exec",
               model: effectiveModel,
               sandbox: effectiveSandbox,
               images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
@@ -892,7 +927,7 @@ export function App() {
       {
         kind: "user",
         title: `Run ${request.runtime}`,
-        body: `${trimmedPrompt}\n\nmode=${runMode} async=${String(runAsyncMode)} hosts=${targetHostIDs.join(",")} workdir=${effectiveWorkdir ?? "-"} model=${effectiveModel ?? "-"} sandbox=${effectiveSandbox}`
+        body: `${trimmedPrompt}\n\nasync=${String(runAsyncMode)} hosts=${targetHostIDs.join(",")} workdir=${effectiveWorkdir ?? "-"} model=${effectiveModel ?? "-"} sandbox=${effectiveSandbox}`
       },
       activeThread.id
     );
@@ -1289,21 +1324,24 @@ export function App() {
             <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
               <div className="session-strip">
                 <span>{activeRuntime?.name ?? selectedRuntime}</span>
-                <span>{runMode}</span>
+                <span>{activeThreadModelValue || "model-auto"}</span>
                 <span>{activeThread?.sandbox ?? "workspace-write"}</span>
               </div>
 
               <div className="composer-controls">
-                <select value={runMode} onChange={(event) => setRunMode(event.target.value as "exec" | "resume" | "review")}>
-                  <option value="exec">exec</option>
-                  <option value="resume">resume</option>
-                  <option value="review">review</option>
+                <select
+                  value={activeThreadModelValue}
+                  onChange={(event) => {
+                    if (!activeThread) return;
+                    setThreadModel(activeThread.id, event.target.value);
+                  }}
+                >
+                  {sessionModelChoices.map((modelName) => (
+                    <option key={modelName} value={modelName}>
+                      {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
+                    </option>
+                  ))}
                 </select>
-                <input
-                  value={activeThread?.model ?? ""}
-                  onChange={(event) => activeThread && setThreadModel(activeThread.id, event.target.value)}
-                  placeholder="model"
-                />
                 <select
                   value={activeThread?.sandbox ?? "workspace-write"}
                   onChange={(event) =>

@@ -741,7 +741,7 @@ button.ghost.danger-ghost:hover {
 
 .composer-controls {
   display: grid;
-  grid-template-columns: 120px 1fr 172px;
+  grid-template-columns: 1fr 172px;
   gap: 8px;
 }
 

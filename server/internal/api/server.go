@@ -107,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/jobs/{id}/events", s.withAuth(http.HandlerFunc(s.handleListRunJobEvents)))
 	mux.Handle("POST /v1/jobs/{id}/cancel", s.withAuth(http.HandlerFunc(s.handleCancelRunJob)))
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
+	mux.Handle("GET /v1/codex/models", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexModels)))
 	mux.Handle("POST /v1/codex/sessions/discover", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexSessions)))
 	mux.Handle("POST /v1/codex/sessions/cleanup", s.withAuth(http.HandlerFunc(s.handleCleanupCodexSessions)))
 	mux.Handle("POST /v1/files/images", s.withAuth(http.HandlerFunc(s.handleUploadImage)))
@@ -466,6 +467,13 @@ type codexCleanupRequest struct {
 	TimeoutSec     int      `json:"timeout_sec,omitempty"`
 	OlderThanHours int      `json:"older_than_hours,omitempty"`
 	DryRun         bool     `json:"dry_run,omitempty"`
+}
+
+type codexModelsResponse struct {
+	Host         model.Host `json:"host"`
+	DefaultModel string     `json:"default_model"`
+	Models       []string   `json:"models"`
+	Warning      string     `json:"warning,omitempty"`
 }
 
 type retentionPolicyRequest struct {
@@ -1315,6 +1323,34 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
+func (s *Server) handleDiscoverCodexModels(w http.ResponseWriter, r *http.Request) {
+	hostID := strings.TrimSpace(r.URL.Query().Get("host_id"))
+	host, err := s.resolveCodexModelHost(hostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	defaultModel, probeErr := s.probeCodexDefaultModel(r.Context(), host)
+	observed := s.collectObservedCodexModels(1000)
+	models := mergeModelCatalog(defaultModel, observed)
+	if len(models) == 0 {
+		models = []string{"gpt-5-codex", "gpt-5", "gpt-5-mini"}
+	}
+	if strings.TrimSpace(defaultModel) == "" {
+		defaultModel = models[0]
+	}
+	resp := codexModelsResponse{
+		Host:         host,
+		DefaultModel: defaultModel,
+		Models:       models,
+	}
+	if probeErr != nil {
+		resp.Warning = probeErr.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) prepareSync(req syncRequest) (preparedSync, error) {
 	if strings.TrimSpace(req.Src) == "" || strings.TrimSpace(req.Dst) == "" {
 		return preparedSync{}, apiError{StatusCode: http.StatusBadRequest, Message: "src and dst are required"}
@@ -1984,6 +2020,115 @@ func resolveSyncDst(requestDst string, hostWorkspace string) string {
 	return path.Join(strings.TrimSpace(hostWorkspace), dst)
 }
 
+func (s *Server) resolveCodexModelHost(hostID string) (model.Host, error) {
+	if strings.TrimSpace(hostID) != "" {
+		host, ok := s.store.GetHost(strings.TrimSpace(hostID))
+		if !ok {
+			return model.Host{}, fmt.Errorf("host not found: %s", hostID)
+		}
+		return host, nil
+	}
+	hosts := s.store.ListHosts()
+	if len(hosts) == 0 {
+		return model.Host{}, fmt.Errorf("no hosts configured")
+	}
+	for _, host := range hosts {
+		if strings.EqualFold(strings.TrimSpace(host.ConnectionMode), "local") {
+			return host, nil
+		}
+	}
+	return hosts[0], nil
+}
+
+func (s *Server) probeCodexDefaultModel(ctx context.Context, host model.Host) (string, error) {
+	script := `
+if [ -f "$HOME/.codex/config.toml" ]; then
+  grep -E '^[[:space:]]*model[[:space:]]*=' "$HOME/.codex/config.toml" | head -n1 \
+    | sed -E 's/^[[:space:]]*model[[:space:]]*=[[:space:]]*"?(.*)"?[[:space:]]*$/\1/'
+fi
+`
+	res, err := s.runViaSSH(
+		ctx,
+		host,
+		runtime.CommandSpec{
+			Program: "sh",
+			Args:    []string{"-lc", script},
+		},
+		"",
+		executor.ExecOptions{
+			MaxStdoutBytes: 32 * 1024,
+			MaxStderrBytes: 32 * 1024,
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		trimmed := strings.Trim(strings.TrimSpace(line), "\"'")
+		if trimmed != "" {
+			return trimmed, nil
+		}
+	}
+	return "", nil
+}
+
+func (s *Server) collectObservedCodexModels(limit int) []string {
+	jobs := s.store.ListRunJobs(limit)
+	out := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	for _, job := range jobs {
+		if len(job.Request) == 0 {
+			continue
+		}
+		var req struct {
+			Runtime string `json:"runtime"`
+			Codex   *struct {
+				Model string `json:"model"`
+			} `json:"codex"`
+		}
+		if err := json.Unmarshal(job.Request, &req); err != nil {
+			continue
+		}
+		if strings.TrimSpace(req.Runtime) != "codex" || req.Codex == nil {
+			continue
+		}
+		modelName := strings.TrimSpace(req.Codex.Model)
+		if modelName == "" {
+			continue
+		}
+		if _, ok := seen[modelName]; ok {
+			continue
+		}
+		seen[modelName] = struct{}{}
+		out = append(out, modelName)
+	}
+	return out
+}
+
+func mergeModelCatalog(defaultModel string, observed []string) []string {
+	out := make([]string, 0, 10)
+	seen := map[string]struct{}{}
+	appendIfNew := func(modelName string) {
+		modelName = strings.TrimSpace(modelName)
+		if modelName == "" {
+			return
+		}
+		if _, ok := seen[modelName]; ok {
+			return
+		}
+		seen[modelName] = struct{}{}
+		out = append(out, modelName)
+	}
+	appendIfNew(defaultModel)
+	for _, modelName := range observed {
+		appendIfNew(modelName)
+	}
+	appendIfNew("gpt-5-codex")
+	appendIfNew("gpt-5")
+	appendIfNew("gpt-5-mini")
+	return out
+}
+
 func normalizeHostConnectionMode(v string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(v))
 	if mode == "" {
@@ -2148,6 +2293,8 @@ func inferAction(method string, path string) string {
 		return "job.cancel"
 	case method == http.MethodPost && path == "/v1/sync":
 		return "sync.execute"
+	case method == http.MethodGet && path == "/v1/codex/models":
+		return "codex.models.discover"
 	case method == http.MethodPost && path == "/v1/codex/sessions/discover":
 		return "codex.sessions.discover"
 	case method == http.MethodPost && path == "/v1/codex/sessions/cleanup":
