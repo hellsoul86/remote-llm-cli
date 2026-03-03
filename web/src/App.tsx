@@ -1306,8 +1306,8 @@ export function App() {
       localStorage.setItem(TOKEN_KEY, trimmed);
       setToken(trimmed);
       setTokenInput(trimmed);
-      setAuthPhase("ready");
       await loadWorkspace(trimmed, true);
+      setAuthPhase("ready");
     } catch (error) {
       localStorage.removeItem(TOKEN_KEY);
       setToken("");
