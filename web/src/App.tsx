@@ -23,6 +23,7 @@ import {
 const TOKEN_KEY = "remote_llm_access_key";
 
 type AuthPhase = "checking" | "locked" | "ready";
+type AppMode = "session" | "ops";
 type TimelineKind = "user" | "assistant" | "system";
 type TimelineState = "running" | "success" | "error";
 
@@ -121,11 +122,22 @@ function statusTone(status: string): "ok" | "warn" | "err" {
   return "warn";
 }
 
+function modeFromHash(hash: string): AppMode {
+  return hash === "#/ops" ? "ops" : "session";
+}
+
+function modeToHash(mode: AppMode): string {
+  return mode === "ops" ? "#/ops" : "#/session";
+}
+
 export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
   const [tokenInput, setTokenInput] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [authError, setAuthError] = useState("");
+  const [appMode, setAppMode] = useState<AppMode>(() =>
+    typeof window === "undefined" ? "session" : modeFromHash(window.location.hash)
+  );
 
   const [health, setHealth] = useState("checking");
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -349,6 +361,18 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncFromHash = () => {
+      setAppMode(modeFromHash(window.location.hash));
+    };
+    syncFromHash();
+    window.addEventListener("hashchange", syncFromHash);
+    return () => {
+      window.removeEventListener("hashchange", syncFromHash);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!threads.some((thread) => thread.id === activeThreadID) && threads.length > 0) {
       setActiveThreadID(threads[0].id);
     }
@@ -454,6 +478,16 @@ export function App() {
     await unlockWorkspace(tokenInput);
   }
 
+  function switchMode(nextMode: AppMode) {
+    setAppMode(nextMode);
+    if (typeof window !== "undefined") {
+      const nextHash = modeToHash(nextMode);
+      if (window.location.hash !== nextHash) {
+        window.history.replaceState(null, "", nextHash);
+      }
+    }
+  }
+
   function onLogout() {
     localStorage.removeItem(TOKEN_KEY);
     const initial = createInitialThread();
@@ -474,6 +508,7 @@ export function App() {
     setActiveJobID("");
     setAuthError("");
     setAuthPhase("locked");
+    switchMode("session");
   }
 
   function toggleHostSelection(hostID: string) {
@@ -649,304 +684,385 @@ export function App() {
 
   return (
     <div className="workspace-shell">
-      <aside className="nav-pane">
-        <header className="pane-head">
-          <p className="pane-eyebrow">controller</p>
-          <h2>Codex Operator</h2>
-          <p className="pane-subtle">health: {health}</p>
-        </header>
-
-        <section className="pane-block">
-          <div className="pane-title-line">
-            <h3>Targets</h3>
-            <label className="switch-inline">
-              <input type="checkbox" checked={allHosts} onChange={(event) => setAllHosts(event.target.checked)} />
-              all
-            </label>
-          </div>
-          <p className="pane-subtle">selected={selectedHostCount}</p>
-          <div className="target-list">
-            {hosts.length === 0 ? (
-              <p className="pane-subtle">No hosts configured.</p>
-            ) : (
-              hosts.map((host) => (
-                <label key={host.id} className="target-item">
-                  <input
-                    type="checkbox"
-                    disabled={allHosts}
-                    checked={allHosts || selectedHostIDs.includes(host.id)}
-                    onChange={() => toggleHostSelection(host.id)}
-                  />
-                  <span className="target-meta">
-                    <strong>{host.name}</strong>
-                    <small>
-                      {host.user ? `${host.user}@` : ""}
-                      {host.host}:{host.port}
-                    </small>
-                  </span>
-                </label>
-              ))
-            )}
-          </div>
-        </section>
-
-        <section className="pane-block">
-          <h3>Runtime</h3>
-          <label>
-            runtime
-            <select value={selectedRuntime} onChange={(event) => setSelectedRuntime(event.target.value)}>
-              {runtimes.map((runtime) => (
-                <option key={runtime.name} value={runtime.name}>
-                  {runtime.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            mode
-            <select value={runMode} onChange={(event) => setRunMode(event.target.value as "exec" | "resume" | "review")}>
-              <option value="exec">exec</option>
-              <option value="resume">resume</option>
-              <option value="review">review</option>
-            </select>
-          </label>
-          <label>
-            model
-            <input value={runModel} onChange={(event) => setRunModel(event.target.value)} placeholder="optional" />
-          </label>
-          <label>
-            sandbox
-            <select
-              value={runSandbox}
-              onChange={(event) =>
-                setRunSandbox(event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
-              }
-            >
-              <option value="">default</option>
-              <option value="read-only">read-only</option>
-              <option value="workspace-write">workspace-write</option>
-              <option value="danger-full-access">danger-full-access</option>
-            </select>
-          </label>
-          <label className="switch-inline">
-            <input type="checkbox" checked={runAsyncMode} onChange={(event) => setRunAsyncMode(event.target.checked)} />
-            async queue
-          </label>
-        </section>
-
-        <section className="pane-block">
-          <h3>Overview</h3>
-          <ul className="metric-list">
-            <li>hosts={hosts.length}</li>
-            <li>jobs={jobs.length}</li>
-            <li>runs={runs.length}</li>
-            <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
-            <li>workers={metrics?.queue.workers_active ?? "-"}/{metrics?.queue.workers_total ?? "-"}</li>
-            <li>threads={threads.length}</li>
-          </ul>
-        </section>
-      </aside>
-
-      <main className="chat-pane">
-        <header className="chat-head">
-          <div>
-            <p className="pane-eyebrow">live session</p>
-            <h1>{activeRuntime?.name ?? "codex"} control thread</h1>
-          </div>
-          <div className="chat-head-actions">
-            <button onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
-              {isRefreshing ? "Syncing..." : "Sync"}
+      <header className="app-topbar">
+        <div className="topbar-title">
+          <p className="topbar-eyebrow">remote-llm workspace</p>
+          <h1>Codex Control App</h1>
+        </div>
+        <div className="topbar-controls">
+          <div className="mode-switch">
+            <button type="button" className={appMode === "session" ? "mode-btn active" : "mode-btn"} onClick={() => switchMode("session")}>
+              Session
             </button>
-            <button className="ghost" onClick={onLogout}>
-              Logout
+            <button type="button" className={appMode === "ops" ? "mode-btn active" : "mode-btn"} onClick={() => switchMode("ops")}>
+              Ops
             </button>
           </div>
-        </header>
-
-        <section className="thread-bar">
-          <div className="thread-list">
-            {threads.map((thread) => (
-              <button
-                key={thread.id}
-                type="button"
-                className={`thread-chip ${thread.id === activeThreadID ? "active" : ""}`}
-                onClick={() => setActiveThreadID(thread.id)}
-              >
-                <span>{thread.title}</span>
-                <small>{thread.timeline.length}</small>
-              </button>
-            ))}
-          </div>
-          <button type="button" className="ghost new-thread" onClick={createThread}>
-            New Thread
+          <button onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+            {isRefreshing ? "Syncing..." : "Sync"}
           </button>
-        </section>
+          <button className="ghost" onClick={onLogout}>
+            Logout
+          </button>
+        </div>
+      </header>
 
-        <section className="timeline" aria-live="polite">
-          {activeTimeline.length === 0 ? (
-            <article className="message message-system">
-              <div className="message-title-row">
-                <h4>Workspace Ready</h4>
+      {appMode === "session" ? (
+        <div className="session-stage">
+          <main className="chat-pane">
+            <header className="chat-head">
+              <div>
+                <p className="pane-eyebrow">focused session</p>
+                <h1>{activeRuntime?.name ?? "codex"} conversation workspace</h1>
               </div>
-              <pre>Send your first instruction to start a distributed codex run.</pre>
-            </article>
-          ) : (
-            activeTimeline.map((entry) => (
-              <article key={entry.id} className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}>
-                <div className="message-title-row">
-                  <h4>{entry.title}</h4>
-                  <time>{formatClock(entry.createdAt)}</time>
-                </div>
-                <pre>{entry.body}</pre>
-              </article>
-            ))
-          )}
-          <div ref={timelineBottomRef} />
-        </section>
+              <p className="chat-health">health: {health}</p>
+            </header>
 
-        <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
-          <div className="session-strip">
-            <span>runtime={activeRuntime?.name ?? selectedRuntime}</span>
-            <span>mode={runMode}</span>
-            <span>hosts={allHosts ? "all" : selectedHostIDs.length}</span>
-            <span>async={String(runAsyncMode)}</span>
-          </div>
-
-          <div className="quick-strip">
-            {QUICK_COMMANDS.map((command) => (
-              <button key={command.label} type="button" className="quick-chip ghost" onClick={() => applyQuickCommand(command)}>
-                {command.label}
-              </button>
-            ))}
-            <span className="shortcut-hint">Ctrl/Cmd+K focus</span>
-          </div>
-
-          <textarea
-            ref={promptInputRef}
-            value={activeDraft}
-            onChange={(event) => {
-              if (activeThread) {
-                updateThreadDraft(activeThread.id, event.target.value);
-              }
-            }}
-            rows={4}
-            placeholder="Tell codex what to execute on selected hosts..."
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                event.preventDefault();
-                composerFormRef.current?.requestSubmit();
-              }
-            }}
-          />
-
-          <div className="composer-controls">
-            <input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="workdir override" />
-            <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
-            <input value={maxOutputKB} onChange={(event) => setMaxOutputKB(event.target.value)} placeholder="max output KB" />
-            <button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? "Running..." : "Send"}
-            </button>
-          </div>
-        </form>
-      </main>
-
-      <aside className="inspect-pane">
-        <section className="inspect-block">
-          <h3>Active Job</h3>
-          {activeJob ? (
-            <div className="job-card">
-              <div className="job-head">
-                <strong>{activeJob.id}</strong>
-                <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
-              </div>
-              <p>runtime={activeJob.runtime}</p>
-              <p>thread={activeJobThreadID}</p>
-              <p>queued={formatDateTime(activeJob.queued_at)}</p>
-              <p>
-                hosts total={activeJob.total_hosts ?? 0} ok={activeJob.succeeded_hosts ?? 0} failed={activeJob.failed_hosts ?? 0}
-              </p>
-              <div className="progress-track" aria-label="job progress">
-                <span style={{ width: `${activeProgress}%` }} />
-              </div>
-              <p>http={activeJob.result_status ?? "n/a"}</p>
-              {activeJob.error ? <p className="tone-err">{activeJob.error}</p> : null}
-            </div>
-          ) : (
-            <p className="pane-subtle">No active async job.</p>
-          )}
-        </section>
-
-        <section className="inspect-block">
-          <h3>Recent Jobs</h3>
-          {jobs.length === 0 ? (
-            <p className="pane-subtle">No jobs yet.</p>
-          ) : (
-            <ul className="history-list">
-              {jobs.slice(0, 8).map((job) => (
-                <li key={job.id}>
+            <section className="thread-bar">
+              <div className="thread-list">
+                {threads.map((thread) => (
                   <button
-                    className="ghost"
-                    onClick={() => {
-                      setActiveJobID(job.id);
-                      setActiveJob(job);
-                    }}
+                    key={thread.id}
+                    type="button"
+                    className={`thread-chip ${thread.id === activeThreadID ? "active" : ""}`}
+                    onClick={() => setActiveThreadID(thread.id)}
                   >
-                    {job.id}
+                    <span>{thread.title}</span>
+                    <small>{thread.timeline.length}</small>
                   </button>
-                  <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+                ))}
+              </div>
+              <button type="button" className="ghost new-thread" onClick={createThread}>
+                New Thread
+              </button>
+            </section>
 
-        <section className="inspect-block">
-          <h3>Recent Runs</h3>
-          {runs.length === 0 ? (
-            <p className="pane-subtle">No run results yet.</p>
-          ) : (
-            <ul className="history-list history-runs">
-              {runs.slice(0, 6).map((run) => (
-                <li key={run.id}>
-                  <span>{run.id}</span>
-                  <span className={`tone-${run.status_code < 400 ? "ok" : "err"}`}>
-                    {run.status_code < 400 ? "ok" : `http_${run.status_code}`}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+            <section className="timeline" aria-live="polite">
+              {activeTimeline.length === 0 ? (
+                <article className="message message-system">
+                  <div className="message-title-row">
+                    <h4>Workspace Ready</h4>
+                  </div>
+                  <pre>Send your first instruction to start a distributed codex run.</pre>
+                </article>
+              ) : (
+                activeTimeline.map((entry) => (
+                  <article key={entry.id} className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}>
+                    <div className="message-title-row">
+                      <h4>{entry.title}</h4>
+                      <time>{formatClock(entry.createdAt)}</time>
+                    </div>
+                    <pre>{entry.body}</pre>
+                  </article>
+                ))
+              )}
+              <div ref={timelineBottomRef} />
+            </section>
 
-        <section className="inspect-block">
-          <h3>Add Host</h3>
-          <form className="host-form" onSubmit={onAddHost}>
-            <input
-              placeholder="name"
-              value={hostForm.name}
-              onChange={(event) => setHostForm((prev) => ({ ...prev, name: event.target.value }))}
-            />
-            <input
-              placeholder="host"
-              value={hostForm.host}
-              onChange={(event) => setHostForm((prev) => ({ ...prev, host: event.target.value }))}
-            />
-            <input
-              placeholder="user"
-              value={hostForm.user}
-              onChange={(event) => setHostForm((prev) => ({ ...prev, user: event.target.value }))}
-            />
-            <input
-              placeholder="workspace"
-              value={hostForm.workspace}
-              onChange={(event) => setHostForm((prev) => ({ ...prev, workspace: event.target.value }))}
-            />
-            <button type="submit" disabled={addingHost}>
-              {addingHost ? "Saving..." : "Save Host"}
-            </button>
-          </form>
-        </section>
-      </aside>
+            <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
+              <div className="session-strip">
+                <span>runtime={activeRuntime?.name ?? selectedRuntime}</span>
+                <span>mode={runMode}</span>
+                <span>hosts={allHosts ? "all" : selectedHostIDs.length}</span>
+                <span>async={String(runAsyncMode)}</span>
+              </div>
+
+              <div className="quick-strip">
+                {QUICK_COMMANDS.map((command) => (
+                  <button key={command.label} type="button" className="quick-chip ghost" onClick={() => applyQuickCommand(command)}>
+                    {command.label}
+                  </button>
+                ))}
+                <span className="shortcut-hint">Ctrl/Cmd+K focus</span>
+              </div>
+
+              <textarea
+                ref={promptInputRef}
+                value={activeDraft}
+                onChange={(event) => {
+                  if (activeThread) {
+                    updateThreadDraft(activeThread.id, event.target.value);
+                  }
+                }}
+                rows={4}
+                placeholder="Tell codex what to execute on selected hosts..."
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    composerFormRef.current?.requestSubmit();
+                  }
+                }}
+              />
+
+              <div className="composer-controls">
+                <input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="workdir override" />
+                <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
+                <input value={maxOutputKB} onChange={(event) => setMaxOutputKB(event.target.value)} placeholder="max output KB" />
+                <button type="submit" disabled={isSubmitting}>
+                  {isSubmitting ? "Running..." : "Send"}
+                </button>
+              </div>
+            </form>
+          </main>
+
+          <aside className="session-side">
+            <section className="inspect-block focus-block">
+              <h3>Session Context</h3>
+              <ul className="metric-list metric-list-light">
+                <li>thread={activeThread?.title ?? "-"}</li>
+                <li>threads={threads.length}</li>
+                <li>targets={selectedHostCount}</li>
+                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
+              </ul>
+              <button type="button" className="ghost" onClick={() => switchMode("ops")}>
+                Open Remote Ops
+              </button>
+            </section>
+
+            <section className="inspect-block">
+              <h3>Active Job</h3>
+              {activeJob ? (
+                <div className="job-card">
+                  <div className="job-head">
+                    <strong>{activeJob.id}</strong>
+                    <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
+                  </div>
+                  <p>runtime={activeJob.runtime}</p>
+                  <p>thread={activeJobThreadID}</p>
+                  <p>queued={formatDateTime(activeJob.queued_at)}</p>
+                  <div className="progress-track" aria-label="job progress">
+                    <span style={{ width: `${activeProgress}%` }} />
+                  </div>
+                </div>
+              ) : (
+                <p className="pane-subtle-light">No active async job.</p>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>Recent Jobs</h3>
+              {jobs.length === 0 ? (
+                <p className="pane-subtle-light">No jobs yet.</p>
+              ) : (
+                <ul className="history-list">
+                  {jobs.slice(0, 6).map((job) => (
+                    <li key={job.id}>
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          setActiveJobID(job.id);
+                          setActiveJob(job);
+                        }}
+                      >
+                        {job.id}
+                      </button>
+                      <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </aside>
+        </div>
+      ) : (
+        <div className="ops-stage">
+          <aside className="nav-pane">
+            <header className="pane-head">
+              <p className="pane-eyebrow">remote operations</p>
+              <h2>Hosts and Runtime Control</h2>
+              <p className="pane-subtle">health: {health}</p>
+            </header>
+
+            <section className="pane-block">
+              <div className="pane-title-line">
+                <h3>Targets</h3>
+                <label className="switch-inline">
+                  <input type="checkbox" checked={allHosts} onChange={(event) => setAllHosts(event.target.checked)} />
+                  all
+                </label>
+              </div>
+              <p className="pane-subtle">selected={selectedHostCount}</p>
+              <div className="target-list">
+                {hosts.length === 0 ? (
+                  <p className="pane-subtle">No hosts configured.</p>
+                ) : (
+                  hosts.map((host) => (
+                    <label key={host.id} className="target-item">
+                      <input
+                        type="checkbox"
+                        disabled={allHosts}
+                        checked={allHosts || selectedHostIDs.includes(host.id)}
+                        onChange={() => toggleHostSelection(host.id)}
+                      />
+                      <span className="target-meta">
+                        <strong>{host.name}</strong>
+                        <small>
+                          {host.user ? `${host.user}@` : ""}
+                          {host.host}:{host.port}
+                        </small>
+                      </span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="pane-block">
+              <h3>Runtime</h3>
+              <label>
+                runtime
+                <select value={selectedRuntime} onChange={(event) => setSelectedRuntime(event.target.value)}>
+                  {runtimes.map((runtime) => (
+                    <option key={runtime.name} value={runtime.name}>
+                      {runtime.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                mode
+                <select value={runMode} onChange={(event) => setRunMode(event.target.value as "exec" | "resume" | "review")}>
+                  <option value="exec">exec</option>
+                  <option value="resume">resume</option>
+                  <option value="review">review</option>
+                </select>
+              </label>
+              <label>
+                model
+                <input value={runModel} onChange={(event) => setRunModel(event.target.value)} placeholder="optional" />
+              </label>
+              <label>
+                sandbox
+                <select
+                  value={runSandbox}
+                  onChange={(event) =>
+                    setRunSandbox(event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                  }
+                >
+                  <option value="">default</option>
+                  <option value="read-only">read-only</option>
+                  <option value="workspace-write">workspace-write</option>
+                  <option value="danger-full-access">danger-full-access</option>
+                </select>
+              </label>
+              <label className="switch-inline">
+                <input type="checkbox" checked={runAsyncMode} onChange={(event) => setRunAsyncMode(event.target.checked)} />
+                async queue
+              </label>
+            </section>
+
+            <section className="pane-block">
+              <h3>Overview</h3>
+              <ul className="metric-list">
+                <li>hosts={hosts.length}</li>
+                <li>jobs={jobs.length}</li>
+                <li>runs={runs.length}</li>
+                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
+                <li>workers={metrics?.queue.workers_active ?? "-"}/{metrics?.queue.workers_total ?? "-"}</li>
+                <li>threads={threads.length}</li>
+              </ul>
+            </section>
+          </aside>
+
+          <aside className="inspect-pane">
+            <section className="inspect-block">
+              <h3>Active Job</h3>
+              {activeJob ? (
+                <div className="job-card">
+                  <div className="job-head">
+                    <strong>{activeJob.id}</strong>
+                    <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
+                  </div>
+                  <p>runtime={activeJob.runtime}</p>
+                  <p>thread={activeJobThreadID}</p>
+                  <p>queued={formatDateTime(activeJob.queued_at)}</p>
+                  <p>
+                    hosts total={activeJob.total_hosts ?? 0} ok={activeJob.succeeded_hosts ?? 0} failed={activeJob.failed_hosts ?? 0}
+                  </p>
+                  <div className="progress-track" aria-label="job progress">
+                    <span style={{ width: `${activeProgress}%` }} />
+                  </div>
+                  <p>http={activeJob.result_status ?? "n/a"}</p>
+                  {activeJob.error ? <p className="tone-err">{activeJob.error}</p> : null}
+                </div>
+              ) : (
+                <p className="pane-subtle-light">No active async job.</p>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>Recent Jobs</h3>
+              {jobs.length === 0 ? (
+                <p className="pane-subtle-light">No jobs yet.</p>
+              ) : (
+                <ul className="history-list">
+                  {jobs.slice(0, 8).map((job) => (
+                    <li key={job.id}>
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          setActiveJobID(job.id);
+                          setActiveJob(job);
+                        }}
+                      >
+                        {job.id}
+                      </button>
+                      <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>Recent Runs</h3>
+              {runs.length === 0 ? (
+                <p className="pane-subtle-light">No run results yet.</p>
+              ) : (
+                <ul className="history-list history-runs">
+                  {runs.slice(0, 6).map((run) => (
+                    <li key={run.id}>
+                      <span>{run.id}</span>
+                      <span className={`tone-${run.status_code < 400 ? "ok" : "err"}`}>
+                        {run.status_code < 400 ? "ok" : `http_${run.status_code}`}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>Add Host</h3>
+              <form className="host-form" onSubmit={onAddHost}>
+                <input
+                  placeholder="name"
+                  value={hostForm.name}
+                  onChange={(event) => setHostForm((prev) => ({ ...prev, name: event.target.value }))}
+                />
+                <input
+                  placeholder="host"
+                  value={hostForm.host}
+                  onChange={(event) => setHostForm((prev) => ({ ...prev, host: event.target.value }))}
+                />
+                <input
+                  placeholder="user"
+                  value={hostForm.user}
+                  onChange={(event) => setHostForm((prev) => ({ ...prev, user: event.target.value }))}
+                />
+                <input
+                  placeholder="workspace"
+                  value={hostForm.workspace}
+                  onChange={(event) => setHostForm((prev) => ({ ...prev, workspace: event.target.value }))}
+                />
+                <button type="submit" disabled={addingHost}>
+                  {addingHost ? "Saving..." : "Save Host"}
+                </button>
+              </form>
+            </section>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
