@@ -243,6 +243,9 @@ export function App() {
       return true;
     });
   }, [auditEvents, opsAuditMethodFilter, opsAuditStatusFilter]);
+  const healthIsError = health.startsWith("error");
+  const opsNoticeIsError = /fail|error|degraded/i.test(opsNotice);
+  const syncLabel = isRefreshing ? "syncing" : "live";
 
   function createThreadAndFocus() {
     createThread();
@@ -827,6 +830,7 @@ export function App() {
               Ops
             </button>
           </div>
+          <span className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}>{syncLabel}</span>
           <button onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
             {isRefreshing ? "Syncing..." : "Sync"}
           </button>
@@ -836,6 +840,8 @@ export function App() {
         </div>
       </header>
 
+      {healthIsError ? <section className="workspace-alert">Controller state degraded: {health}</section> : null}
+
       {appMode === "session" ? (
         <div className="session-stage">
           <main className="chat-pane">
@@ -844,7 +850,7 @@ export function App() {
                 <p className="pane-eyebrow">focused session</p>
                 <h1>{activeRuntime?.name ?? "codex"} conversation workspace</h1>
               </div>
-              <p className="chat-health">health: {health}</p>
+              <p className={`chat-health ${healthIsError ? "is-error" : ""}`}>health: {health}</p>
             </header>
 
             <section className="thread-bar">
@@ -871,9 +877,13 @@ export function App() {
               {activeTimeline.length === 0 ? (
                 <article className="message message-system">
                   <div className="message-title-row">
-                    <h4>Workspace Ready</h4>
+                    <h4>{isRefreshing ? "Sync In Progress" : "Workspace Ready"}</h4>
                   </div>
-                  <pre>Send your first instruction to start a distributed codex run.</pre>
+                  <pre>
+                    {isRefreshing
+                      ? "Loading remote state and runtime capability snapshot..."
+                      : "Send your first instruction to start a distributed codex run."}
+                  </pre>
                 </article>
               ) : (
                 activeTimeline.map((entry) => (
@@ -1159,7 +1169,7 @@ export function App() {
             </section>
 
             {opsNotice ? (
-              <section className="pane-block ops-notice">
+              <section className={`pane-block ops-notice ${opsNoticeIsError ? "ops-notice-error" : ""}`}>
                 <h3>Ops Notice</h3>
                 <p>{opsNotice}</p>
               </section>
@@ -1167,6 +1177,13 @@ export function App() {
           </aside>
 
           <aside className="inspect-pane">
+            {isRefreshing ? (
+              <section className="inspect-block">
+                <h3>Loading</h3>
+                <p className="pane-subtle-light">Refreshing hosts, queue, runs, and audit timeline...</p>
+              </section>
+            ) : null}
+
             <section className="inspect-block">
               <h3>Active Job</h3>
               {activeJob ? (
