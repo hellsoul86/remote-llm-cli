@@ -75,11 +75,11 @@ jobs:
       - name: Validate targets and secrets
         id: validate
         env:
-          DEPLOY_TARGETS: ${{ vars.DEPLOY_TARGETS }}
+          DEPLOY_TARGETS: ${{ secrets.DEPLOY_TARGETS }}
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
           if [ -z "${DEPLOY_TARGETS}" ]; then
-            echo "::error::missing environment variable DEPLOY_TARGETS"
+            echo "::error::missing environment secret DEPLOY_TARGETS"
             exit 1
           fi
           echo "${DEPLOY_TARGETS}" | jq -e '. | type=="array" and length>0' >/dev/null

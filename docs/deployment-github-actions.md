@@ -22,9 +22,9 @@ Each API target server should have:
 4. `sudo -n` capability for deploy user
 5. SSH reachable from GitHub Actions runner
 
-### 1.2 Environment variable: `DEPLOY_TARGETS`
+### 1.2 Environment secret: `DEPLOY_TARGETS`
 
-Set `DEPLOY_TARGETS` as JSON array:
+Set `DEPLOY_TARGETS` secret value as JSON array:
 
 ```json
 [
