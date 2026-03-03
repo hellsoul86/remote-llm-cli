@@ -439,7 +439,7 @@ test("renders final codex assistant message from job response when stream is mis
                 ok: true,
                 result: {
                   stdout:
-                    '{"type":"item.completed","item":{"type":"agent_message","text":"Remote codex response line 1\\\\nRemote codex response line 2"}}\n'
+                    '{"type":"item.completed","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Remote codex response line 1\\\\nRemote codex response line 2"}]}}\n'
                 }
               }
             ]
