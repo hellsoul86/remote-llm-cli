@@ -194,7 +194,17 @@ test("queues async run job and observes terminal success", async ({ page }) => {
           events: [
             { seq: 1, job_id: "job_1", type: "job.running", created_at: "2026-03-02T00:00:00Z" },
             { seq: 2, job_id: "job_1", type: "target.started", host_name: "local-default", attempt: 1, created_at: "2026-03-02T00:00:00Z" },
-            { seq: 3, job_id: "job_1", type: "target.stdout", host_name: "local-default", chunk: "stream-one\\n", created_at: "2026-03-02T00:00:00Z" },
+            {
+              seq: 3,
+              job_id: "job_1",
+              type: "target.stdout",
+              host_name: "local-default",
+              chunk: `{"type":"thread.started","thread_id":"t_1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"type":"agent_message","text":"stream-one"}}
+`,
+              created_at: "2026-03-02T00:00:00Z"
+            },
             { seq: 4, job_id: "job_1", type: "target.done", host_name: "local-default", status: "ok", exit_code: 0, created_at: "2026-03-02T00:00:00Z" }
           ]
         }
@@ -256,6 +266,7 @@ test("queues async run job and observes terminal success", async ({ page }) => {
   expect(observedSkipGitRepoCheck).toBe(true);
 
   await expect(page.getByText(/stream-one/)).toBeVisible();
+  await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(
     page
       .locator("section")

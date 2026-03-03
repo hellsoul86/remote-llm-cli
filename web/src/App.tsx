@@ -169,7 +169,7 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
   return "";
 }
 
-function parseCodexAssistantTextFromStdout(stdout: string): string {
+function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallback = true): string {
   if (!stdout.trim()) return "";
   const lines = stdout.split(/\r?\n/);
   const messages: string[] = [];
@@ -195,7 +195,7 @@ function parseCodexAssistantTextFromStdout(stdout: string): string {
   if (messages.length > 0) {
     return messages[messages.length - 1] ?? "";
   }
-  if (plainLines.length > 0) {
+  if (allowPlainTextFallback && plainLines.length > 0) {
     return plainLines.join("\n").trim();
   }
   return "";
@@ -935,16 +935,32 @@ export function App() {
             }
           }
           if (showLiveStream && stdoutStream.trim()) {
-            jobStreamSeenRef.current.set(item.jobID, true);
-            addTimelineEntry(
-              {
-                kind: "assistant",
-                state: "running",
-                title: "Assistant",
-                body: clipStreamText(stdoutStream)
-              },
-              item.threadID
-            );
+            if (job.runtime === "codex") {
+              const contentOnly = parseCodexAssistantTextFromStdout(stdoutStream, false);
+              if (contentOnly.trim()) {
+                jobStreamSeenRef.current.set(item.jobID, true);
+                addTimelineEntry(
+                  {
+                    kind: "assistant",
+                    state: "running",
+                    title: "Assistant",
+                    body: clipStreamText(contentOnly)
+                  },
+                  item.threadID
+                );
+              }
+            } else {
+              jobStreamSeenRef.current.set(item.jobID, true);
+              addTimelineEntry(
+                {
+                  kind: "assistant",
+                  state: "running",
+                  title: "Assistant",
+                  body: clipStreamText(stdoutStream)
+                },
+                item.threadID
+              );
+            }
           }
           if (terminalHints.length > 0) {
             addTimelineEntry(
