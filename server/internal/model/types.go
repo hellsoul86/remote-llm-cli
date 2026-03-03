@@ -56,9 +56,10 @@ type RuntimeInfo struct {
 }
 
 type RetentionPolicy struct {
-	RunRecordsMax  int `json:"run_records_max"`
-	RunJobsMax     int `json:"run_jobs_max"`
-	AuditEventsMax int `json:"audit_events_max"`
+	RunRecordsMax    int `json:"run_records_max"`
+	RunJobsMax       int `json:"run_jobs_max"`
+	AuditEventsMax   int `json:"audit_events_max"`
+	SessionEventsMax int `json:"session_events_max"`
 }
 
 type RunTargetSummary struct {
@@ -93,6 +94,7 @@ type RunJobRecord struct {
 	Status         string          `json:"status"`
 	Runtime        string          `json:"runtime"`
 	PromptPreview  string          `json:"prompt_preview"`
+	SessionID      string          `json:"session_id,omitempty"`
 	HostIDs        []string        `json:"host_ids,omitempty"`
 	CreatedByKeyID string          `json:"created_by_key_id,omitempty"`
 	QueuedAt       time.Time       `json:"queued_at"`
@@ -107,6 +109,15 @@ type RunJobRecord struct {
 	Error          string          `json:"error,omitempty"`
 	Request        json.RawMessage `json:"request,omitempty"`
 	Response       json.RawMessage `json:"response,omitempty"`
+}
+
+type SessionEvent struct {
+	Seq       int64           `json:"seq"`
+	SessionID string          `json:"session_id"`
+	RunID     string          `json:"run_id,omitempty"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 type AuditEvent struct {

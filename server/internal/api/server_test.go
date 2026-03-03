@@ -78,6 +78,7 @@ func TestInferAction(t *testing.T) {
 		{name: "job list", method: http.MethodGet, path: "/v1/jobs", want: "job.list"},
 		{name: "job get", method: http.MethodGet, path: "/v1/jobs/job_1", want: "job.get"},
 		{name: "job events", method: http.MethodGet, path: "/v1/jobs/job_1/events", want: "job.events.list"},
+		{name: "session events", method: http.MethodGet, path: "/v1/sessions/session_1/events", want: "session.events.list"},
 		{name: "job cancel", method: http.MethodPost, path: "/v1/jobs/job_1/cancel", want: "job.cancel"},
 		{name: "sync execute", method: http.MethodPost, path: "/v1/sync", want: "sync.execute"},
 		{name: "codex models discover", method: http.MethodGet, path: "/v1/codex/models", want: "codex.models.discover"},

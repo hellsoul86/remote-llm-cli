@@ -1292,6 +1292,7 @@ export function App() {
     const request: RunRequest = {
       runtime: activeRuntime?.name ?? selectedRuntime,
       prompt: trimmedPrompt,
+      session_id: activeThread.id,
       all_hosts: false,
       host_ids: targetHostIDs,
       workdir: effectiveWorkdir,
