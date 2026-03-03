@@ -299,6 +299,44 @@ export async function upsertHost(token: string, host: Partial<Host>): Promise<Ho
   return body.host;
 }
 
+export async function deleteHost(token: string, hostID: string): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/v1/hosts/${encodeURIComponent(hostID)}`, {
+    method: "DELETE",
+    headers: headers(token)
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(`delete host failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return Boolean(body?.deleted);
+}
+
+export async function probeHost(
+  token: string,
+  hostID: string,
+  request?: { preflight?: boolean }
+): Promise<{
+  host: Host;
+  ssh: { ok: boolean; error?: string; error_hint?: string };
+  codex: { ok: boolean; error?: string; error_hint?: string; result?: { stdout?: string } };
+  codex_login: { ok: boolean; error?: string; error_hint?: string; result?: { stdout?: string } };
+  preflight?: {
+    ok: boolean;
+    checks?: Array<{ name: string; ok: boolean; message?: string }>;
+  };
+}> {
+  const res = await fetch(`${API_BASE}/v1/hosts/${encodeURIComponent(hostID)}/probe`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request ?? {})
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(`probe host failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
 export async function runFanout(token: string, request: RunRequest): Promise<{ status: number; body: RunResponse }> {
   const res = await fetch(`${API_BASE}/v1/run`, {
     method: "POST",
