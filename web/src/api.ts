@@ -247,7 +247,17 @@ export type CodexSessionTarget = {
   sessions?: CodexSessionInfo[];
 };
 
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8080";
+const ENV_API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
+const IS_DEV = import.meta.env.DEV;
+
+function defaultApiBase(): string {
+  if (ENV_API_BASE) return ENV_API_BASE;
+  if (IS_DEV) return "http://localhost:8080";
+  if (typeof window !== "undefined" && window.location?.origin) return window.location.origin;
+  return "";
+}
+
+export const API_BASE = defaultApiBase();
 
 function headers(token?: string): HeadersInit {
   const h: Record<string, string> = { "Content-Type": "application/json" };
