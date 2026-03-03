@@ -37,6 +37,8 @@ type Server struct {
 	cancelRq       map[string]bool
 	eventSeq       int64
 	eventBuffers   map[string][]runJobEvent
+	streamSubID    int64
+	streamSubs     map[string]map[int64]chan model.SessionEvent
 }
 
 type authIdentity struct {
@@ -57,6 +59,9 @@ const (
 	jobResultCanceled     = 499
 	maxJobEventBacklog    = 1600
 	maxChunkEventBytes    = 2048
+	sessionStreamBuffer   = 256
+	sessionStreamHB       = 12 * time.Second
+	sessionStreamBatch    = 1000
 )
 
 type runJobEvent struct {
@@ -81,6 +86,7 @@ func New(st *store.Store, rt *runtime.Registry) *Server {
 		cancels:        map[string]context.CancelFunc{},
 		cancelRq:       map[string]bool{},
 		eventBuffers:   map[string][]runJobEvent{},
+		streamSubs:     map[string]map[int64]chan model.SessionEvent{},
 		runViaSSH:      executor.RunViaSSH,
 		runRsyncViaSSH: executor.RunRsyncViaSSH,
 	}
@@ -106,6 +112,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
 	mux.Handle("GET /v1/jobs/{id}/events", s.withAuth(http.HandlerFunc(s.handleListRunJobEvents)))
 	mux.Handle("GET /v1/sessions/{id}/events", s.withAuth(http.HandlerFunc(s.handleListSessionEvents)))
+	mux.Handle("GET /v1/sessions/{id}/stream", s.withAuth(http.HandlerFunc(s.handleStreamSessionEvents)))
 	mux.Handle("POST /v1/jobs/{id}/cancel", s.withAuth(http.HandlerFunc(s.handleCancelRunJob)))
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
 	mux.Handle("GET /v1/codex/models", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexModels)))
@@ -134,7 +141,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 
 func setCORSHeaders(h http.Header) {
 	h.Set("Access-Control-Allow-Origin", "*")
-	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID")
 	h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 	h.Set("Access-Control-Max-Age", "86400")
 }
@@ -776,6 +783,135 @@ func (s *Server) handleListSessionEvents(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func (s *Server) handleStreamSessionEvents(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	if sessionID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session id"})
+		return
+	}
+	after := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("after")); raw != "" {
+		v, err := parseCursor(raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid after"})
+			return
+		}
+		after = v
+	}
+	if raw := strings.TrimSpace(r.Header.Get("Last-Event-ID")); raw != "" {
+		if v, err := parseCursor(raw); err == nil && v > after {
+			after = v
+		}
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "streaming not supported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	streamCh, unsubscribe := s.subscribeSessionStream(sessionID, sessionStreamBuffer)
+	defer unsubscribe()
+
+	lastSeq := after
+	for {
+		events := s.store.ListSessionEvents(sessionID, lastSeq, sessionStreamBatch)
+		if len(events) == 0 {
+			break
+		}
+		for _, event := range events {
+			if event.Seq <= lastSeq {
+				continue
+			}
+			if err := writeSSEEvent(w, flusher, "session.event", strconv.FormatInt(event.Seq, 10), event); err != nil {
+				return
+			}
+			lastSeq = event.Seq
+		}
+		if len(events) < sessionStreamBatch {
+			break
+		}
+	}
+
+	if err := writeSSEEvent(w, flusher, "session.ready", "", map[string]any{
+		"session_id": sessionID,
+		"cursor":     lastSeq,
+	}); err != nil {
+		return
+	}
+
+	ticker := time.NewTicker(sessionStreamHB)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-streamCh:
+			if !ok {
+				_ = writeSSEEvent(w, flusher, "session.reset", "", map[string]any{
+					"reason":     "backpressure",
+					"next_after": lastSeq,
+				})
+				return
+			}
+			if event.Seq <= lastSeq {
+				continue
+			}
+			if err := writeSSEEvent(w, flusher, "session.event", strconv.FormatInt(event.Seq, 10), event); err != nil {
+				return
+			}
+			lastSeq = event.Seq
+		case now := <-ticker.C:
+			if err := writeSSEEvent(w, flusher, "heartbeat", "", map[string]any{
+				"session_id": sessionID,
+				"cursor":     lastSeq,
+				"timestamp":  now.UTC(),
+			}); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func parseCursor(raw string) (int64, error) {
+	v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || v < 0 {
+		return 0, errors.New("invalid cursor")
+	}
+	return v, nil
+}
+
+func writeSSEEvent(w io.Writer, flusher http.Flusher, eventType string, eventID string, payload any) error {
+	if eventID != "" {
+		if _, err := fmt.Fprintf(w, "id: %s\n", eventID); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(eventType) != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", strings.TrimSpace(eventType)); err != nil {
+			return err
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if _, err := fmt.Fprintf(w, "data: %s\n", line); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(w, "\n"); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
 func (s *Server) handleCancelRunJob(w http.ResponseWriter, r *http.Request) {
 	jobID := strings.TrimSpace(r.PathValue("id"))
 	if jobID == "" {
@@ -1066,13 +1202,86 @@ func (s *Server) appendSessionEventForJob(job model.RunJobRecord, event runJobEv
 	if err != nil {
 		return
 	}
-	_, _ = s.store.AppendSessionEvent(model.SessionEvent{
+	persisted, err := s.store.AppendSessionEvent(model.SessionEvent{
 		SessionID: sessionID,
 		RunID:     strings.TrimSpace(job.ID),
 		Type:      strings.TrimSpace(event.Type),
 		Payload:   payload,
 		CreatedAt: event.CreatedAt,
 	})
+	if err != nil {
+		return
+	}
+	s.publishSessionEvent(persisted)
+}
+
+func (s *Server) subscribeSessionStream(sessionID string, buffer int) (<-chan model.SessionEvent, func()) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		ch := make(chan model.SessionEvent)
+		close(ch)
+		return ch, func() {}
+	}
+	if buffer <= 0 {
+		buffer = sessionStreamBuffer
+	}
+	sub := make(chan model.SessionEvent, buffer)
+	s.mu.Lock()
+	if s.streamSubs == nil {
+		s.streamSubs = map[string]map[int64]chan model.SessionEvent{}
+	}
+	s.streamSubID++
+	subID := s.streamSubID
+	if s.streamSubs[sessionID] == nil {
+		s.streamSubs[sessionID] = map[int64]chan model.SessionEvent{}
+	}
+	s.streamSubs[sessionID][subID] = sub
+	s.mu.Unlock()
+
+	var once sync.Once
+	return sub, func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			bySession := s.streamSubs[sessionID]
+			if bySession == nil {
+				return
+			}
+			ch, ok := bySession[subID]
+			if !ok {
+				return
+			}
+			delete(bySession, subID)
+			close(ch)
+			if len(bySession) == 0 {
+				delete(s.streamSubs, sessionID)
+			}
+		})
+	}
+}
+
+func (s *Server) publishSessionEvent(event model.SessionEvent) {
+	sessionID := strings.TrimSpace(event.SessionID)
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bySession := s.streamSubs[sessionID]
+	if len(bySession) == 0 {
+		return
+	}
+	for subID, sub := range bySession {
+		select {
+		case sub <- event:
+		default:
+			close(sub)
+			delete(bySession, subID)
+		}
+	}
+	if len(bySession) == 0 {
+		delete(s.streamSubs, sessionID)
+	}
 }
 
 func (s *Server) listRunJobEvents(jobID string, afterSeq int64, limit int) ([]runJobEvent, int64) {
@@ -2504,6 +2713,12 @@ func (rw *responseCapture) Write(p []byte) (int, error) {
 	return rw.ResponseWriter.Write(p)
 }
 
+func (rw *responseCapture) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func (s *Server) requestLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now().UTC()
@@ -2551,6 +2766,8 @@ func inferAction(method string, path string) string {
 		return "job.events.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/sessions/") && strings.HasSuffix(path, "/events"):
 		return "session.events.list"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v1/sessions/") && strings.HasSuffix(path, "/stream"):
+		return "session.stream.open"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/"):
 		return "job.get"
 	case method == http.MethodPost && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/cancel"):

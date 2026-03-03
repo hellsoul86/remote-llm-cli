@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -232,6 +234,139 @@ func TestSessionEventsEndpointFromRunJob(t *testing.T) {
 	}
 	if len(cursorResp.Events) != 0 {
 		t.Fatalf("expected no events after latest cursor, got=%d", len(cursorResp.Events))
+	}
+}
+
+func TestSessionSSEStreamResumesFromLastEventID(t *testing.T) {
+	srv, httpSrv, token, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_sse_resume"
+	first, err := srv.store.AppendSessionEvent(model.SessionEvent{
+		SessionID: sessionID,
+		RunID:     "job_resume",
+		Type:      "run.started",
+		Payload:   json.RawMessage(`{"status":"running"}`),
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("append first session event: %v", err)
+	}
+	second, err := srv.store.AppendSessionEvent(model.SessionEvent{
+		SessionID: sessionID,
+		RunID:     "job_resume",
+		Type:      "assistant.completed",
+		Payload:   json.RawMessage(`{"text":"ok"}`),
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("append second session event: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/sessions/%s/stream", httpSrv.URL, sessionID),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new stream request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Last-Event-ID", strconv.FormatInt(first.Seq, 10))
+	res, err := httpSrv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("stream status=%d want=200", res.StatusCode)
+	}
+
+	reader := bufio.NewReader(res.Body)
+	event := readSSEMessage(t, reader, 2*time.Second)
+	if event.Event != "session.event" {
+		t.Fatalf("event=%q want=session.event payload=%q", event.Event, event.Data)
+	}
+	if event.ID != strconv.FormatInt(second.Seq, 10) {
+		t.Fatalf("event id=%q want=%d", event.ID, second.Seq)
+	}
+	var payload model.SessionEvent
+	if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
+		t.Fatalf("decode stream event payload: %v", err)
+	}
+	if payload.Seq != second.Seq || payload.SessionID != sessionID {
+		t.Fatalf("unexpected event payload: %#v", payload)
+	}
+}
+
+func TestSessionSSEStreamReceivesLivePublish(t *testing.T) {
+	srv, httpSrv, token, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_sse_live"
+	base, err := srv.store.AppendSessionEvent(model.SessionEvent{
+		SessionID: sessionID,
+		RunID:     "job_live_seed",
+		Type:      "run.started",
+		Payload:   json.RawMessage(`{"seed":true}`),
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("append seed event: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/sessions/%s/stream?after=%d", httpSrv.URL, sessionID, base.Seq),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new stream request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	res, err := httpSrv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("stream status=%d want=200", res.StatusCode)
+	}
+
+	reader := bufio.NewReader(res.Body)
+	ready := readSSEMessage(t, reader, 2*time.Second)
+	if ready.Event != "session.ready" {
+		t.Fatalf("event=%q want=session.ready payload=%q", ready.Event, ready.Data)
+	}
+
+	srv.appendSessionEventForJob(
+		model.RunJobRecord{ID: "job_live_emit", SessionID: sessionID},
+		runJobEvent{
+			Type:      "assistant.delta",
+			Chunk:     "hello-stream",
+			CreatedAt: time.Now().UTC(),
+		},
+	)
+
+	event := readSSEMessage(t, reader, 2*time.Second)
+	if event.Event != "session.event" {
+		t.Fatalf("event=%q want=session.event payload=%q", event.Event, event.Data)
+	}
+	var payload model.SessionEvent
+	if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
+		t.Fatalf("decode stream event payload: %v", err)
+	}
+	if payload.SessionID != sessionID {
+		t.Fatalf("session_id=%q want=%q", payload.SessionID, sessionID)
+	}
+	if payload.Type != "assistant.delta" {
+		t.Fatalf("event type=%q want=assistant.delta", payload.Type)
 	}
 }
 
@@ -508,4 +643,66 @@ func waitJobTerminal(t *testing.T, httpSrv *httptest.Server, token string, jobID
 	_ = doJSON(t, httpSrv.Client(), http.MethodGet, fmt.Sprintf("%s/v1/jobs/%s", httpSrv.URL, jobID), token, nil, &out)
 	t.Fatalf("job did not reach terminal state, current=%q", out.Job.Status)
 	return model.RunJobRecord{}
+}
+
+type sseMessage struct {
+	ID    string
+	Event string
+	Data  string
+}
+
+func readSSEMessage(t *testing.T, reader *bufio.Reader, timeout time.Duration) sseMessage {
+	t.Helper()
+	type result struct {
+		msg sseMessage
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var msg sseMessage
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				done <- result{err: err}
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if line == "" {
+				if msg.Event != "" || msg.Data != "" || msg.ID != "" {
+					done <- result{msg: msg}
+					return
+				}
+				continue
+			}
+			if strings.HasPrefix(line, ":") {
+				continue
+			}
+			if strings.HasPrefix(line, "id:") {
+				msg.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+				continue
+			}
+			if strings.HasPrefix(line, "event:") {
+				msg.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				continue
+			}
+			if strings.HasPrefix(line, "data:") {
+				part := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				if msg.Data == "" {
+					msg.Data = part
+				} else {
+					msg.Data += "\n" + part
+				}
+			}
+		}
+	}()
+	select {
+	case out := <-done:
+		if out.err != nil {
+			t.Fatalf("read sse message: %v", out.err)
+		}
+		return out.msg
+	case <-time.After(timeout):
+		t.Fatalf("timed out reading sse message")
+		return sseMessage{}
+	}
 }
