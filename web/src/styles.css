@@ -179,6 +179,42 @@ pre {
   gap: 12px;
 }
 
+.session-alert-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 30;
+  display: grid;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 24px));
+}
+
+.session-alert {
+  display: grid;
+  gap: 4px;
+  border-radius: 12px;
+  border: 1px solid #d6c69f;
+  background: #fff8ea;
+  color: #3c2b0f;
+  padding: 10px 12px;
+  box-shadow: var(--shadow-soft);
+  text-align: left;
+}
+
+.session-alert:hover {
+  background: #fff2d4;
+  transform: none;
+}
+
+.session-alert strong {
+  font-size: 0.83rem;
+}
+
+.session-alert span {
+  font-size: 0.75rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
 .app-topbar {
   border-radius: 18px;
   border: 1px solid #cbdbec;
@@ -292,7 +328,7 @@ pre {
 .session-stage {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(580px, 1fr) 320px;
+  grid-template-columns: 320px minmax(580px, 1fr);
   gap: 12px;
 }
 
@@ -535,6 +571,10 @@ button.ghost.danger-ghost:hover {
   padding-bottom: 2px;
 }
 
+.workspace-list {
+  max-height: 220px;
+}
+
 .thread-chip {
   min-width: 124px;
   padding: 7px 10px;
@@ -675,6 +715,18 @@ button.ghost.danger-ghost:hover {
   padding: 6px 10px;
   font-size: 0.73rem;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.file-chip {
+  position: relative;
+  overflow: hidden;
+}
+
+.file-chip input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .shortcut-hint {
@@ -911,7 +963,7 @@ button.ghost.danger-ghost:hover {
 
 @media (max-width: 1320px) {
   .session-stage {
-    grid-template-columns: minmax(460px, 1fr) 300px;
+    grid-template-columns: 300px minmax(460px, 1fr);
   }
 
   .ops-stage {

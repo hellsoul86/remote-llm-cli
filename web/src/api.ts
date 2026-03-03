@@ -338,6 +338,21 @@ export async function probeHost(
   return body;
 }
 
+export async function uploadImage(token: string, file: File): Promise<{ path: string; name: string; bytes: number }> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/v1/files/images`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: form
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.path) {
+    throw new Error(`upload image failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
 export async function runFanout(token: string, request: RunRequest): Promise<{ status: number; body: RunResponse }> {
   const res = await fetch(`${API_BASE}/v1/run`, {
     method: "POST",

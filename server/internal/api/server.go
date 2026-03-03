@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,6 +89,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
 	mux.Handle("POST /v1/codex/sessions/discover", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexSessions)))
 	mux.Handle("POST /v1/codex/sessions/cleanup", s.withAuth(http.HandlerFunc(s.handleCleanupCodexSessions)))
+	mux.Handle("POST /v1/files/images", s.withAuth(http.HandlerFunc(s.handleUploadImage)))
 	mux.Handle("GET /v1/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
 	mux.Handle("GET /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleGetRetentionPolicy)))
 	mux.Handle("POST /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleSetRetentionPolicy)))
@@ -1572,6 +1574,54 @@ func probeTargetPayload(err error, res executor.ExecResult) map[string]any {
 	}
 }
 
+func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(20 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid multipart form"})
+		return
+	}
+	f, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing file"})
+		return
+	}
+	defer f.Close()
+
+	baseName := filepath.Base(strings.TrimSpace(header.Filename))
+	if baseName == "" || baseName == "." || baseName == string(filepath.Separator) {
+		baseName = "image.bin"
+	}
+	baseName = strings.ReplaceAll(baseName, " ", "_")
+	baseName = strings.ReplaceAll(baseName, string(filepath.Separator), "_")
+	baseName = strings.ReplaceAll(baseName, "/", "_")
+
+	uploadDir := filepath.Join(os.TempDir(), "remote-llm-cli", "uploads")
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to prepare upload dir"})
+		return
+	}
+
+	dstPath := filepath.Join(uploadDir, fmt.Sprintf("img_%d_%s", time.Now().UTC().UnixNano(), baseName))
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to create upload file"})
+		return
+	}
+	defer dst.Close()
+
+	n, err := io.Copy(dst, f)
+	if err != nil {
+		_ = os.Remove(dstPath)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to write upload file"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":  dstPath,
+		"name":  baseName,
+		"bytes": n,
+	})
+}
+
 type runTargetResult struct {
 	Host       model.Host          `json:"host"`
 	Result     executor.ExecResult `json:"result"`
@@ -1904,6 +1954,8 @@ func inferAction(method string, path string) string {
 		return "codex.sessions.discover"
 	case method == http.MethodPost && path == "/v1/codex/sessions/cleanup":
 		return "codex.sessions.cleanup"
+	case method == http.MethodPost && path == "/v1/files/images":
+		return "files.image.upload"
 	case method == http.MethodGet && path == "/v1/metrics":
 		return "metrics.get"
 	case method == http.MethodGet && path == "/v1/admin/retention":

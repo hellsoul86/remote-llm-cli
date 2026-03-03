@@ -14,6 +14,7 @@ import {
   listRuntimes,
   probeHost,
   runFanout,
+  uploadImage,
   upsertHost,
   type Host,
   type RunJobRecord,
@@ -31,6 +32,13 @@ type AppMode = "session" | "ops";
 type QuickCommand = {
   label: string;
   template: string;
+};
+
+type SessionAlert = {
+  id: string;
+  threadID: string;
+  title: string;
+  body: string;
 };
 
 const QUICK_COMMANDS: QuickCommand[] = [
@@ -135,14 +143,10 @@ export function App() {
     setRunSandbox,
     runAsyncMode,
     setRunAsyncMode,
-    workdir,
-    setWorkdir,
     fanoutValue,
     setFanoutValue,
     maxOutputKB,
     setMaxOutputKB,
-    isSubmitting,
-    setIsSubmitting,
     isRefreshing,
     setIsRefreshing,
     activeJobID,
@@ -175,9 +179,20 @@ export function App() {
   } = ops;
 
   const {
+    workspaces,
+    activeWorkspace,
+    activeWorkspaceID,
+    setActiveWorkspaceID,
+    workspacePathDraft,
+    setWorkspacePathDraft,
+    workspaceAddDraft,
+    setWorkspaceAddDraft,
+    addWorkspace,
+    updateActiveWorkspacePath,
     threads,
     activeThreadID,
     setActiveThreadID,
+    activateThread,
     threadRenameDraft,
     setThreadRenameDraft,
     activeJobThreadID,
@@ -191,8 +206,23 @@ export function App() {
     createThread,
     renameThread,
     switchThreadByOffset,
+    setThreadModel,
+    setThreadSandbox,
+    addThreadImagePath,
+    removeThreadImagePath,
+    setThreadJobState,
+    setThreadUnread,
+    runningThreadJobs,
     resetSessionDomain
   } = session;
+
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
+    typeof Notification === "undefined" ? "denied" : Notification.permission
+  );
+  const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
+  const [submittingThreadID, setSubmittingThreadID] = useState("");
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [imageUploadError, setImageUploadError] = useState("");
 
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
   const composerFormRef = useRef<HTMLFormElement | null>(null);
@@ -203,6 +233,25 @@ export function App() {
     [runtimes, selectedRuntime]
   );
   const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
+  const threadWorkspaceMap = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const workspace of workspaces) {
+      for (const thread of workspace.sessions) {
+        out.set(thread.id, workspace.id);
+      }
+    }
+    return out;
+  }, [workspaces]);
+  const threadTitleMap = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const workspace of workspaces) {
+      for (const thread of workspace.sessions) {
+        out.set(thread.id, thread.title);
+      }
+    }
+    return out;
+  }, [workspaces]);
+  const activeThreadBusy = Boolean(activeThread?.activeJobID) || (activeThread ? submittingThreadID === activeThread.id : false);
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -259,10 +308,60 @@ export function App() {
     promptInputRef.current?.focus();
   }
 
+  function notifySessionDone(title: string, body: string) {
+    if (typeof Notification === "undefined") return;
+    if (notificationPermission !== "granted") return;
+    try {
+      const note = new Notification(title, { body, silent: false });
+      window.setTimeout(() => note.close(), 6000);
+    } catch {
+      // Notification failures are non-fatal for session completion flow.
+    }
+  }
+
+  function pushSessionAlert(alert: Omit<SessionAlert, "id">) {
+    const id = `alert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const next: SessionAlert = { id, ...alert };
+    setSessionAlerts((prev) => [...prev, next]);
+    window.setTimeout(() => {
+      setSessionAlerts((prev) => prev.filter((item) => item.id !== id));
+    }, 7000);
+  }
+
+  function openSessionFromAlert(alert: SessionAlert) {
+    if (threadWorkspaceMap.has(alert.threadID)) {
+      activateThread(alert.threadID);
+      switchMode("session");
+    }
+    setSessionAlerts((prev) => prev.filter((item) => item.id !== alert.id));
+  }
+
+  async function onEnableNotifications() {
+    if (typeof Notification === "undefined") {
+      setNotificationPermission("denied");
+      return;
+    }
+    const result = await Notification.requestPermission();
+    setNotificationPermission(result);
+  }
+
+  async function ensureLocalCodexHost(authToken: string, currentHosts: Host[]): Promise<Host[]> {
+    if (currentHosts.some((host) => host.connection_mode === "local")) {
+      return currentHosts;
+    }
+    await upsertHost(authToken, {
+      name: "local-default",
+      connection_mode: "local",
+      host: "localhost",
+      workspace: activeWorkspace?.path?.trim() || "/home/ecs-user"
+    });
+    return listHosts(authToken);
+  }
+
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
     setIsRefreshing(true);
     try {
-      const [healthBody, nextHosts, nextRuntimes, nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
+      const [healthBody, fetchedHosts, nextRuntimes, nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
         healthz(),
         listHosts(authToken),
         listRuntimes(authToken),
@@ -271,6 +370,7 @@ export function App() {
         listAudit(authToken, 80),
         getMetrics(authToken)
       ]);
+      const nextHosts = await ensureLocalCodexHost(authToken, fetchedHosts);
 
       setHealth(`ok ${healthBody.timestamp}`);
       setHosts(nextHosts);
@@ -280,8 +380,22 @@ export function App() {
       setAuditEvents(nextAudit);
       setMetrics(nextMetrics);
 
-      setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((host) => host.id === id)));
-      if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
+      const localHost = nextHosts.find((host) => host.connection_mode === "local");
+      if (localHost) {
+        setAllHosts(false);
+        setSelectedHostIDs([localHost.id]);
+      } else {
+        setSelectedHostIDs((prev) => {
+          const nextSelected = prev.filter((id) => nextHosts.some((host) => host.id === id));
+          if (nextSelected.length > 0) return nextSelected;
+          if (nextHosts.length > 0) return [nextHosts[0].id];
+          return [];
+        });
+      }
+      const codexRuntime = nextRuntimes.find((runtime) => runtime.name === "codex");
+      if (codexRuntime) {
+        setSelectedRuntime("codex");
+      } else if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
 
@@ -376,6 +490,24 @@ export function App() {
   }, [activeTimeline.length, activeThreadID]);
 
   useEffect(() => {
+    if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
+    if (!activeThread?.activeJobID) {
+      setActiveJobID("");
+      setActiveJob(null);
+      return;
+    }
+    void getRunJob(token, activeThread.activeJobID)
+      .then((job) => {
+        setActiveJobID(job.id);
+        setActiveJob(job);
+      })
+      .catch(() => {
+        setActiveJobID("");
+        setActiveJob(null);
+      });
+  }, [appMode, authPhase, token, activeThread?.id, activeThread?.activeJobID]);
+
+  useEffect(() => {
     if (authPhase !== "ready") return;
 
     const handleGlobalKeydown = (event: KeyboardEvent) => {
@@ -412,28 +544,57 @@ export function App() {
   }, [authPhase, appMode, threads, activeThreadID]);
 
   useEffect(() => {
-    if (authPhase !== "ready" || !token.trim() || !activeJobID) return;
+    if (authPhase !== "ready" || !token.trim()) return;
+    if (runningThreadJobs.length === 0) return;
 
     let canceled = false;
-    const pollIntervalMs = appMode === "session" ? 1800 : 3000;
-    const timer = window.setInterval(async () => {
+    const poll = async () => {
       try {
-        const [job, nextJobs, nextMetrics] = await Promise.all([
-          getRunJob(token, activeJobID),
-          listRunJobs(token, 20),
-          getMetrics(token)
-        ]);
-
+        const jobResults = await Promise.all(
+          runningThreadJobs.map(async (item) => {
+            try {
+              const job = await getRunJob(token, item.jobID);
+              return { item, job, error: "" };
+            } catch (error) {
+              return { item, job: null as RunJobRecord | null, error: String(error) };
+            }
+          })
+        );
         if (canceled) return;
-        setActiveJob(job);
-        setJobs(nextJobs);
-        setMetrics(nextMetrics);
 
-        if (!isJobActive(job)) {
-          setActiveJobID("");
-          setIsSubmitting(false);
+        for (const result of jobResults) {
+          const { item, job, error } = result;
+          if (!job) {
+            addTimelineEntry(
+              {
+                kind: "system",
+                state: "error",
+                title: "Job Poll Failed",
+                body: error
+              },
+              item.threadID
+            );
+            setThreadJobState(item.threadID, "", "failed");
+            continue;
+          }
 
-          const targetThreadID = activeJobThreadID || activeThreadID;
+          if (item.threadID === activeThreadID) {
+            setActiveJob(job);
+            setActiveJobID(job.id);
+          }
+
+          if (isJobActive(job)) {
+            setThreadJobState(item.threadID, job.id, "running");
+            continue;
+          }
+
+          const terminalStatus =
+            job.status === "succeeded" || job.status === "failed" || job.status === "canceled" ? job.status : "failed";
+          setThreadJobState(item.threadID, "", terminalStatus);
+          if (item.threadID !== activeThreadID) {
+            setThreadUnread(item.threadID, true);
+          }
+
           if (!completedJobsRef.current.has(job.id)) {
             completedJobsRef.current.add(job.id);
             if (isRunResponsePayload(job.response)) {
@@ -444,7 +605,7 @@ export function App() {
                   title: `Job ${job.id} ${job.status}`,
                   body: summarizeRunResponse(job.response)
                 },
-                targetThreadID
+                item.threadID
               );
             } else {
               addTimelineEntry(
@@ -454,39 +615,45 @@ export function App() {
                   title: `Job ${job.id} ${job.status}`,
                   body: job.error ? String(job.error) : `runtime=${job.runtime} status=${job.status}`
                 },
-                targetThreadID
+                item.threadID
               );
             }
+            const sessionTitle = threadTitleMap.get(item.threadID) ?? "Session";
+            notifySessionDone(`Codex ${job.status}`, `${sessionTitle}: ${job.id}`);
+            pushSessionAlert({
+              threadID: item.threadID,
+              title: `${sessionTitle} finished`,
+              body: `job=${job.id} status=${job.status}`
+            });
           }
-
-          const [nextRuns, nextAudit, refreshedMetrics] = await Promise.all([listRuns(token, 20), listAudit(token, 80), getMetrics(token)]);
-          if (canceled) return;
-          setRuns(nextRuns);
-          setAuditEvents(nextAudit);
-          setMetrics(refreshedMetrics);
-          setActiveJobThreadID(activeThreadID);
         }
-      } catch (error) {
+
+        const [nextJobs, nextRuns, nextAudit, refreshedMetrics] = await Promise.all([
+          listRunJobs(token, 20),
+          listRuns(token, 20),
+          listAudit(token, 80),
+          getMetrics(token)
+        ]);
         if (canceled) return;
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Job Poll Failed",
-            body: String(error)
-          },
-          activeJobThreadID || activeThreadID
-        );
-        setActiveJobID("");
-        setIsSubmitting(false);
+        setJobs(nextJobs);
+        setRuns(nextRuns);
+        setAuditEvents(nextAudit);
+        setMetrics(refreshedMetrics);
+      } catch {
+        if (canceled) return;
       }
-    }, pollIntervalMs);
+    };
+
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 2100);
 
     return () => {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, activeJobID, activeJobThreadID, activeThreadID, appMode]);
+  }, [authPhase, token, runningThreadJobs, activeThreadID, threadTitleMap]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
@@ -543,6 +710,8 @@ export function App() {
     localStorage.removeItem(TOKEN_KEY);
     resetOpsDomain();
     resetSessionDomain();
+    setSubmittingThreadID("");
+    setSessionAlerts([]);
     setToken("");
     setTokenInput("");
     setAuthError("");
@@ -565,6 +734,18 @@ export function App() {
   async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    if (activeThread.activeJobID || submittingThreadID === activeThread.id) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "running",
+          title: "Session Busy",
+          body: "This session already has a running job. Switch to another session or wait for completion."
+        },
+        activeThread.id
+      );
+      return;
+    }
 
     const trimmedPrompt = activeThread.draft.trim();
     if (!trimmedPrompt) {
@@ -572,36 +753,58 @@ export function App() {
       return;
     }
 
-    if (!allHosts && selectedHostIDs.length === 0) {
+    const localHostIDs = hosts.filter((host) => host.connection_mode === "local").map((host) => host.id);
+    const targetHostIDs =
+      selectedHostIDs.length > 0 ? selectedHostIDs : localHostIDs.length > 0 ? localHostIDs : hosts.length > 0 ? [hosts[0].id] : [];
+    if (targetHostIDs.length === 0) {
       addTimelineEntry(
         {
           kind: "system",
           state: "error",
           title: "No Target Host",
-          body: "Select at least one host or switch to all-host mode."
+          body: "No local host found. Add a local host first."
         },
         activeThread.id
       );
       return;
     }
 
+    const selectedHosts = hosts.filter((host) => targetHostIDs.includes(host.id));
+    const hasNonLocalTarget = selectedHosts.some((host) => host.connection_mode !== "local");
+    const safeImagePaths = hasNonLocalTarget ? [] : activeThread.imagePaths;
+    if (hasNonLocalTarget && activeThread.imagePaths.length > 0) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "running",
+          title: "Image Attachment Skipped",
+          body: "Image attachments are only applied to local-mode targets."
+        },
+        activeThread.id
+      );
+    }
+
     const fanout = Math.max(1, Number.parseInt(fanoutValue, 10) || 1);
     const outputCap = Math.max(32, Number.parseInt(maxOutputKB, 10) || 256);
+    const effectiveModel = activeThread.model.trim() || runModel.trim() || undefined;
+    const effectiveSandbox = activeThread.sandbox || runSandbox || "workspace-write";
+    const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
 
     const request: RunRequest = {
       runtime: activeRuntime?.name ?? selectedRuntime,
       prompt: trimmedPrompt,
-      all_hosts: allHosts,
-      host_ids: allHosts ? undefined : selectedHostIDs,
-      workdir: workdir.trim() || undefined,
+      all_hosts: false,
+      host_ids: targetHostIDs,
+      workdir: effectiveWorkdir,
       fanout,
       max_output_kb: outputCap,
       codex:
         (activeRuntime?.name ?? selectedRuntime) === "codex"
           ? {
               mode: runMode,
-              model: runModel.trim() || undefined,
-              sandbox: runSandbox || undefined,
+              model: effectiveModel,
+              sandbox: effectiveSandbox,
+              images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
               json_output: true,
               skip_git_repo_check: false,
               ephemeral: false
@@ -613,19 +816,21 @@ export function App() {
       {
         kind: "user",
         title: `Run ${request.runtime}`,
-        body: `${trimmedPrompt}\n\nmode=${runMode} async=${String(runAsyncMode)} hosts=${allHosts ? "all" : selectedHostIDs.join(",")}`
+        body: `${trimmedPrompt}\n\nmode=${runMode} async=${String(runAsyncMode)} hosts=${targetHostIDs.join(",")} workdir=${effectiveWorkdir ?? "-"} model=${effectiveModel ?? "-"} sandbox=${effectiveSandbox}`
       },
       activeThread.id
     );
 
-    setIsSubmitting(true);
+    setSubmittingThreadID(activeThread.id);
     try {
       if (runAsyncMode) {
         const { body } = await enqueueRunJob(token, request);
         setActiveJobID(body.job.id);
         setActiveJobThreadID(activeThread.id);
         setActiveJob(body.job);
+        setThreadJobState(activeThread.id, body.job.id, "running");
         setJobs((prev) => [body.job, ...prev.filter((job) => job.id !== body.job.id)]);
+        setSubmittingThreadID("");
         addTimelineEntry(
           {
             kind: "system",
@@ -657,11 +862,13 @@ export function App() {
         setJobs(nextJobs);
         setAuditEvents(nextAudit);
         setMetrics(nextMetrics);
-        setIsSubmitting(false);
+        setThreadJobState(activeThread.id, "", status >= 400 ? "failed" : "succeeded");
+        setSubmittingThreadID("");
       }
     } catch (error) {
       addTimelineEntry({ kind: "system", state: "error", title: "Run Failed", body: String(error) }, activeThread.id);
-      setIsSubmitting(false);
+      setThreadJobState(activeThread.id, "", "failed");
+      setSubmittingThreadID("");
     }
   }
 
@@ -776,6 +983,10 @@ export function App() {
     }
     try {
       await cancelRunJob(token, job.id);
+      const related = runningThreadJobs.find((item) => item.jobID === job.id);
+      if (related) {
+        setThreadJobState(related.threadID, "", "canceled");
+      }
       setOpsNotice(`Cancel requested for ${job.id}.`);
       await loadWorkspace(token, false);
     } catch (error) {
@@ -787,6 +998,30 @@ export function App() {
     event.preventDefault();
     if (!activeThread) return;
     renameThread(activeThread.id, threadRenameDraft);
+  }
+
+  function onSaveWorkspacePath(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    updateActiveWorkspacePath(workspacePathDraft);
+  }
+
+  function onAddWorkspace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    addWorkspace(workspaceAddDraft);
+  }
+
+  async function onUploadSessionImage(file: File) {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    setUploadingImage(true);
+    setImageUploadError("");
+    try {
+      const uploaded = await uploadImage(token, file);
+      addThreadImagePath(activeThread.id, uploaded.path);
+    } catch (error) {
+      setImageUploadError(String(error));
+    } finally {
+      setUploadingImage(false);
+    }
   }
 
   if (authPhase !== "ready") {
@@ -848,17 +1083,52 @@ export function App() {
 
       {appMode === "session" ? (
         <div className="session-stage">
-          <main className="chat-pane">
-            <header className="chat-head">
-              <div>
-                <p className="pane-eyebrow">focused session</p>
-                <h1>{activeRuntime?.name ?? "codex"} conversation workspace</h1>
+          <aside className="session-side codex-sidebar">
+            <section className="inspect-block focus-block">
+              <h3>Directories</h3>
+              <form className="thread-rename-form" onSubmit={onSaveWorkspacePath}>
+                <input
+                  value={workspacePathDraft}
+                  onChange={(event) => setWorkspacePathDraft(event.target.value)}
+                  placeholder="/absolute/workdir"
+                />
+                <button type="submit">Set Path</button>
+              </form>
+              <div className="thread-list workspace-list">
+                {workspaces.map((workspace) => (
+                  <button
+                    key={workspace.id}
+                    type="button"
+                    className={`thread-chip ${workspace.id === activeWorkspaceID ? "active" : ""}`}
+                    onClick={() => {
+                      setActiveWorkspaceID(workspace.id);
+                      setWorkspacePathDraft(workspace.path);
+                    }}
+                    title={workspace.path}
+                  >
+                    <span>{workspace.path}</span>
+                    <small>{workspace.sessions.length}</small>
+                  </button>
+                ))}
               </div>
-              <p className={`chat-health ${healthIsError ? "is-error" : ""}`}>health: {health}</p>
-            </header>
+              <form className="thread-rename-form" onSubmit={onAddWorkspace}>
+                <input
+                  value={workspaceAddDraft}
+                  onChange={(event) => setWorkspaceAddDraft(event.target.value)}
+                  placeholder="add another workdir"
+                />
+                <button type="submit">Add</button>
+              </form>
+            </section>
 
-            <section className="thread-bar">
-              <div className="thread-list">
+            <section className="inspect-block">
+              <div className="pane-title-line">
+                <h3>Sessions</h3>
+                <button type="button" className="ghost new-thread" onClick={createThreadAndFocus}>
+                  New
+                </button>
+              </div>
+              <div className="thread-list workspace-list">
                 {threads.map((thread) => (
                   <button
                     key={thread.id}
@@ -867,15 +1137,62 @@ export function App() {
                     onClick={() => setActiveThreadID(thread.id)}
                     title={`${thread.title} (${thread.timeline.length} messages)`}
                   >
-                    <span>{thread.title}</span>
-                    <small>{thread.timeline.length}</small>
+                    <span>{thread.activeJobID ? `● ${thread.title}` : thread.unreadDone ? `* ${thread.title}` : thread.title}</span>
+                    <small>
+                      {thread.activeJobID
+                        ? "running"
+                        : thread.unreadDone
+                          ? "done"
+                          : thread.lastJobStatus === "idle"
+                            ? thread.timeline.length
+                            : thread.lastJobStatus}
+                    </small>
                   </button>
                 ))}
               </div>
-              <button type="button" className="ghost new-thread" onClick={createThreadAndFocus}>
-                New Thread
+              <form className="thread-rename-form" onSubmit={onRenameActiveThread}>
+                <input
+                  value={threadRenameDraft}
+                  onChange={(event) => setThreadRenameDraft(event.target.value)}
+                  placeholder="session name"
+                  maxLength={48}
+                />
+                <button type="submit">Rename</button>
+              </form>
+              <button type="button" className="ghost" onClick={() => void onEnableNotifications()}>
+                Alerts: {notificationPermission}
               </button>
             </section>
+
+            <section className="inspect-block">
+              <h3>Session Context</h3>
+              <ul className="metric-list metric-list-light">
+                <li>workdir={activeWorkspace?.path ?? "-"}</li>
+                <li>session={activeThread?.title ?? "-"}</li>
+                <li>sessions={threads.length}</li>
+                <li>targets={selectedHostCount}</li>
+                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
+              </ul>
+              <ul className="session-keymap">
+                <li>Ctrl/Cmd + K: focus prompt</li>
+                <li>Ctrl/Cmd + Shift + N: new session</li>
+                <li>Ctrl/Cmd + Shift + [ or ArrowUp: previous session</li>
+                <li>Ctrl/Cmd + Shift + ] or ArrowDown: next session</li>
+              </ul>
+              <button type="button" className="ghost" onClick={() => switchMode("ops")}>
+                Open Remote Ops
+              </button>
+            </section>
+          </aside>
+
+          <main className="chat-pane">
+            <header className="chat-head">
+              <div>
+                <p className="pane-eyebrow">local-first codex session</p>
+                <h1>{activeThread?.title ?? "Session"} · {activeWorkspace?.path ?? "/home/ecs-user"}</h1>
+              </div>
+              <p className={`chat-health ${healthIsError ? "is-error" : ""}`}>health: {health}</p>
+            </header>
 
             <section className="timeline" aria-live="polite">
               {activeTimeline.length === 0 ? (
@@ -885,8 +1202,8 @@ export function App() {
                   </div>
                   <pre>
                     {isRefreshing
-                      ? "Loading remote state and runtime capability snapshot..."
-                      : "Send your first instruction to start a distributed codex run."}
+                      ? "Loading local codex runtime and background session state..."
+                      : "Start chatting with codex. Non-active sessions continue syncing in background."}
                   </pre>
                 </article>
               ) : (
@@ -907,7 +1224,7 @@ export function App() {
               <div className="session-strip">
                 <span>runtime={activeRuntime?.name ?? selectedRuntime}</span>
                 <span>mode={runMode}</span>
-                <span>hosts={allHosts ? "all" : selectedHostIDs.length}</span>
+                <span>workdir={activeWorkspace?.path ?? "-"}</span>
                 <span>async={String(runAsyncMode)}</span>
               </div>
 
@@ -917,7 +1234,61 @@ export function App() {
                     {command.label}
                   </button>
                 ))}
-                <span className="shortcut-hint">Ctrl/Cmd+K focus, Ctrl/Cmd+Shift+N new thread</span>
+                <span className="shortcut-hint">Ctrl/Cmd+K focus, Ctrl/Cmd+Shift+N new session</span>
+              </div>
+
+              <div className="composer-controls">
+                <select value={runMode} onChange={(event) => setRunMode(event.target.value as "exec" | "resume" | "review")}>
+                  <option value="exec">exec</option>
+                  <option value="resume">resume</option>
+                  <option value="review">review</option>
+                </select>
+                <input
+                  value={activeThread?.model ?? ""}
+                  onChange={(event) => activeThread && setThreadModel(activeThread.id, event.target.value)}
+                  placeholder="model"
+                />
+                <select
+                  value={activeThread?.sandbox ?? "workspace-write"}
+                  onChange={(event) =>
+                    activeThread &&
+                    setThreadSandbox(activeThread.id, event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                  }
+                >
+                  <option value="read-only">read-only</option>
+                  <option value="workspace-write">workspace-write</option>
+                  <option value="danger-full-access">danger-full-access</option>
+                </select>
+                <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
+                <input value={maxOutputKB} onChange={(event) => setMaxOutputKB(event.target.value)} placeholder="max output KB" />
+              </div>
+
+              <div className="quick-strip">
+                <label className="quick-chip ghost file-chip">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    disabled={uploadingImage}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (!file) return;
+                      void onUploadSessionImage(file);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                  {uploadingImage ? "uploading..." : "Attach Image"}
+                </label>
+                {(activeThread?.imagePaths ?? []).map((imagePath) => (
+                  <button
+                    key={imagePath}
+                    type="button"
+                    className="quick-chip ghost"
+                    onClick={() => activeThread && removeThreadImagePath(activeThread.id, imagePath)}
+                  >
+                    {imagePath.split("/").pop() ?? imagePath} ×
+                  </button>
+                ))}
+                {imageUploadError ? <span className="shortcut-hint">{imageUploadError}</span> : null}
               </div>
 
               <textarea
@@ -928,8 +1299,8 @@ export function App() {
                     updateThreadDraft(activeThread.id, event.target.value);
                   }
                 }}
-                rows={4}
-                placeholder="Tell codex what to execute on selected hosts..."
+                rows={5}
+                placeholder="Tell codex what to do in this workspace..."
                 onKeyDown={(event) => {
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                     event.preventDefault();
@@ -939,89 +1310,12 @@ export function App() {
               />
 
               <div className="composer-controls">
-                <input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="workdir override" />
-                <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
-                <input value={maxOutputKB} onChange={(event) => setMaxOutputKB(event.target.value)} placeholder="max output KB" />
-                <button type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? "Running..." : "Send"}
+                <button type="submit" disabled={activeThreadBusy}>
+                  {activeThreadBusy ? "Running..." : "Send"}
                 </button>
               </div>
             </form>
           </main>
-
-          <aside className="session-side">
-            <section className="inspect-block focus-block">
-              <h3>Session Context</h3>
-              <ul className="metric-list metric-list-light">
-                <li>thread={activeThread?.title ?? "-"}</li>
-                <li>threads={threads.length}</li>
-                <li>targets={selectedHostCount}</li>
-                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
-              </ul>
-              <form className="thread-rename-form" onSubmit={onRenameActiveThread}>
-                <input
-                  value={threadRenameDraft}
-                  onChange={(event) => setThreadRenameDraft(event.target.value)}
-                  placeholder="thread name"
-                  maxLength={48}
-                />
-                <button type="submit">Rename</button>
-              </form>
-              <ul className="session-keymap">
-                <li>Ctrl/Cmd + K: focus prompt</li>
-                <li>Ctrl/Cmd + Shift + N: new thread</li>
-                <li>Ctrl/Cmd + Shift + [ or ArrowUp: previous thread</li>
-                <li>Ctrl/Cmd + Shift + ] or ArrowDown: next thread</li>
-              </ul>
-              <button type="button" className="ghost" onClick={() => switchMode("ops")}>
-                Open Remote Ops
-              </button>
-            </section>
-
-            <section className="inspect-block">
-              <h3>Active Job</h3>
-              {activeJob ? (
-                <div className="job-card">
-                  <div className="job-head">
-                    <strong>{activeJob.id}</strong>
-                    <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
-                  </div>
-                  <p>runtime={activeJob.runtime}</p>
-                  <p>thread={activeJobThreadID}</p>
-                  <p>queued={formatDateTime(activeJob.queued_at)}</p>
-                  <div className="progress-track" aria-label="job progress">
-                    <span style={{ width: `${activeProgress}%` }} />
-                  </div>
-                </div>
-              ) : (
-                <p className="pane-subtle-light">No active async job.</p>
-              )}
-            </section>
-
-            <section className="inspect-block">
-              <h3>Recent Jobs</h3>
-              {jobs.length === 0 ? (
-                <p className="pane-subtle-light">No jobs yet.</p>
-              ) : (
-                <ul className="history-list">
-                  {jobs.slice(0, 6).map((job) => (
-                    <li key={job.id}>
-                      <button
-                        className="ghost"
-                        onClick={() => {
-                          setActiveJobID(job.id);
-                          setActiveJob(job);
-                        }}
-                      >
-                        {job.id}
-                      </button>
-                      <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          </aside>
         </div>
       ) : (
         <div className="ops-stage">
@@ -1399,6 +1693,17 @@ export function App() {
           </aside>
         </div>
       )}
+
+      {sessionAlerts.length > 0 ? (
+        <div className="session-alert-stack" role="status" aria-live="polite">
+          {sessionAlerts.map((alert) => (
+            <button key={alert.id} type="button" className="session-alert" onClick={() => openSessionFromAlert(alert)}>
+              <strong>{alert.title}</strong>
+              <span>{alert.body}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
