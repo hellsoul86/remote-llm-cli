@@ -77,6 +77,8 @@ Private key content for SSH login to all hosts in `DEPLOY_TARGETS`.
 
 - `CF_PAGES_BRANCH`: Pages branch override (optional; default `github.ref_name`)
 
+The deploy workflow will auto-create the Pages project on first deploy if it does not exist.
+
 ## 3. Workflow behavior
 
 Per run:
@@ -85,7 +87,8 @@ Per run:
 2. Fan out API deployment over `DEPLOY_TARGETS`
 3. Upload/extract release, switch `current` symlink, restart systemd, health-check, trim old releases
 4. Build web (`web/dist`)
-5. Deploy web to Cloudflare Pages (`wrangler pages deploy`)
+5. Ensure Pages project exists (auto-create when missing)
+6. Deploy web to Cloudflare Pages (`wrangler pages deploy`)
 
 ## 4. Manual redeploy
 
