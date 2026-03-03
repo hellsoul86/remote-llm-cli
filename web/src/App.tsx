@@ -11,15 +11,22 @@ import {
   healthz,
   listAudit,
   listHosts,
+  listProjects,
   listRunJobEvents,
   listRunJobs,
   listRuns,
   listRuntimes,
+  listSessions,
   probeHost,
   runFanout,
+  streamSessionEvents,
   uploadImage,
   upsertHost,
   type Host,
+  type ProjectRecord,
+  type SessionEventRecord,
+  type SessionRecord,
+  type SessionStreamFrame,
   type RunJobEvent,
   type RunJobRecord,
   type RunRequest,
@@ -59,6 +66,14 @@ type SessionTreeHost = {
   hostName: string;
   hostAddress: string;
   projects: SessionTreeProject[];
+};
+
+type SessionRunStreamState = {
+  runID: string;
+  stdout: string;
+  streamSeen: boolean;
+  assistantFinalized: boolean;
+  failureHints: string[];
 };
 
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
@@ -384,6 +399,7 @@ export function App() {
     removeThreadImagePath,
     setThreadJobState,
     setThreadUnread,
+    setThreadTitle,
     runningThreadJobs,
     syncProjectsFromDiscovery,
     resetSessionDomain
@@ -405,6 +421,14 @@ export function App() {
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
+  const sessionEventCursorRef = useRef<Map<string, number>>(new Map());
+  const sessionStreamStateRef = useRef<Map<string, { controller: AbortController; ready: boolean; lastEventAt: number }>>(new Map());
+  const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(new Map());
+  const streamAuthTokenRef = useRef("");
+  const activeThreadIDRef = useRef(activeThreadID);
+  const threadTitleMapRef = useRef<Map<string, string>>(new Map());
+  const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
+  const tokenRef = useRef(token);
 
   const activeRuntime = useMemo(
     () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
@@ -428,6 +452,16 @@ export function App() {
       }
     }
     return out;
+  }, [workspaces]);
+  const allSessionIDs = useMemo(() => {
+    const ids: string[] = [];
+    for (const workspace of workspaces) {
+      for (const thread of workspace.sessions) {
+        const id = thread.id.trim();
+        if (id) ids.push(id);
+      }
+    }
+    return ids;
   }, [workspaces]);
   const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
   const sessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
@@ -538,6 +572,22 @@ export function App() {
   const healthIsError = health.startsWith("error");
   const opsNoticeIsError = /fail|error|degraded/i.test(opsNotice);
   const syncLabel = isRefreshing ? "syncing" : "live";
+
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
+
+  useEffect(() => {
+    activeThreadIDRef.current = activeThreadID;
+  }, [activeThreadID]);
+
+  useEffect(() => {
+    threadTitleMapRef.current = threadTitleMap;
+  }, [threadTitleMap]);
+
+  useEffect(() => {
+    threadWorkspaceMapRef.current = threadWorkspaceMap;
+  }, [threadWorkspaceMap]);
 
   function createThreadAndFocus() {
     createThread();
@@ -656,6 +706,83 @@ export function App() {
     }));
   }
 
+  function buildProjectsFromRecords(sourceHosts: Host[], projects: ProjectRecord[], sessions: SessionRecord[]) {
+    const hostMap = new Map<string, Host>();
+    for (const host of sourceHosts) {
+      hostMap.set(host.id, host);
+    }
+
+    const projectKeyByID = new Map<string, string>();
+    const grouped = new Map<string, { hostID: string; hostName: string; path: string; sessions: Array<{ id: string; title: string; updatedAt?: string }> }>();
+    const sessionSeenByProjectKey = new Map<string, Set<string>>();
+
+    const ensureProjectBucket = (hostIDRaw: string, hostNameRaw: string, pathRaw: string) => {
+      const hostID = hostIDRaw.trim();
+      const path = pathRaw.trim();
+      if (!hostID || !path) return "";
+      const key = `${hostID}::${path}`;
+      if (!grouped.has(key)) {
+        const host = hostMap.get(hostID);
+        grouped.set(key, {
+          hostID,
+          hostName: hostNameRaw.trim() || host?.name || hostID,
+          path,
+          sessions: []
+        });
+      }
+      if (!sessionSeenByProjectKey.has(key)) {
+        sessionSeenByProjectKey.set(key, new Set<string>());
+      }
+      return key;
+    };
+
+    for (const project of projects) {
+      const key = ensureProjectBucket(project.host_id, project.host_name ?? "", project.path);
+      if (!key) continue;
+      projectKeyByID.set(project.id, key);
+    }
+
+    for (const sessionRecord of sessions) {
+      const sessionID = sessionRecord.id.trim();
+      if (!sessionID) continue;
+      const fromProjectID = projectKeyByID.get(sessionRecord.project_id.trim()) ?? "";
+      const fallbackHostID = sessionRecord.host_id.trim();
+      const fallbackPath = sessionRecord.path.trim();
+      const fallbackHostName = hostMap.get(fallbackHostID)?.name ?? fallbackHostID;
+      const key = fromProjectID || ensureProjectBucket(fallbackHostID, fallbackHostName, fallbackPath);
+      if (!key) continue;
+      const bucket = grouped.get(key);
+      const seen = sessionSeenByProjectKey.get(key);
+      if (!bucket || !seen || seen.has(sessionID)) continue;
+      seen.add(sessionID);
+      bucket.sessions.push({
+        id: sessionID,
+        title: sessionRecord.title?.trim() || sessionID,
+        updatedAt: sessionRecord.updated_at
+      });
+    }
+
+    for (const bucket of grouped.values()) {
+      bucket.sessions.sort((a, b) => {
+        const left = a.updatedAt ?? "";
+        const right = b.updatedAt ?? "";
+        if (left === right) return a.title.localeCompare(b.title);
+        return left > right ? -1 : 1;
+      });
+    }
+
+    const byHost = new Set<string>();
+    for (const bucket of grouped.values()) {
+      byHost.add(bucket.hostID);
+    }
+    for (const host of sourceHosts) {
+      if (byHost.has(host.id)) continue;
+      ensureProjectBucket(host.id, host.name, host.workspace?.trim() || "/home/ecs-user");
+    }
+
+    return Array.from(grouped.values());
+  }
+
   async function refreshProjectsFromDiscovery(
     authToken: string,
     sourceHosts: Host[],
@@ -678,6 +805,394 @@ export function App() {
         syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
       }
     }
+  }
+
+  async function refreshProjectsFromSource(authToken: string, sourceHosts: Host[], discoverEnabled: boolean, preserveOnError = true) {
+    try {
+      const [projects, sessions] = await Promise.all([listProjects(authToken, 600), listSessions(authToken, 1200)]);
+      const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
+      if (built.length > 0) {
+        syncProjectsFromDiscovery(built);
+        return;
+      }
+    } catch {
+      // fall through to discovery fallback
+    }
+    await refreshProjectsFromDiscovery(authToken, sourceHosts, discoverEnabled, preserveOnError);
+  }
+
+  function waitWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  function sessionPayloadRecord(event: SessionEventRecord): Record<string, unknown> {
+    return asRecord(event.payload) ?? {};
+  }
+
+  function sessionEventRunID(event: SessionEventRecord): string {
+    const direct = event.run_id?.trim() ?? "";
+    if (direct) return direct;
+    const payload = sessionPayloadRecord(event);
+    const fromPayload = typeof payload.job_id === "string" ? payload.job_id.trim() : "";
+    return fromPayload;
+  }
+
+  function ensureSessionRunState(sessionID: string, runID: string): SessionRunStreamState {
+    const existing = sessionRunStateRef.current.get(sessionID);
+    if (existing && existing.runID === runID) return existing;
+    const next: SessionRunStreamState = {
+      runID,
+      stdout: "",
+      streamSeen: false,
+      assistantFinalized: false,
+      failureHints: []
+    };
+    sessionRunStateRef.current.set(sessionID, next);
+    return next;
+  }
+
+  function markSessionDone(sessionID: string, runID: string, status: "succeeded" | "failed" | "canceled") {
+    if (!runID || completedJobsRef.current.has(runID)) return;
+    completedJobsRef.current.add(runID);
+    const sessionTitle = threadTitleMapRef.current.get(sessionID) ?? "Session";
+    notifySessionDone(`Codex ${status}`, `${sessionTitle}: ${runID}`);
+    pushSessionAlert({
+      threadID: sessionID,
+      title: `${sessionTitle} finished`,
+      body: `job=${runID} status=${status}`
+    });
+  }
+
+  function isSessionStreamHealthy(sessionID: string): boolean {
+    const state = sessionStreamStateRef.current.get(sessionID);
+    if (!state || !state.ready) return false;
+    return Date.now() - state.lastEventAt < 45000;
+  }
+
+  function stopSessionStream(sessionID: string) {
+    const state = sessionStreamStateRef.current.get(sessionID);
+    if (!state) return;
+    state.controller.abort();
+    sessionStreamStateRef.current.delete(sessionID);
+    sessionRunStateRef.current.delete(sessionID);
+  }
+
+  function stopAllSessionStreams() {
+    for (const state of sessionStreamStateRef.current.values()) {
+      state.controller.abort();
+    }
+    sessionStreamStateRef.current.clear();
+    sessionRunStateRef.current.clear();
+  }
+
+  async function finalizeStreamCompleted(sessionID: string, runID: string) {
+    const state = sessionRunStateRef.current.get(sessionID);
+    let assistantText = state ? parseCodexAssistantTextFromStdout(state.stdout, false) : "";
+    let failureSummary = state?.failureHints.join("\n") ?? "";
+    let failed = failureSummary.trim() !== "";
+
+    const authToken = tokenRef.current.trim();
+    if (authToken && runID) {
+      try {
+        const job = await getRunJob(authToken, runID);
+        if (!assistantText) {
+          assistantText = extractAssistantTextFromJob(job);
+        }
+        if (jobHasTargetFailures(job)) {
+          failed = true;
+          if (!failureSummary) {
+            failureSummary = summarizeTargetFailures(job) || (job.error ? String(job.error) : "");
+          }
+        }
+      } catch {
+        // best-effort; session stream remains source of truth.
+      }
+    }
+
+    if (failed) {
+      if (state?.streamSeen) {
+        finalizeAssistantStreamEntry(sessionID, "error");
+      }
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "System",
+          body: failureSummary || "Session failed."
+        },
+        sessionID
+      );
+      setThreadJobState(sessionID, "", "failed");
+      markSessionDone(sessionID, runID, "failed");
+      if (sessionID !== activeThreadIDRef.current) {
+        setThreadUnread(sessionID, true);
+      }
+      sessionRunStateRef.current.delete(sessionID);
+      return;
+    }
+
+    setThreadJobState(sessionID, "", "succeeded");
+    if (!state?.assistantFinalized) {
+      if (assistantText.trim()) {
+        if (state?.streamSeen) {
+          finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(assistantText));
+        } else {
+          addTimelineEntry(
+            {
+              kind: "assistant",
+              state: "success",
+              title: "Assistant",
+              body: assistantText
+            },
+            sessionID
+          );
+        }
+      } else if (state?.streamSeen) {
+        finalizeAssistantStreamEntry(sessionID, "success");
+      }
+    }
+    markSessionDone(sessionID, runID, "succeeded");
+    if (sessionID !== activeThreadIDRef.current) {
+      setThreadUnread(sessionID, true);
+    }
+    sessionRunStateRef.current.delete(sessionID);
+  }
+
+  async function handleSessionEventRecord(sessionID: string, event: SessionEventRecord) {
+    const payload = sessionPayloadRecord(event);
+    const runID = sessionEventRunID(event);
+
+    switch (event.type) {
+      case "session.title.updated": {
+        const title = typeof payload.title === "string" ? payload.title.trim() : "";
+        if (title) {
+          setThreadTitle(sessionID, title);
+        }
+        return;
+      }
+      case "run.started": {
+        const id = runID || `run_${Date.now()}`;
+        ensureSessionRunState(sessionID, id);
+        setThreadJobState(sessionID, id, "running");
+        if (sessionID === activeThreadIDRef.current) {
+          setActiveJobID(id);
+        }
+        return;
+      }
+      case "assistant.delta": {
+        if (!runID) return;
+        const state = ensureSessionRunState(sessionID, runID);
+        const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
+        if (!chunk.trim()) return;
+        state.stdout = `${state.stdout}${chunk}`;
+        if (state.stdout.length > 220000) {
+          state.stdout = state.stdout.slice(state.stdout.length - 220000);
+        }
+        const contentOnly = parseCodexAssistantTextFromStdout(state.stdout, false);
+        if (contentOnly.trim()) {
+          state.streamSeen = true;
+          upsertAssistantStreamEntry(sessionID, clipStreamText(contentOnly));
+        } else if (state.stdout.includes('"type":"turn.started"') || state.stdout.includes('"type":"thread.started"')) {
+          state.streamSeen = true;
+          upsertAssistantStreamEntry(sessionID, "Thinking...");
+        }
+        return;
+      }
+      case "assistant.completed": {
+        if (!runID) return;
+        const state = ensureSessionRunState(sessionID, runID);
+        const contentOnly = parseCodexAssistantTextFromStdout(state.stdout, false);
+        if (contentOnly.trim()) {
+          state.streamSeen = true;
+          finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(contentOnly));
+        } else if (state.streamSeen) {
+          finalizeAssistantStreamEntry(sessionID, "success");
+        }
+        state.assistantFinalized = true;
+        return;
+      }
+      case "target.done": {
+        if (!runID) return;
+        const state = ensureSessionRunState(sessionID, runID);
+        const status = typeof payload.status === "string" ? payload.status.trim() : "";
+        if (status && status !== "ok") {
+          const host = (typeof payload.host_name === "string" && payload.host_name.trim()) || (typeof payload.host_id === "string" && payload.host_id.trim()) || "target";
+          const exitCode = payload.exit_code;
+          const codeText = typeof exitCode === "number" ? ` exit=${exitCode}` : "";
+          const errorText = typeof payload.error === "string" && payload.error.trim() ? ` error=${payload.error.trim()}` : "";
+          state.failureHints.push(`${host} failed${codeText}${errorText}`);
+        }
+        return;
+      }
+      case "run.failed": {
+        const id = runID || `run_${Date.now()}`;
+        const state = ensureSessionRunState(sessionID, id);
+        const errText = typeof payload.error === "string" && payload.error.trim() ? payload.error.trim() : "Session failed.";
+        if (state.streamSeen) {
+          finalizeAssistantStreamEntry(sessionID, "error");
+        }
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "error",
+            title: "System",
+            body: errText
+          },
+          sessionID
+        );
+        setThreadJobState(sessionID, "", "failed");
+        markSessionDone(sessionID, id, "failed");
+        if (sessionID !== activeThreadIDRef.current) {
+          setThreadUnread(sessionID, true);
+        }
+        sessionRunStateRef.current.delete(sessionID);
+        return;
+      }
+      case "run.canceled": {
+        const id = runID || `run_${Date.now()}`;
+        const state = ensureSessionRunState(sessionID, id);
+        if (state.streamSeen) {
+          finalizeAssistantStreamEntry(sessionID, "error");
+        }
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "error",
+            title: "System",
+            body: "Session canceled."
+          },
+          sessionID
+        );
+        setThreadJobState(sessionID, "", "canceled");
+        markSessionDone(sessionID, id, "canceled");
+        if (sessionID !== activeThreadIDRef.current) {
+          setThreadUnread(sessionID, true);
+        }
+        sessionRunStateRef.current.delete(sessionID);
+        return;
+      }
+      case "run.completed": {
+        if (!runID) return;
+        await finalizeStreamCompleted(sessionID, runID);
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  function decodeSessionEventRecord(input: unknown): SessionEventRecord | null {
+    const payload = asRecord(input);
+    if (!payload) return null;
+    const seq = typeof payload.seq === "number" ? payload.seq : Number(payload.seq);
+    if (!Number.isFinite(seq) || seq <= 0) return null;
+    const sessionID = typeof payload.session_id === "string" ? payload.session_id.trim() : "";
+    const eventType = typeof payload.type === "string" ? payload.type.trim() : "";
+    if (!sessionID || !eventType) return null;
+    const createdAt = typeof payload.created_at === "string" && payload.created_at.trim() ? payload.created_at : new Date().toISOString();
+    const runID = typeof payload.run_id === "string" ? payload.run_id : undefined;
+    return {
+      seq,
+      session_id: sessionID,
+      run_id: runID,
+      type: eventType,
+      payload: payload.payload,
+      created_at: createdAt
+    };
+  }
+
+  function handleSessionStreamFrame(sessionID: string, frame: SessionStreamFrame) {
+    const state = sessionStreamStateRef.current.get(sessionID);
+    if (!state) return;
+    state.lastEventAt = Date.now();
+
+    if (frame.event === "session.ready") {
+      state.ready = true;
+      const data = asRecord(frame.data);
+      const cursor = data ? Number(data.cursor) : NaN;
+      if (Number.isFinite(cursor) && cursor > (sessionEventCursorRef.current.get(sessionID) ?? 0)) {
+        sessionEventCursorRef.current.set(sessionID, cursor);
+      }
+      return;
+    }
+
+    if (frame.event === "session.reset") {
+      state.ready = false;
+      const data = asRecord(frame.data);
+      const nextAfter = data ? Number(data.next_after) : NaN;
+      if (Number.isFinite(nextAfter) && nextAfter > (sessionEventCursorRef.current.get(sessionID) ?? 0)) {
+        sessionEventCursorRef.current.set(sessionID, nextAfter);
+      }
+      return;
+    }
+
+    if (frame.event === "heartbeat") {
+      return;
+    }
+
+    if (frame.event !== "session.event") {
+      return;
+    }
+
+    state.ready = true;
+    const event = decodeSessionEventRecord(frame.data);
+    if (!event) return;
+    const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
+    if (event.seq > current) {
+      sessionEventCursorRef.current.set(sessionID, event.seq);
+    }
+    void handleSessionEventRecord(sessionID, event);
+  }
+
+  function startSessionStream(sessionID: string, authToken: string) {
+    const trimmedSessionID = sessionID.trim();
+    if (!trimmedSessionID) return;
+    if (sessionStreamStateRef.current.has(trimmedSessionID)) return;
+
+    const controller = new AbortController();
+    sessionStreamStateRef.current.set(trimmedSessionID, {
+      controller,
+      ready: false,
+      lastEventAt: 0
+    });
+
+    const run = async () => {
+      let backoff = 700;
+      while (!controller.signal.aborted) {
+        const after = sessionEventCursorRef.current.get(trimmedSessionID) ?? 0;
+        try {
+          await streamSessionEvents(authToken, trimmedSessionID, {
+            after,
+            signal: controller.signal,
+            onFrame: (frame) => handleSessionStreamFrame(trimmedSessionID, frame)
+          });
+        } catch {
+          if (controller.signal.aborted) break;
+        }
+        const active = sessionStreamStateRef.current.get(trimmedSessionID);
+        if (!active || active.controller !== controller || controller.signal.aborted) break;
+        active.ready = false;
+        await waitWithAbort(backoff, controller.signal);
+        backoff = Math.min(6000, Math.round(backoff * 1.7));
+      }
+      const active = sessionStreamStateRef.current.get(trimmedSessionID);
+      if (active && active.controller === controller) {
+        sessionStreamStateRef.current.delete(trimmedSessionID);
+      }
+    };
+    void run();
   }
 
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
@@ -720,7 +1235,7 @@ export function App() {
       } else if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
-      await refreshProjectsFromDiscovery(
+      await refreshProjectsFromSource(
         authToken,
         nextHosts,
         nextRuntimes.some((runtime) => runtime.name === "codex"),
@@ -791,8 +1306,8 @@ export function App() {
       localStorage.setItem(TOKEN_KEY, trimmed);
       setToken(trimmed);
       setTokenInput(trimmed);
-      setAuthPhase("ready");
       await loadWorkspace(trimmed, true);
+      setAuthPhase("ready");
     } catch (error) {
       localStorage.removeItem(TOKEN_KEY);
       setToken("");
@@ -808,6 +1323,36 @@ export function App() {
       return;
     }
     void unlockWorkspace(cached);
+  }, []);
+
+  useEffect(() => {
+    const ready = authPhase === "ready" && token.trim() !== "";
+    if (!ready) {
+      streamAuthTokenRef.current = "";
+      stopAllSessionStreams();
+      return;
+    }
+    if (streamAuthTokenRef.current !== token) {
+      stopAllSessionStreams();
+      streamAuthTokenRef.current = token;
+    }
+
+    const expected = new Set(allSessionIDs);
+    for (const sessionID of expected) {
+      if (!sessionStreamStateRef.current.has(sessionID)) {
+        startSessionStream(sessionID, token);
+      }
+    }
+    for (const sessionID of Array.from(sessionStreamStateRef.current.keys())) {
+      if (expected.has(sessionID)) continue;
+      stopSessionStream(sessionID);
+    }
+  }, [authPhase, token, allSessionIDs]);
+
+  useEffect(() => {
+    return () => {
+      stopAllSessionStreams();
+    };
   }, []);
 
   useEffect(() => {
@@ -842,7 +1387,7 @@ export function App() {
     let canceled = false;
     const refresh = async () => {
       try {
-        await refreshProjectsFromDiscovery(token, hosts, true, true);
+        await refreshProjectsFromSource(token, hosts, true, true);
       } catch {
         // no-op: best-effort title/session sync
       }
@@ -875,7 +1420,11 @@ export function App() {
     const node = timelineViewportRef.current;
     if (!node) return;
     const frame = window.requestAnimationFrame(() => {
-      node.scrollTop = node.scrollHeight;
+      if (timelineBottomRef.current) {
+        timelineBottomRef.current.scrollIntoView({ block: "end" });
+      } else {
+        node.scrollTop = node.scrollHeight;
+      }
     });
     return () => {
       window.cancelAnimationFrame(frame);
@@ -942,9 +1491,11 @@ export function App() {
 
     let canceled = false;
     const poll = async () => {
+      const fallbackJobs = runningThreadJobs.filter((item) => !isSessionStreamHealthy(item.threadID));
+      if (fallbackJobs.length === 0) return;
       try {
         const jobResults = await Promise.all(
-          runningThreadJobs.map(async (item) => {
+          fallbackJobs.map(async (item) => {
             try {
               const after = jobEventCursorRef.current.get(item.jobID) ?? 0;
               const [job, eventFeed] = await Promise.all([
@@ -1089,18 +1640,8 @@ export function App() {
               }
             } else if (sawStream) {
               finalizeAssistantStreamEntry(item.threadID, "success");
-            } else if (!sawStream) {
-              addTimelineEntry(
-                {
-                  kind: "assistant",
-                  state: "success",
-                  title: "Assistant",
-                  body: item.threadID === activeThreadID ? "Done." : "Completed in background."
-                },
-                item.threadID
-              );
             }
-            const sessionTitle = threadTitleMap.get(item.threadID) ?? "Session";
+            const sessionTitle = threadTitleMapRef.current.get(item.threadID) ?? "Session";
             notifySessionDone(`Codex ${job.status}`, `${sessionTitle}: ${job.id}`);
             pushSessionAlert({
               threadID: item.threadID,
@@ -1122,7 +1663,7 @@ export function App() {
         setAuditEvents(nextAudit);
         setMetrics(refreshedMetrics);
         if (needsProjectRefresh) {
-          await refreshProjectsFromDiscovery(token, hosts, runtimes.some((runtime) => runtime.name === "codex"), true);
+          await refreshProjectsFromSource(token, hosts, runtimes.some((runtime) => runtime.name === "codex"), true);
           if (canceled) return;
         }
       } catch {
@@ -1139,7 +1680,7 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, appMode, runningThreadJobs, activeThreadID, threadTitleMap, hosts, runtimes]);
+  }, [authPhase, token, appMode, runningThreadJobs, activeThreadID, hosts, runtimes]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
@@ -1194,10 +1735,14 @@ export function App() {
 
   function onLogout() {
     localStorage.removeItem(TOKEN_KEY);
+    stopAllSessionStreams();
+    streamAuthTokenRef.current = "";
     resetOpsDomain();
     resetSessionDomain();
     jobEventCursorRef.current.clear();
     jobStreamSeenRef.current.clear();
+    sessionEventCursorRef.current.clear();
+    sessionRunStateRef.current.clear();
     setSubmittingThreadID("");
     setSessionAlerts([]);
     setSessionModelDefault("");
@@ -1237,7 +1782,8 @@ export function App() {
       return;
     }
 
-    const trimmedPrompt = activeThread.draft.trim();
+    const editorValue = promptInputRef.current?.value ?? "";
+    const trimmedPrompt = activeThread.draft.trim() || editorValue.trim();
     if (!trimmedPrompt) {
       addTimelineEntry({ kind: "system", state: "error", title: "Prompt Missing", body: "Prompt is required." }, activeThread.id);
       return;
@@ -1328,6 +1874,7 @@ export function App() {
         const { body } = await enqueueRunJob(token, request);
         jobEventCursorRef.current.set(body.job.id, 0);
         jobStreamSeenRef.current.set(body.job.id, false);
+        ensureSessionRunState(activeThread.id, body.job.id);
         setActiveJobID(body.job.id);
         setActiveJobThreadID(activeThread.id);
         setActiveJob(body.job);

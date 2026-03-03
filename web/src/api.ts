@@ -229,6 +229,7 @@ export type RetentionPolicy = {
   run_records_max: number;
   run_jobs_max: number;
   audit_events_max: number;
+  session_events_max?: number;
 };
 
 export type MetricsResponse = {
@@ -295,6 +296,21 @@ export type SessionRecord = {
   last_status?: string;
   created_at: string;
   updated_at: string;
+};
+
+export type SessionEventRecord = {
+  seq: number;
+  session_id: string;
+  run_id?: string;
+  type: string;
+  payload?: unknown;
+  created_at: string;
+};
+
+export type SessionStreamFrame = {
+  event: string;
+  id: string;
+  data: unknown;
 };
 
 const ENV_API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
@@ -645,4 +661,115 @@ export async function getSession(token: string, sessionID: string): Promise<Sess
   const body = await res.json();
   if (!body?.session) throw new Error("get session failed: invalid response");
   return body.session;
+}
+
+type StreamSessionEventsOptions = {
+  after?: number;
+  signal: AbortSignal;
+  onFrame: (frame: SessionStreamFrame) => void;
+};
+
+export async function streamSessionEvents(token: string, sessionID: string, options: StreamSessionEventsOptions): Promise<void> {
+  const params = new URLSearchParams();
+  if (typeof options.after === "number" && options.after > 0) {
+    params.set("after", String(options.after));
+  }
+  const query = params.toString();
+  const url = query ? `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream?${query}` : `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: token ? { Authorization: `Bearer ${token}`, Accept: "text/event-stream" } : { Accept: "text/event-stream" },
+    signal: options.signal
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`stream session events failed: ${res.status} ${text}`);
+  }
+  if (!res.body) {
+    throw new Error("stream session events failed: empty stream body");
+  }
+
+  const decoder = new TextDecoder();
+  const reader = res.body.getReader();
+
+  let buffer = "";
+  let eventType = "message";
+  let eventID = "";
+  let dataLines: string[] = [];
+
+  const emitFrame = () => {
+    if (dataLines.length === 0 && eventID === "" && eventType === "message") {
+      return;
+    }
+    const rawData = dataLines.join("\n");
+    let parsed: unknown = rawData;
+    if (rawData.trim() !== "") {
+      try {
+        parsed = JSON.parse(rawData);
+      } catch {
+        parsed = rawData;
+      }
+    } else {
+      parsed = null;
+    }
+    options.onFrame({
+      event: eventType || "message",
+      id: eventID,
+      data: parsed
+    });
+    eventType = "message";
+    eventID = "";
+    dataLines = [];
+  };
+
+  const consumeLine = (line: string) => {
+    if (line === "") {
+      emitFrame();
+      return;
+    }
+    if (line.startsWith(":")) {
+      return;
+    }
+    const separator = line.indexOf(":");
+    let field = line;
+    let value = "";
+    if (separator >= 0) {
+      field = line.slice(0, separator);
+      value = line.slice(separator + 1);
+      if (value.startsWith(" ")) value = value.slice(1);
+    }
+    if (field === "event") {
+      eventType = value || "message";
+      return;
+    }
+    if (field === "id") {
+      eventID = value;
+      return;
+    }
+    if (field === "data") {
+      dataLines.push(value);
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let index = buffer.indexOf("\n");
+    while (index !== -1) {
+      let line = buffer.slice(0, index);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      consumeLine(line);
+      buffer = buffer.slice(index + 1);
+      index = buffer.indexOf("\n");
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.length > 0) {
+    let tail = buffer;
+    if (tail.endsWith("\r")) tail = tail.slice(0, -1);
+    consumeLine(tail);
+  }
+  emitFrame();
 }
