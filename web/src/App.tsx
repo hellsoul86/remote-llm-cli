@@ -1,16 +1,21 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE,
+  cancelRunJob,
+  deleteHost,
   enqueueRunJob,
   getMetrics,
   getRunJob,
   healthz,
+  listAudit,
   listHosts,
   listRunJobs,
   listRuns,
   listRuntimes,
+  probeHost,
   runFanout,
   upsertHost,
+  type AuditEvent,
   type Host,
   type MetricsResponse,
   type RunJobRecord,
@@ -165,7 +170,19 @@ export function App() {
   const [activeJob, setActiveJob] = useState<RunJobRecord | null>(null);
 
   const [hostForm, setHostForm] = useState<AddHostForm>({ name: "", host: "", user: "", workspace: "" });
+  const [hostFilter, setHostFilter] = useState("");
+  const [editingHostID, setEditingHostID] = useState("");
   const [addingHost, setAddingHost] = useState(false);
+  const [opsHostBusyID, setOpsHostBusyID] = useState("");
+  const [opsNotice, setOpsNotice] = useState("");
+  const [opsJobStatusFilter, setOpsJobStatusFilter] = useState<"all" | "pending" | "running" | "succeeded" | "failed" | "canceled">(
+    "all"
+  );
+  const [opsJobTypeFilter, setOpsJobTypeFilter] = useState<"all" | "run" | "sync">("all");
+  const [opsRunStatusFilter, setOpsRunStatusFilter] = useState<"all" | "ok" | "error">("all");
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [opsAuditMethodFilter, setOpsAuditMethodFilter] = useState<"all" | "GET" | "POST" | "DELETE">("all");
+  const [opsAuditStatusFilter, setOpsAuditStatusFilter] = useState<"all" | "2xx" | "4xx" | "5xx">("all");
 
   const [threads, setThreads] = useState<ConversationThread[]>(() => [createInitialThread()]);
   const [activeThreadID, setActiveThreadID] = useState("thread_1");
@@ -201,6 +218,37 @@ export function App() {
     if (!isJobActive(activeJob)) return 100;
     return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
   }, [activeJob]);
+
+  const filteredOpsJobs = useMemo(() => {
+    const byStatus = opsJobStatusFilter === "all" ? jobs : jobs.filter((job) => job.status === opsJobStatusFilter);
+    if (opsJobTypeFilter === "all") return byStatus;
+    return byStatus.filter((job) => job.type === opsJobTypeFilter);
+  }, [jobs, opsJobStatusFilter, opsJobTypeFilter]);
+
+  const filteredHosts = useMemo(() => {
+    const query = hostFilter.trim().toLowerCase();
+    if (!query) return hosts;
+    return hosts.filter((host) => {
+      const text = `${host.name} ${host.host} ${host.user} ${host.workspace ?? ""}`.toLowerCase();
+      return text.includes(query);
+    });
+  }, [hosts, hostFilter]);
+
+  const filteredOpsRuns = useMemo(() => {
+    if (opsRunStatusFilter === "all") return runs;
+    if (opsRunStatusFilter === "ok") return runs.filter((run) => run.status_code < 400);
+    return runs.filter((run) => run.status_code >= 400);
+  }, [runs, opsRunStatusFilter]);
+
+  const filteredAuditEvents = useMemo(() => {
+    return auditEvents.filter((evt) => {
+      if (opsAuditMethodFilter !== "all" && evt.method !== opsAuditMethodFilter) return false;
+      if (opsAuditStatusFilter === "2xx" && (evt.status_code < 200 || evt.status_code >= 300)) return false;
+      if (opsAuditStatusFilter === "4xx" && (evt.status_code < 400 || evt.status_code >= 500)) return false;
+      if (opsAuditStatusFilter === "5xx" && (evt.status_code < 500 || evt.status_code >= 600)) return false;
+      return true;
+    });
+  }, [auditEvents, opsAuditMethodFilter, opsAuditStatusFilter]);
 
   function nextEntryID(): string {
     entryCounter.current += 1;
@@ -298,12 +346,13 @@ export function App() {
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
     setIsRefreshing(true);
     try {
-      const [healthBody, nextHosts, nextRuntimes, nextJobs, nextRuns, nextMetrics] = await Promise.all([
+      const [healthBody, nextHosts, nextRuntimes, nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
         healthz(),
         listHosts(authToken),
         listRuntimes(authToken),
         listRunJobs(authToken, 20),
         listRuns(authToken, 20),
+        listAudit(authToken, 80),
         getMetrics(authToken)
       ]);
 
@@ -312,6 +361,7 @@ export function App() {
       setRuntimes(nextRuntimes);
       setJobs(nextJobs);
       setRuns(nextRuns);
+      setAuditEvents(nextAudit);
       setMetrics(nextMetrics);
 
       setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((host) => host.id === id)));
@@ -323,6 +373,9 @@ export function App() {
       if (running) {
         setActiveJobID(running.id);
         setActiveJob(running);
+      } else {
+        setActiveJobID("");
+        setActiveJob(null);
       }
 
       if (emitConnectedNote) {
@@ -499,9 +552,10 @@ export function App() {
             }
           }
 
-          const [nextRuns, refreshedMetrics] = await Promise.all([listRuns(token, 20), getMetrics(token)]);
+          const [nextRuns, nextAudit, refreshedMetrics] = await Promise.all([listRuns(token, 20), listAudit(token, 80), getMetrics(token)]);
           if (canceled) return;
           setRuns(nextRuns);
+          setAuditEvents(nextAudit);
           setMetrics(refreshedMetrics);
           setActiveJobThreadID(activeThreadID);
         }
@@ -554,7 +608,19 @@ export function App() {
     setRuntimes([]);
     setJobs([]);
     setRuns([]);
+    setAuditEvents([]);
     setMetrics(null);
+    setSelectedHostIDs([]);
+    setHostForm({ name: "", host: "", user: "", workspace: "" });
+    setHostFilter("");
+    setEditingHostID("");
+    setOpsHostBusyID("");
+    setOpsNotice("");
+    setOpsJobStatusFilter("all");
+    setOpsJobTypeFilter("all");
+    setOpsRunStatusFilter("all");
+    setOpsAuditMethodFilter("all");
+    setOpsAuditStatusFilter("all");
     setThreads([initial]);
     setActiveThreadID(initial.id);
     setActiveJobThreadID(initial.id);
@@ -662,13 +728,15 @@ export function App() {
           activeThread.id
         );
 
-        const [nextRuns, nextJobs, nextMetrics] = await Promise.all([
+        const [nextRuns, nextJobs, nextAudit, nextMetrics] = await Promise.all([
           listRuns(token, 20),
           listRunJobs(token, 20),
+          listAudit(token, 80),
           getMetrics(token)
         ]);
         setRuns(nextRuns);
         setJobs(nextJobs);
+        setAuditEvents(nextAudit);
         setMetrics(nextMetrics);
         setIsSubmitting(false);
       }
@@ -688,22 +756,107 @@ export function App() {
     }
 
     const hostName = hostForm.name.trim();
+    const editing = editingHostID;
 
     setAddingHost(true);
     try {
       await upsertHost(token, {
+        id: editing || undefined,
         name: hostName,
         host: hostForm.host.trim(),
         user: hostForm.user.trim() || undefined,
         workspace: hostForm.workspace.trim() || undefined
       });
       setHostForm({ name: "", host: "", user: "", workspace: "" });
+      setEditingHostID("");
       await loadWorkspace(token, false);
-      addTimelineEntry({ kind: "system", state: "success", title: "Host Saved", body: `Saved host ${hostName}.` });
+      addTimelineEntry({
+        kind: "system",
+        state: "success",
+        title: editing ? "Host Updated" : "Host Saved",
+        body: `${editing ? "Updated" : "Saved"} host ${hostName}.`
+      });
+      setOpsNotice(`${editing ? "Updated" : "Saved"} host ${hostName}.`);
     } catch (error) {
       addTimelineEntry({ kind: "system", state: "error", title: "Host Save Failed", body: String(error) });
     } finally {
       setAddingHost(false);
+    }
+  }
+
+  function onStartEditHost(host: Host) {
+    setEditingHostID(host.id);
+    setHostForm({
+      name: host.name,
+      host: host.host,
+      user: host.user ?? "",
+      workspace: host.workspace ?? ""
+    });
+    setOpsNotice(`Editing host ${host.name}.`);
+  }
+
+  function onCancelHostEdit() {
+    setEditingHostID("");
+    setHostForm({ name: "", host: "", user: "", workspace: "" });
+    setOpsNotice("Canceled host edit.");
+  }
+
+  async function onProbeHost(host: Host) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    setOpsHostBusyID(host.id);
+    setOpsNotice(`Probing ${host.name}...`);
+    try {
+      const result = await probeHost(token, host.id, { preflight: true });
+      const ssh = result.ssh?.ok ? "ok" : "fail";
+      const codex = result.codex?.ok ? "ok" : "fail";
+      const login = result.codex_login?.ok ? "ok" : "fail";
+      const sshErr = result.ssh?.error ? ` ssh_error=${result.ssh.error}` : "";
+      const codexErr = result.codex?.error ? ` codex_error=${result.codex.error}` : "";
+      const loginErr = result.codex_login?.error ? ` login_error=${result.codex_login.error}` : "";
+      setOpsNotice(`Probe ${host.name}: ssh=${ssh} codex=${codex} login=${login}${sshErr}${codexErr}${loginErr}`);
+    } catch (error) {
+      setOpsNotice(`Probe failed for ${host.name}: ${String(error)}`);
+    } finally {
+      setOpsHostBusyID("");
+    }
+  }
+
+  async function onDeleteHost(host: Host) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(`Delete host '${host.name}'?`);
+      if (!confirmed) return;
+    }
+
+    setOpsHostBusyID(host.id);
+    try {
+      await deleteHost(token, host.id);
+      setSelectedHostIDs((prev) => prev.filter((id) => id !== host.id));
+      if (editingHostID === host.id) {
+        onCancelHostEdit();
+      }
+      await loadWorkspace(token, false);
+      setOpsNotice(`Deleted host ${host.name}.`);
+    } catch (error) {
+      setOpsNotice(`Delete failed for ${host.name}: ${String(error)}`);
+    } finally {
+      setOpsHostBusyID("");
+    }
+  }
+
+  async function onCancelJob(job: RunJobRecord) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    if (!isJobActive(job)) return;
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(`Cancel job '${job.id}'?`);
+      if (!confirmed) return;
+    }
+    try {
+      await cancelRunJob(token, job.id);
+      setOpsNotice(`Cancel requested for ${job.id}.`);
+      await loadWorkspace(token, false);
+    } catch (error) {
+      setOpsNotice(`Cancel failed for ${job.id}: ${String(error)}`);
     }
   }
 
@@ -958,26 +1111,54 @@ export function App() {
                 </label>
               </div>
               <p className="pane-subtle">selected={selectedHostCount}</p>
+              <label>
+                filter
+                <input
+                  placeholder="name / host / user / workspace"
+                  value={hostFilter}
+                  onChange={(event) => setHostFilter(event.target.value)}
+                />
+              </label>
               <div className="target-list">
                 {hosts.length === 0 ? (
                   <p className="pane-subtle">No hosts configured.</p>
+                ) : filteredHosts.length === 0 ? (
+                  <p className="pane-subtle">No hosts match filter.</p>
                 ) : (
-                  hosts.map((host) => (
-                    <label key={host.id} className="target-item">
-                      <input
-                        type="checkbox"
-                        disabled={allHosts}
-                        checked={allHosts || selectedHostIDs.includes(host.id)}
-                        onChange={() => toggleHostSelection(host.id)}
-                      />
-                      <span className="target-meta">
-                        <strong>{host.name}</strong>
-                        <small>
-                          {host.user ? `${host.user}@` : ""}
-                          {host.host}:{host.port}
-                        </small>
-                      </span>
-                    </label>
+                  filteredHosts.map((host) => (
+                    <div key={host.id} className="target-item">
+                      <label className="target-checkline">
+                        <input
+                          type="checkbox"
+                          disabled={allHosts}
+                          checked={allHosts || selectedHostIDs.includes(host.id)}
+                          onChange={() => toggleHostSelection(host.id)}
+                        />
+                        <span className="target-meta">
+                          <strong>{host.name}</strong>
+                          <small>
+                            {host.user ? `${host.user}@` : ""}
+                            {host.host}:{host.port}
+                          </small>
+                        </span>
+                      </label>
+                      <div className="target-actions">
+                        <button type="button" className="ghost" disabled={opsHostBusyID === host.id} onClick={() => void onProbeHost(host)}>
+                          {opsHostBusyID === host.id ? "..." : "Probe"}
+                        </button>
+                        <button type="button" className="ghost" disabled={opsHostBusyID === host.id} onClick={() => onStartEditHost(host)}>
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost danger-ghost"
+                          disabled={opsHostBusyID === host.id}
+                          onClick={() => void onDeleteHost(host)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
                   ))
                 )}
               </div>
@@ -1028,6 +1209,28 @@ export function App() {
             </section>
 
             <section className="pane-block">
+              <h3>Queue Control</h3>
+              <ul className="metric-list">
+                <li>pending={metrics?.jobs.pending ?? "-"}</li>
+                <li>running={metrics?.jobs.running ?? "-"}</li>
+                <li>depth={metrics?.queue.depth ?? "-"}</li>
+              </ul>
+              <div className="ops-actions-row">
+                <button type="button" className="ghost" onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+                  {isRefreshing ? "Refreshing..." : "Refresh Queue"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost danger-ghost"
+                  disabled={!activeJob || !isJobActive(activeJob)}
+                  onClick={() => (activeJob ? void onCancelJob(activeJob) : undefined)}
+                >
+                  Cancel Active
+                </button>
+              </div>
+            </section>
+
+            <section className="pane-block">
               <h3>Overview</h3>
               <ul className="metric-list">
                 <li>hosts={hosts.length}</li>
@@ -1038,6 +1241,13 @@ export function App() {
                 <li>threads={threads.length}</li>
               </ul>
             </section>
+
+            {opsNotice ? (
+              <section className="pane-block ops-notice">
+                <h3>Ops Notice</h3>
+                <p>{opsNotice}</p>
+              </section>
+            ) : null}
           </aside>
 
           <aside className="inspect-pane">
@@ -1068,22 +1278,60 @@ export function App() {
 
             <section className="inspect-block">
               <h3>Recent Jobs</h3>
-              {jobs.length === 0 ? (
+              <div className="ops-filter-row">
+                <label>
+                  status
+                  <select
+                    value={opsJobStatusFilter}
+                    onChange={(event) =>
+                      setOpsJobStatusFilter(
+                        event.target.value as "all" | "pending" | "running" | "succeeded" | "failed" | "canceled"
+                      )
+                    }
+                  >
+                    <option value="all">all</option>
+                    <option value="pending">pending</option>
+                    <option value="running">running</option>
+                    <option value="succeeded">succeeded</option>
+                    <option value="failed">failed</option>
+                    <option value="canceled">canceled</option>
+                  </select>
+                </label>
+                <label>
+                  type
+                  <select value={opsJobTypeFilter} onChange={(event) => setOpsJobTypeFilter(event.target.value as "all" | "run" | "sync")}>
+                    <option value="all">all</option>
+                    <option value="run">run</option>
+                    <option value="sync">sync</option>
+                  </select>
+                </label>
+              </div>
+              {filteredOpsJobs.length === 0 ? (
                 <p className="pane-subtle-light">No jobs yet.</p>
               ) : (
                 <ul className="history-list">
-                  {jobs.slice(0, 8).map((job) => (
+                  {filteredOpsJobs.slice(0, 8).map((job) => (
                     <li key={job.id}>
-                      <button
-                        className="ghost"
-                        onClick={() => {
-                          setActiveJobID(job.id);
-                          setActiveJob(job);
-                        }}
-                      >
-                        {job.id}
-                      </button>
-                      <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                      <div className="history-item-main">
+                        <button
+                          className="ghost"
+                          onClick={() => {
+                            setActiveJobID(job.id);
+                            setActiveJob(job);
+                          }}
+                        >
+                          {job.id}
+                        </button>
+                        <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                        <span>{job.type}</span>
+                      </div>
+                      <div className="history-item-actions">
+                        {isJobActive(job) ? (
+                          <button type="button" className="ghost danger-ghost" onClick={() => void onCancelJob(job)}>
+                            Cancel
+                          </button>
+                        ) : null}
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -1092,11 +1340,21 @@ export function App() {
 
             <section className="inspect-block">
               <h3>Recent Runs</h3>
-              {runs.length === 0 ? (
+              <div className="ops-filter-row">
+                <label>
+                  status
+                  <select value={opsRunStatusFilter} onChange={(event) => setOpsRunStatusFilter(event.target.value as "all" | "ok" | "error")}>
+                    <option value="all">all</option>
+                    <option value="ok">ok</option>
+                    <option value="error">error</option>
+                  </select>
+                </label>
+              </div>
+              {filteredOpsRuns.length === 0 ? (
                 <p className="pane-subtle-light">No run results yet.</p>
               ) : (
                 <ul className="history-list history-runs">
-                  {runs.slice(0, 6).map((run) => (
+                  {filteredOpsRuns.slice(0, 8).map((run) => (
                     <li key={run.id}>
                       <span>{run.id}</span>
                       <span className={`tone-${run.status_code < 400 ? "ok" : "err"}`}>
@@ -1109,7 +1367,54 @@ export function App() {
             </section>
 
             <section className="inspect-block">
-              <h3>Add Host</h3>
+              <h3>Audit Timeline</h3>
+              <div className="ops-filter-row">
+                <label>
+                  method
+                  <select
+                    value={opsAuditMethodFilter}
+                    onChange={(event) => setOpsAuditMethodFilter(event.target.value as "all" | "GET" | "POST" | "DELETE")}
+                  >
+                    <option value="all">all</option>
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="DELETE">DELETE</option>
+                  </select>
+                </label>
+                <label>
+                  status
+                  <select
+                    value={opsAuditStatusFilter}
+                    onChange={(event) => setOpsAuditStatusFilter(event.target.value as "all" | "2xx" | "4xx" | "5xx")}
+                  >
+                    <option value="all">all</option>
+                    <option value="2xx">2xx</option>
+                    <option value="4xx">4xx</option>
+                    <option value="5xx">5xx</option>
+                  </select>
+                </label>
+              </div>
+              {filteredAuditEvents.length === 0 ? (
+                <p className="pane-subtle-light">No audit events with current filters.</p>
+              ) : (
+                <ul className="history-list">
+                  {filteredAuditEvents.slice(0, 12).map((evt) => (
+                    <li key={evt.id}>
+                      <div className="history-item-main">
+                        <span>{evt.action}</span>
+                        <span>
+                          {evt.method} {evt.path}
+                        </span>
+                      </div>
+                      <span className={`tone-${evt.status_code < 400 ? "ok" : "err"}`}>{evt.status_code}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>{editingHostID ? "Edit Host" : "Add Host"}</h3>
               <form className="host-form" onSubmit={onAddHost}>
                 <input
                   placeholder="name"
@@ -1131,9 +1436,16 @@ export function App() {
                   value={hostForm.workspace}
                   onChange={(event) => setHostForm((prev) => ({ ...prev, workspace: event.target.value }))}
                 />
-                <button type="submit" disabled={addingHost}>
-                  {addingHost ? "Saving..." : "Save Host"}
-                </button>
+                <div className="ops-actions-row">
+                  <button type="submit" disabled={addingHost}>
+                    {addingHost ? "Saving..." : editingHostID ? "Update Host" : "Save Host"}
+                  </button>
+                  {editingHostID ? (
+                    <button type="button" className="ghost" onClick={onCancelHostEdit}>
+                      Cancel Edit
+                    </button>
+                  ) : null}
+                </div>
               </form>
             </section>
           </aside>
