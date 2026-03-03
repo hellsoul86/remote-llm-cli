@@ -120,6 +120,30 @@ type SessionEvent struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
+type ProjectRecord struct {
+	ID        string    `json:"id"`
+	HostID    string    `json:"host_id"`
+	HostName  string    `json:"host_name,omitempty"`
+	Path      string    `json:"path"`
+	Runtime   string    `json:"runtime"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type SessionRecord struct {
+	ID               string    `json:"id"`
+	ProjectID        string    `json:"project_id"`
+	HostID           string    `json:"host_id"`
+	Path             string    `json:"path"`
+	Runtime          string    `json:"runtime"`
+	RuntimeSessionID string    `json:"runtime_session_id,omitempty"`
+	Title            string    `json:"title"`
+	LastRunID        string    `json:"last_run_id,omitempty"`
+	LastStatus       string    `json:"last_status,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
 type AuditEvent struct {
 	ID             string    `json:"id"`
 	Timestamp      time.Time `json:"timestamp"`

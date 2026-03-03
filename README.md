@@ -77,6 +77,7 @@ Default API URL is `http://localhost:8080`.
 - Probe preflight checks for controller toolchain and SSH key accessibility (SSH mode) or local shell/rsync readiness (local mode)
 - Multi-host fanout execution (`POST /v1/run` with `host_ids` or `all_hosts`)
 - Async run jobs with reconnectable polling (`POST /v1/jobs/run`, `GET /v1/jobs`, `GET /v1/jobs/{id}`)
+- Server-side project/session bindings (`GET /v1/projects`, `GET /v1/sessions`, `GET /v1/sessions/{id}`)
 - Multi-host file sync over rsync (`POST /v1/sync`)
 - Async sync jobs on the same scheduler (`POST /v1/jobs/sync`)
 - Job cancellation API (`POST /v1/jobs/{id}/cancel`)

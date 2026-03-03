@@ -29,6 +29,8 @@ type State struct {
 	AuditEvents     []model.AuditEvent    `json:"audit_events"`
 	SessionEvents   []model.SessionEvent  `json:"session_events"`
 	SessionEventSeq map[string]int64      `json:"session_event_seq"`
+	Projects        []model.ProjectRecord `json:"projects"`
+	Sessions        []model.SessionRecord `json:"sessions"`
 	RetentionPolicy model.RetentionPolicy `json:"retention_policy"`
 }
 
@@ -55,6 +57,8 @@ func Open(path string) (*Store, error) {
 			AuditEvents:     []model.AuditEvent{},
 			SessionEvents:   []model.SessionEvent{},
 			SessionEventSeq: map[string]int64{},
+			Projects:        []model.ProjectRecord{},
+			Sessions:        []model.SessionRecord{},
 			RetentionPolicy: defaultRetentionPolicy(),
 		},
 	}
@@ -100,6 +104,12 @@ func (s *Store) load() error {
 	}
 	if s.state.SessionEventSeq == nil {
 		s.state.SessionEventSeq = map[string]int64{}
+	}
+	if s.state.Projects == nil {
+		s.state.Projects = []model.ProjectRecord{}
+	}
+	if s.state.Sessions == nil {
+		s.state.Sessions = []model.SessionRecord{}
 	}
 	s.state.RetentionPolicy = normalizeRetentionPolicy(s.state.RetentionPolicy)
 	s.state.RunRecords = capTail(s.state.RunRecords, s.state.RetentionPolicy.RunRecordsMax)
@@ -195,6 +205,90 @@ func (s *Store) DeleteHost(id string) (bool, error) {
 		return true, s.saveLocked()
 	}
 	return false, nil
+}
+
+func (s *Store) UpsertProject(project model.ProjectRecord) (model.ProjectRecord, error) {
+	if strings.TrimSpace(project.ID) == "" {
+		return model.ProjectRecord{}, errors.New("project id is required")
+	}
+	now := time.Now().UTC()
+	project.ID = strings.TrimSpace(project.ID)
+	project.HostID = strings.TrimSpace(project.HostID)
+	project.HostName = strings.TrimSpace(project.HostName)
+	project.Path = strings.TrimSpace(project.Path)
+	project.Runtime = strings.TrimSpace(project.Runtime)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Projects {
+		if s.state.Projects[i].ID != project.ID {
+			continue
+		}
+		project.CreatedAt = s.state.Projects[i].CreatedAt
+		project.UpdatedAt = now
+		s.state.Projects[i] = project
+		return project, s.saveLocked()
+	}
+	project.CreatedAt = now
+	project.UpdatedAt = now
+	s.state.Projects = append(s.state.Projects, project)
+	return project, s.saveLocked()
+}
+
+func (s *Store) ListProjects(limit int) []model.ProjectRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := copyTail(s.state.Projects, limit)
+	return out
+}
+
+func (s *Store) UpsertSession(session model.SessionRecord) (model.SessionRecord, error) {
+	if strings.TrimSpace(session.ID) == "" {
+		return model.SessionRecord{}, errors.New("session id is required")
+	}
+	now := time.Now().UTC()
+	session.ID = strings.TrimSpace(session.ID)
+	session.ProjectID = strings.TrimSpace(session.ProjectID)
+	session.HostID = strings.TrimSpace(session.HostID)
+	session.Path = strings.TrimSpace(session.Path)
+	session.Runtime = strings.TrimSpace(session.Runtime)
+	session.RuntimeSessionID = strings.TrimSpace(session.RuntimeSessionID)
+	session.Title = strings.TrimSpace(session.Title)
+	session.LastRunID = strings.TrimSpace(session.LastRunID)
+	session.LastStatus = strings.TrimSpace(session.LastStatus)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Sessions {
+		if s.state.Sessions[i].ID != session.ID {
+			continue
+		}
+		session.CreatedAt = s.state.Sessions[i].CreatedAt
+		session.UpdatedAt = now
+		s.state.Sessions[i] = session
+		return session, s.saveLocked()
+	}
+	session.CreatedAt = now
+	session.UpdatedAt = now
+	s.state.Sessions = append(s.state.Sessions, session)
+	return session, s.saveLocked()
+}
+
+func (s *Store) GetSession(id string) (model.SessionRecord, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, session := range s.state.Sessions {
+		if session.ID == id {
+			return session, true
+		}
+	}
+	return model.SessionRecord{}, false
+}
+
+func (s *Store) ListSessions(limit int) []model.SessionRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := copyTail(s.state.Sessions, limit)
+	return out
 }
 
 func (s *Store) ListKeys() []model.AccessKey {
