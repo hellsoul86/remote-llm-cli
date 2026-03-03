@@ -591,6 +591,107 @@ button.ghost.danger-ghost:hover {
   font-size: 0.8rem;
 }
 
+.project-tree {
+  display: grid;
+  gap: 10px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.project-host-group {
+  border: 1px solid #d6e3f1;
+  border-radius: 11px;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+  background: #f9fbff;
+}
+
+.project-host-head {
+  display: grid;
+  gap: 2px;
+}
+
+.project-host-head strong {
+  font-size: 0.82rem;
+  color: #17324d;
+}
+
+.project-host-head small {
+  font-size: 0.72rem;
+  color: #5c7290;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.project-node {
+  display: grid;
+  gap: 6px;
+}
+
+.project-chip {
+  width: 100%;
+  border: 1px solid #c8d7eb;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #10233d;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 9px;
+  font-size: 0.78rem;
+  text-align: left;
+}
+
+.project-chip small {
+  font-size: 0.72rem;
+  color: #4f6481;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.project-chip.active {
+  border-color: #2f8a7d;
+  background: #e5f8f3;
+  color: #0b4741;
+}
+
+.project-session-list {
+  display: grid;
+  gap: 4px;
+  padding-left: 8px;
+}
+
+.session-chip-tree {
+  width: 100%;
+  border: 1px solid #d7e2ef;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #1d334f;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 0.74rem;
+}
+
+.session-chip-tree small {
+  font-size: 0.7rem;
+  color: #5a6f8b;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.session-chip-tree.active {
+  border-color: #2f8a7d;
+  background: #e5f8f3;
+  color: #0b4741;
+}
+
+.compact-empty {
+  margin: 0;
+}
+
 .timeline {
   min-height: 0;
   overflow: auto;
@@ -666,6 +767,12 @@ button.ghost.danger-ghost:hover {
   background: #ffffff;
   padding: 12px;
   display: grid;
+  gap: 8px;
+}
+
+.session-inline-settings {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(180px, 220px);
   gap: 8px;
 }
 
@@ -1028,6 +1135,10 @@ button.ghost.danger-ghost:hover {
 
   .composer-actions button {
     width: 100%;
+  }
+
+  .session-inline-settings {
+    grid-template-columns: 1fr;
   }
 
   .thread-rename-form {

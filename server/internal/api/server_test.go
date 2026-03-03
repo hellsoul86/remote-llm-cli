@@ -123,6 +123,36 @@ func TestResolveSyncDst(t *testing.T) {
 	}
 }
 
+func TestParseCodexSessionDiscoverOutputIncludesProjectAndTitle(t *testing.T) {
+	stdout := "1772532000.5|1024|/home/u/.codex/sessions/2026/03/03/rollout-2026-03-03T00-00-00-019caec8-504e-7611-9faf-5061b6b9cc63.jsonl|019caec8-504e-7611-9faf-5061b6b9cc63|/home/u/repos/remote-llm-cli|remote codex\n"
+	items := parseCodexSessionDiscoverOutput(stdout)
+	if len(items) != 1 {
+		t.Fatalf("len(items)=%d want=1", len(items))
+	}
+	if items[0].SessionID != "019caec8-504e-7611-9faf-5061b6b9cc63" {
+		t.Fatalf("session_id=%q", items[0].SessionID)
+	}
+	if items[0].Cwd != "/home/u/repos/remote-llm-cli" {
+		t.Fatalf("cwd=%q", items[0].Cwd)
+	}
+	if items[0].ThreadName != "remote codex" {
+		t.Fatalf("thread_name=%q", items[0].ThreadName)
+	}
+	if items[0].SizeBytes != 1024 {
+		t.Fatalf("size_bytes=%d want=1024", items[0].SizeBytes)
+	}
+}
+
+func TestNormalizeModelList(t *testing.T) {
+	models := normalizeModelList([]string{" gpt-5.3-codex ", "", "gpt-5-codex", "gpt-5.3-codex"})
+	if len(models) != 2 {
+		t.Fatalf("len(models)=%d want=2", len(models))
+	}
+	if models[0] != "gpt-5.3-codex" || models[1] != "gpt-5-codex" {
+		t.Fatalf("models=%#v", models)
+	}
+}
+
 func TestResolveRetryPolicy(t *testing.T) {
 	retries, backoff := resolveRetryPolicy(10, 1)
 	if retries != 5 {

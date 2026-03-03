@@ -143,7 +143,7 @@ func TestDiscoverCodexModels(t *testing.T) {
 		if spec.Program == "sh" {
 			return executor.ExecResult{
 				ExitCode:   0,
-				Stdout:     "gpt-5-codex\n",
+				Stdout:     `{"default_model":"gpt-5-codex","models":["gpt-5.3-codex","gpt-5-codex"]}` + "\n",
 				DurationMS: 1,
 				StartedAt:  now,
 				FinishedAt: now,
@@ -185,14 +185,20 @@ func TestDiscoverCodexModels(t *testing.T) {
 		t.Fatalf("default_model=%q want=gpt-5-codex", modelResp.DefaultModel)
 	}
 	foundObserved := false
+	foundCatalog := false
 	for _, modelName := range modelResp.Models {
 		if modelName == "gpt-5-mini" {
 			foundObserved = true
-			break
+		}
+		if modelName == "gpt-5.3-codex" {
+			foundCatalog = true
 		}
 	}
 	if !foundObserved {
 		t.Fatalf("models should include observed gpt-5-mini: %#v", modelResp.Models)
+	}
+	if !foundCatalog {
+		t.Fatalf("models should include discovered catalog gpt-5.3-codex: %#v", modelResp.Models)
 	}
 }
 

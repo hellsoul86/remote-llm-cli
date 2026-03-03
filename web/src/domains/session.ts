@@ -29,11 +29,26 @@ export type ConversationThread = {
 
 export type WorkspaceDirectory = {
   id: string;
+  hostID: string;
+  hostName: string;
   path: string;
   sessions: ConversationThread[];
   activeSessionID: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type DiscoveredProjectSession = {
+  id: string;
+  title: string;
+  updatedAt?: string;
+};
+
+export type DiscoveredProject = {
+  hostID: string;
+  hostName: string;
+  path: string;
+  sessions: DiscoveredProjectSession[];
 };
 
 type PersistedSessionState = {
@@ -61,11 +76,13 @@ function createSession(index: number, title?: string): ConversationThread {
   };
 }
 
-function createWorkspace(index: number, path: string): WorkspaceDirectory {
+function createWorkspace(index: number, path: string, hostID = "local", hostName = "local-default"): WorkspaceDirectory {
   const now = new Date().toISOString();
   const first = createSession(index, "Session 1");
   return {
     id: `workspace_${Date.now()}_${index}`,
+    hostID,
+    hostName,
     path,
     sessions: [first],
     activeSessionID: first.id,
@@ -80,6 +97,10 @@ function defaultState(): PersistedSessionState {
     workspaces: [first],
     activeWorkspaceID: first.id
   };
+}
+
+function projectWorkspaceID(hostID: string, path: string): string {
+  return `project_${hostID.trim()}::${path.trim()}`;
 }
 
 function normalizeSession(raw: unknown, index: number): ConversationThread {
@@ -132,14 +153,16 @@ function normalizeWorkspace(raw: unknown, index: number): WorkspaceDirectory {
   const sessions = Array.isArray(candidate.sessions)
     ? candidate.sessions.map((thread, threadIndex) => normalizeSession(thread, threadIndex + 1))
     : [];
-  const safeSessions = sessions.length > 0 ? sessions : [createSession(1, "Session 1")];
+  const safeSessions = sessions;
   const activeSessionID =
     typeof candidate.activeSessionID === "string" && safeSessions.some((thread) => thread.id === candidate.activeSessionID)
       ? candidate.activeSessionID
-      : safeSessions[0].id;
+      : safeSessions[0]?.id ?? "";
 
   return {
     id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : fallback.id,
+    hostID: typeof candidate.hostID === "string" ? candidate.hostID : fallback.hostID,
+    hostName: typeof candidate.hostName === "string" && candidate.hostName.trim() ? candidate.hostName : fallback.hostName,
     path: typeof candidate.path === "string" && candidate.path.trim() ? candidate.path : "/home/ecs-user",
     sessions: safeSessions,
     activeSessionID,
@@ -442,6 +465,95 @@ export function useSessionDomain() {
     }));
   }
 
+  function syncProjectsFromDiscovery(projects: DiscoveredProject[]) {
+    const now = new Date().toISOString();
+    const currentByThreadID = new Map<string, ConversationThread>();
+    const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
+    for (const workspace of workspaces) {
+      currentByWorkspaceID.set(workspace.id, workspace);
+      for (const thread of workspace.sessions) {
+        currentByThreadID.set(thread.id, thread);
+      }
+    }
+
+    const nextWorkspaces: WorkspaceDirectory[] = [];
+    for (const project of projects) {
+      const hostID = project.hostID.trim();
+      const path = project.path.trim();
+      if (!hostID || !path) continue;
+
+      const id = projectWorkspaceID(hostID, path);
+      const existing = currentByWorkspaceID.get(id);
+      const seen = new Set<string>();
+      const sessions: ConversationThread[] = [];
+
+      for (const discovered of project.sessions) {
+        const sessionID = discovered.id.trim();
+        if (!sessionID || seen.has(sessionID)) continue;
+        seen.add(sessionID);
+        const prior = currentByThreadID.get(sessionID);
+        const title = discovered.title.trim() || prior?.title || sessionID;
+        const createdAt = prior?.createdAt ?? discovered.updatedAt ?? now;
+        const updatedAt = discovered.updatedAt ?? prior?.updatedAt ?? now;
+        sessions.push({
+          id: sessionID,
+          title,
+          draft: prior?.draft ?? "",
+          timeline: prior?.timeline ?? [],
+          createdAt,
+          updatedAt,
+          model: prior?.model ?? "",
+          sandbox: prior?.sandbox ?? "workspace-write",
+          imagePaths: prior?.imagePaths ?? [],
+          activeJobID: prior?.activeJobID ?? "",
+          lastJobStatus: prior?.lastJobStatus ?? "idle",
+          unreadDone: prior?.unreadDone ?? false
+        });
+      }
+
+      if (existing) {
+        for (const prior of existing.sessions) {
+          if (seen.has(prior.id)) continue;
+          if (!prior.activeJobID && prior.timeline.length === 0 && !prior.draft.trim()) continue;
+          sessions.push(prior);
+          seen.add(prior.id);
+        }
+      }
+
+      const activeSessionID =
+        existing && sessions.some((thread) => thread.id === existing.activeSessionID)
+          ? existing.activeSessionID
+          : sessions[0]?.id ?? "";
+
+      nextWorkspaces.push({
+        id,
+        hostID,
+        hostName: project.hostName.trim() || existing?.hostName || hostID,
+        path,
+        sessions,
+        activeSessionID,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now
+      });
+    }
+
+    if (nextWorkspaces.length === 0) {
+      const fallback = createWorkspace(1, "/home/ecs-user");
+      setWorkspaces([fallback]);
+      setActiveWorkspaceID(fallback.id);
+      setActiveJobThreadID(fallback.sessions[0]?.id ?? "");
+      return;
+    }
+
+    const nextActiveWorkspaceID = nextWorkspaces.some((workspace) => workspace.id === activeWorkspaceID)
+      ? activeWorkspaceID
+      : nextWorkspaces[0].id;
+    setWorkspaces(nextWorkspaces);
+    setActiveWorkspaceID(nextActiveWorkspaceID);
+    const activeProject = nextWorkspaces.find((workspace) => workspace.id === nextActiveWorkspaceID) ?? nextWorkspaces[0];
+    setActiveJobThreadID(activeProject?.activeSessionID ?? "");
+  }
+
   function resetSessionDomain() {
     const fresh = createWorkspace(1, "/home/ecs-user");
     completedJobsRef.current.clear();
@@ -493,6 +605,7 @@ export function useSessionDomain() {
     removeThreadImagePath,
     setThreadJobState,
     setThreadUnread,
+    syncProjectsFromDiscovery,
     resetSessionDomain
   };
 }
