@@ -197,6 +197,20 @@ export type RunJobRecord = {
   response?: RunResponse | SyncResponse;
 };
 
+export type RunJobEvent = {
+  seq: number;
+  job_id: string;
+  type: string;
+  host_id?: string;
+  host_name?: string;
+  attempt?: number;
+  chunk?: string;
+  exit_code?: number;
+  error?: string;
+  status?: string;
+  created_at: string;
+};
+
 export type AuditEvent = {
   id: string;
   timestamp: string;
@@ -424,6 +438,28 @@ export async function getRunJob(token: string, id: string): Promise<RunJobRecord
   const body = await res.json();
   if (!body?.job) throw new Error("get job failed: invalid response");
   return body.job;
+}
+
+export async function listRunJobEvents(
+  token: string,
+  id: string,
+  after = 0,
+  limit = 200
+): Promise<{ events: RunJobEvent[]; next_after: number }> {
+  const params = new URLSearchParams({
+    after: String(after),
+    limit: String(limit)
+  });
+  const res = await fetch(`${API_BASE}/v1/jobs/${encodeURIComponent(id)}/events?${params.toString()}`, { headers: headers(token) });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`list job events failed: ${res.status} ${text}`);
+  }
+  const body = await res.json();
+  return {
+    events: Array.isArray(body?.events) ? body.events : [],
+    next_after: typeof body?.next_after === "number" ? body.next_after : after
+  };
 }
 
 export async function cancelRunJob(token: string, id: string): Promise<{ state: string; job: RunJobRecord }> {

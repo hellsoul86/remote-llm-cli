@@ -77,6 +77,7 @@ func TestInferAction(t *testing.T) {
 		{name: "sync enqueue", method: http.MethodPost, path: "/v1/jobs/sync", want: "job.sync.enqueue"},
 		{name: "job list", method: http.MethodGet, path: "/v1/jobs", want: "job.list"},
 		{name: "job get", method: http.MethodGet, path: "/v1/jobs/job_1", want: "job.get"},
+		{name: "job events", method: http.MethodGet, path: "/v1/jobs/job_1/events", want: "job.events.list"},
 		{name: "job cancel", method: http.MethodPost, path: "/v1/jobs/job_1/cancel", want: "job.cancel"},
 		{name: "sync execute", method: http.MethodPost, path: "/v1/sync", want: "sync.execute"},
 		{name: "codex sessions discover", method: http.MethodPost, path: "/v1/codex/sessions/discover", want: "codex.sessions.discover"},
@@ -133,7 +134,7 @@ func TestResolveRetryPolicy(t *testing.T) {
 
 func TestExecuteWithRetry(t *testing.T) {
 	calls := 0
-	res, err, attempts := executeWithRetry(context.Background(), 2, time.Millisecond, func() (executor.ExecResult, error) {
+	res, err, attempts := executeWithRetry(context.Background(), 2, time.Millisecond, func(_ int) (executor.ExecResult, error) {
 		calls++
 		if calls < 3 {
 			return executor.ExecResult{ExitCode: 1}, context.DeadlineExceeded

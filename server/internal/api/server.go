@@ -35,6 +35,8 @@ type Server struct {
 	mu             sync.Mutex
 	cancels        map[string]context.CancelFunc
 	cancelRq       map[string]bool
+	eventSeq       int64
+	eventBuffers   map[string][]runJobEvent
 }
 
 type authIdentity struct {
@@ -53,7 +55,23 @@ const (
 	defaultRunJobWorkers  = 3
 	runJobQueueSize       = 512
 	jobResultCanceled     = 499
+	maxJobEventBacklog    = 1600
+	maxChunkEventBytes    = 2048
 )
+
+type runJobEvent struct {
+	Seq       int64     `json:"seq"`
+	JobID     string    `json:"job_id"`
+	Type      string    `json:"type"`
+	HostID    string    `json:"host_id,omitempty"`
+	HostName  string    `json:"host_name,omitempty"`
+	Attempt   int       `json:"attempt,omitempty"`
+	Chunk     string    `json:"chunk,omitempty"`
+	ExitCode  int       `json:"exit_code,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	Status    string    `json:"status,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
 
 func New(st *store.Store, rt *runtime.Registry) *Server {
 	s := &Server{
@@ -62,6 +80,7 @@ func New(st *store.Store, rt *runtime.Registry) *Server {
 		runJobs:        make(chan string, runJobQueueSize),
 		cancels:        map[string]context.CancelFunc{},
 		cancelRq:       map[string]bool{},
+		eventBuffers:   map[string][]runJobEvent{},
 		runViaSSH:      executor.RunViaSSH,
 		runRsyncViaSSH: executor.RunRsyncViaSSH,
 	}
@@ -85,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/jobs/sync", s.withAuth(http.HandlerFunc(s.handleEnqueueSyncJob)))
 	mux.Handle("GET /v1/jobs", s.withAuth(http.HandlerFunc(s.handleListRunJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
+	mux.Handle("GET /v1/jobs/{id}/events", s.withAuth(http.HandlerFunc(s.handleListRunJobEvents)))
 	mux.Handle("POST /v1/jobs/{id}/cancel", s.withAuth(http.HandlerFunc(s.handleCancelRunJob)))
 	mux.Handle("POST /v1/sync", s.withAuth(http.HandlerFunc(s.handleSync)))
 	mux.Handle("POST /v1/codex/sessions/discover", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexSessions)))
@@ -496,6 +516,13 @@ type preparedSync struct {
 	Hosts   []model.Host
 }
 
+type runProgressObserver struct {
+	OnAttempt func(host model.Host, attempt int)
+	OnStdout  func(host model.Host, attempt int, chunk string)
+	OnStderr  func(host model.Host, attempt int, chunk string)
+	OnResult  func(target runTargetResult)
+}
+
 type apiError struct {
 	StatusCode int
 	Message    string
@@ -556,6 +583,7 @@ func (s *Server) handleEnqueueRunJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.queued", Status: runJobStatusPending})
 	if s.enqueueStoredJob(job.ID) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"job": compactRunJob(job)})
 		return
@@ -604,6 +632,7 @@ func (s *Server) handleEnqueueSyncJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.queued", Status: runJobStatusPending})
 	if s.enqueueStoredJob(job.ID) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"job": compactRunJob(job)})
 		return
@@ -668,6 +697,35 @@ func (s *Server) handleGetRunJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 
+func (s *Server) handleListRunJobEvents(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing job id"})
+		return
+	}
+	if _, ok := s.store.GetRunJob(id); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "job not found"})
+		return
+	}
+	after := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("after")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid after"})
+			return
+		}
+		after = v
+	}
+	limit := parseLimit(r, 200, 1000)
+	events, next := s.listRunJobEvents(id, after, limit)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job_id":     id,
+		"after":      after,
+		"next_after": next,
+		"events":     events,
+	})
+}
+
 func (s *Server) handleCancelRunJob(w http.ResponseWriter, r *http.Request) {
 	jobID := strings.TrimSpace(r.PathValue("id"))
 	if jobID == "" {
@@ -693,10 +751,12 @@ func (s *Server) handleCancelRunJob(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.canceled", Status: runJobStatusCanceled, Error: job.Error})
 		writeJSON(w, http.StatusOK, map[string]any{"state": "canceled", "job": compactRunJob(job)})
 		return
 	case runJobStatusRunning:
 		s.requestJobCancel(jobID)
+		s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.cancel_requested", Status: runJobStatusRunning})
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"state": "cancel_requested",
 			"job":   compactRunJob(job),
@@ -713,7 +773,7 @@ func (s *Server) executeRunRequest(parentCtx context.Context, req runRequest, id
 	if err != nil {
 		return 0, runResponse{}, err
 	}
-	status, resp := s.executePreparedRun(parentCtx, prepared, identity)
+	status, resp := s.executePreparedRun(parentCtx, prepared, identity, nil)
 	return status, resp, nil
 }
 
@@ -745,7 +805,12 @@ func (s *Server) prepareRun(req runRequest) (preparedRun, error) {
 	}, nil
 }
 
-func (s *Server) executePreparedRun(parentCtx context.Context, prepared preparedRun, identity authIdentity) (int, runResponse) {
+func (s *Server) executePreparedRun(
+	parentCtx context.Context,
+	prepared preparedRun,
+	identity authIdentity,
+	observer *runProgressObserver,
+) (int, runResponse) {
 	req := prepared.Request
 	timeout := 600 * time.Second
 	if req.TimeoutSec > 0 {
@@ -759,7 +824,10 @@ func (s *Server) executePreparedRun(parentCtx context.Context, prepared prepared
 	retryCount, retryBackoff := resolveRetryPolicy(req.RetryCount, req.RetryBackoffMS)
 	maxOutputBytes := resolveMaxOutputBytes(req.MaxOutputKB)
 	targets := s.runFanout(ctx, prepared.Hosts, fanout, func(host model.Host) runTargetResult {
-		res, runErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func() (executor.ExecResult, error) {
+		res, runErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func(attempt int) (executor.ExecResult, error) {
+			if observer != nil && observer.OnAttempt != nil {
+				observer.OnAttempt(host, attempt)
+			}
 			return s.runViaSSH(
 				ctx,
 				host,
@@ -768,11 +836,23 @@ func (s *Server) executePreparedRun(parentCtx context.Context, prepared prepared
 				executor.ExecOptions{
 					MaxStdoutBytes: maxOutputBytes,
 					MaxStderrBytes: maxOutputBytes,
+					OnStdoutChunk: func(raw []byte) {
+						if observer == nil || observer.OnStdout == nil {
+							return
+						}
+						observer.OnStdout(host, attempt, truncateChunkBytes(raw))
+					},
+					OnStderrChunk: func(raw []byte) {
+						if observer == nil || observer.OnStderr == nil {
+							return
+						}
+						observer.OnStderr(host, attempt, truncateChunkBytes(raw))
+					},
 				},
 			)
 		})
 		msg, class, hint := errorDetails(runErr)
-		return runTargetResult{
+		item := runTargetResult{
 			Host:       host,
 			Result:     res,
 			OK:         runErr == nil,
@@ -781,6 +861,10 @@ func (s *Server) executePreparedRun(parentCtx context.Context, prepared prepared
 			ErrorHint:  hint,
 			Attempts:   attempts,
 		}
+		if observer != nil && observer.OnResult != nil {
+			observer.OnResult(item)
+		}
+		return item
 	})
 	if req.Runtime == "codex" && req.Codex != nil && req.Codex.JSONOutput {
 		annotateCodexJSONSummary(targets)
@@ -882,6 +966,70 @@ func (s *Server) enqueueStoredJob(jobID string) bool {
 	}
 }
 
+func (s *Server) appendRunJobEvent(jobID string, event runJobEvent) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	event.JobID = jobID
+
+	s.mu.Lock()
+	if s.eventBuffers == nil {
+		s.eventBuffers = map[string][]runJobEvent{}
+	}
+	s.eventSeq++
+	event.Seq = s.eventSeq
+	buf := append(s.eventBuffers[jobID], event)
+	if len(buf) > maxJobEventBacklog {
+		buf = append([]runJobEvent(nil), buf[len(buf)-maxJobEventBacklog:]...)
+	}
+	s.eventBuffers[jobID] = buf
+	s.mu.Unlock()
+}
+
+func (s *Server) listRunJobEvents(jobID string, afterSeq int64, limit int) ([]runJobEvent, int64) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	s.mu.Lock()
+	buf := append([]runJobEvent(nil), s.eventBuffers[jobID]...)
+	s.mu.Unlock()
+	if len(buf) == 0 {
+		return nil, afterSeq
+	}
+	out := make([]runJobEvent, 0, minInt(limit, len(buf)))
+	next := afterSeq
+	for _, event := range buf {
+		if event.Seq <= afterSeq {
+			continue
+		}
+		out = append(out, event)
+		if event.Seq > next {
+			next = event.Seq
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, next
+}
+
+func truncateChunkBytes(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if len(raw) <= maxChunkEventBytes {
+		return string(raw)
+	}
+	return string(raw[:maxChunkEventBytes]) + "\n...[chunk truncated]..."
+}
+
 func (s *Server) registerRunningJob(jobID string, cancel context.CancelFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -932,6 +1080,7 @@ func (s *Server) executeQueuedJob(jobID string) {
 	if err := s.store.UpdateRunJob(job); err != nil {
 		return
 	}
+	s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.running", Status: runJobStatusRunning})
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerRunningJob(jobID, cancel)
 	defer s.unregisterRunningJob(jobID)
@@ -948,6 +1097,7 @@ func (s *Server) executeQueuedJob(jobID string) {
 		job.Error = fmt.Sprintf("unsupported job type: %s", job.Type)
 		job.FinishedAt = &finished
 		_ = s.store.UpdateRunJob(job)
+		s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.failed", Status: runJobStatusFailed, Error: job.Error})
 	}
 }
 
@@ -960,49 +1110,95 @@ func (s *Server) executeQueuedRunJob(ctx context.Context, job model.RunJobRecord
 		job.Error = fmt.Sprintf("decode run request: %v", err)
 		job.FinishedAt = &finished
 		_ = s.store.UpdateRunJob(job)
+		s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.failed", Status: runJobStatusFailed, Error: job.Error})
 		return
 	}
 
-	status, resp, err := s.executeRunRequest(ctx, req, authIdentity{KeyID: job.CreatedByKeyID})
+	prepared, err := s.prepareRun(req)
+	if err != nil {
+		finished := time.Now().UTC()
+		job.Status = runJobStatusFailed
+		job.ResultStatus = http.StatusBadRequest
+		job.Error = err.Error()
+		job.FinishedAt = &finished
+		_ = s.store.UpdateRunJob(job)
+		s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.failed", Status: runJobStatusFailed, Error: job.Error})
+		return
+	}
+
+	observer := &runProgressObserver{
+		OnAttempt: func(host model.Host, attempt int) {
+			s.appendRunJobEvent(job.ID, runJobEvent{
+				Type:     "target.started",
+				HostID:   strings.TrimSpace(host.ID),
+				HostName: strings.TrimSpace(host.Name),
+				Attempt:  attempt,
+			})
+		},
+		OnStdout: func(host model.Host, attempt int, chunk string) {
+			if strings.TrimSpace(chunk) == "" {
+				return
+			}
+			s.appendRunJobEvent(job.ID, runJobEvent{
+				Type:     "target.stdout",
+				HostID:   strings.TrimSpace(host.ID),
+				HostName: strings.TrimSpace(host.Name),
+				Attempt:  attempt,
+				Chunk:    chunk,
+			})
+		},
+		OnStderr: func(host model.Host, attempt int, chunk string) {
+			if strings.TrimSpace(chunk) == "" {
+				return
+			}
+			s.appendRunJobEvent(job.ID, runJobEvent{
+				Type:     "target.stderr",
+				HostID:   strings.TrimSpace(host.ID),
+				HostName: strings.TrimSpace(host.Name),
+				Attempt:  attempt,
+				Chunk:    chunk,
+			})
+		},
+		OnResult: func(target runTargetResult) {
+			status := "ok"
+			if !target.OK {
+				status = "failed"
+			}
+			s.appendRunJobEvent(job.ID, runJobEvent{
+				Type:     "target.done",
+				HostID:   strings.TrimSpace(target.Host.ID),
+				HostName: strings.TrimSpace(target.Host.Name),
+				Attempt:  target.Attempts,
+				ExitCode: target.Result.ExitCode,
+				Status:   status,
+				Error:    strings.TrimSpace(target.Error),
+			})
+		},
+	}
+
+	status, resp := s.executePreparedRun(ctx, prepared, authIdentity{KeyID: job.CreatedByKeyID}, observer)
 	finished := time.Now().UTC()
 	job.ResultStatus = status
 	job.FinishedAt = &finished
 	canceled := s.takeJobCancelRequested(job.ID)
-	if err != nil {
-		if canceled || errors.Is(err, context.Canceled) {
-			job.Status = runJobStatusCanceled
-			job.ResultStatus = jobResultCanceled
-			job.Error = "canceled while running"
-			_ = s.store.UpdateRunJob(job)
-			return
-		}
-		var badReq apiError
-		if errors.As(err, &badReq) {
-			job.ResultStatus = badReq.StatusCode
-		}
-		if job.ResultStatus == 0 {
-			job.ResultStatus = http.StatusInternalServerError
-		}
-		job.Status = runJobStatusFailed
-		job.Error = err.Error()
-		_ = s.store.UpdateRunJob(job)
-		return
-	}
 	rawResp, err := json.Marshal(resp)
 	if err != nil {
 		job.Status = runJobStatusFailed
 		job.ResultStatus = http.StatusInternalServerError
 		job.Error = fmt.Sprintf("encode run response: %v", err)
 		_ = s.store.UpdateRunJob(job)
+		s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.failed", Status: runJobStatusFailed, Error: job.Error})
 		return
 	}
 	if canceled {
 		job.Status = runJobStatusCanceled
 		job.ResultStatus = jobResultCanceled
 		job.Error = "canceled while running"
+		s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.canceled", Status: runJobStatusCanceled, Error: job.Error})
 	} else {
 		job.Status = runJobStatusSucceeded
 		job.Error = ""
+		s.appendRunJobEvent(job.ID, runJobEvent{Type: "job.succeeded", Status: runJobStatusSucceeded})
 	}
 	job.Response = rawResp
 	job.TotalHosts = resp.Summary.Total
@@ -1160,7 +1356,7 @@ func (s *Server) executePreparedSync(parentCtx context.Context, prepared prepare
 	maxOutputBytes := resolveMaxOutputBytes(req.MaxOutputKB)
 	targets := s.runFanout(ctx, prepared.Hosts, fanout, func(host model.Host) runTargetResult {
 		dst := resolveSyncDst(req.Dst, host.Workspace)
-		res, syncErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func() (executor.ExecResult, error) {
+		res, syncErr, attempts := executeWithRetry(ctx, retryCount, retryBackoff, func(_ int) (executor.ExecResult, error) {
 			return s.runRsyncViaSSH(
 				ctx,
 				host,
@@ -1843,14 +2039,14 @@ func executeWithRetry(
 	ctx context.Context,
 	retryCount int,
 	retryBackoff time.Duration,
-	run func() (executor.ExecResult, error),
+	run func(attempt int) (executor.ExecResult, error),
 ) (executor.ExecResult, error, int) {
 	attempts := 0
 	var lastRes executor.ExecResult
 	var lastErr error
 	for {
 		attempts++
-		res, err := run()
+		res, err := run(attempts)
 		lastRes = res
 		lastErr = err
 		if err == nil {
@@ -1944,6 +2140,8 @@ func inferAction(method string, path string) string {
 		return "job.sync.enqueue"
 	case method == http.MethodGet && path == "/v1/jobs":
 		return "job.list"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/events"):
+		return "job.events.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/"):
 		return "job.get"
 	case method == http.MethodPost && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/cancel"):
@@ -2101,6 +2299,13 @@ func parseLimit(r *http.Request, fallback int, max int) int {
 		return max
 	}
 	return v
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func resolveMaxOutputBytes(maxOutputKB int) int {
