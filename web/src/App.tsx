@@ -107,6 +107,88 @@ function clipStreamText(raw: string, maxChars = 3600): string {
   return `${raw.slice(raw.length - maxChars)}\n...[stream truncated for UI]...`;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  return value as Record<string, unknown>;
+}
+
+function gatherMessageText(value: unknown, depth = 0): string[] {
+  if (depth > 4) return [];
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (Array.isArray(value)) {
+    const out: string[] = [];
+    for (const item of value) {
+      out.push(...gatherMessageText(item, depth + 1));
+    }
+    return out;
+  }
+
+  const record = asRecord(value);
+  if (!record) return [];
+  const out: string[] = [];
+  const keys = ["text", "message", "content", "parts", "output_text"];
+  for (const key of keys) {
+    if (!(key in record)) continue;
+    out.push(...gatherMessageText(record[key], depth + 1));
+  }
+  return out;
+}
+
+function parseCodexAssistantTextFromStdout(stdout: string): string {
+  if (!stdout.trim()) return "";
+  const lines = stdout.split(/\r?\n/);
+  const messages: string[] = [];
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const event = asRecord(parsed);
+    if (!event) continue;
+    if (event.type !== "item.completed") continue;
+    const item = asRecord(event.item);
+    if (!item) continue;
+    if (item.type !== "agent_message") continue;
+    const text = gatherMessageText(item)
+      .join("\n")
+      .trim();
+    if (!text) continue;
+    if (!messages.includes(text)) {
+      messages.push(text);
+    }
+  }
+  return messages[messages.length - 1] ?? "";
+}
+
+function extractAssistantTextFromJob(job: RunJobRecord): string {
+  const response = job.response;
+  if (!response || !("targets" in response) || !Array.isArray(response.targets) || response.targets.length === 0) {
+    return "";
+  }
+  const targetMessages: string[] = [];
+  const multiTarget = response.targets.length > 1;
+  for (const target of response.targets) {
+    const stdout = target?.result?.stdout;
+    if (typeof stdout !== "string" || !stdout.trim()) continue;
+    const assistantText = parseCodexAssistantTextFromStdout(stdout);
+    if (!assistantText) continue;
+    if (multiTarget) {
+      const hostName = target.host?.name?.trim() || target.host?.id || "target";
+      targetMessages.push(`[${hostName}] ${assistantText}`);
+    } else {
+      targetMessages.push(assistantText);
+    }
+  }
+  return targetMessages.join("\n\n").trim();
+}
+
 function formatClock(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
@@ -833,6 +915,7 @@ export function App() {
 
           if (!completedJobsRef.current.has(job.id)) {
             completedJobsRef.current.add(job.id);
+            const assistantText = job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
             if (job.status === "failed" || job.status === "canceled") {
               addTimelineEntry(
                 {
@@ -840,6 +923,16 @@ export function App() {
                   state: "error",
                   title: "System",
                   body: job.error ? String(job.error) : "Session failed."
+                },
+                item.threadID
+              );
+            } else if (assistantText) {
+              addTimelineEntry(
+                {
+                  kind: "assistant",
+                  state: "success",
+                  title: "Assistant",
+                  body: assistantText
                 },
                 item.threadID
               );
