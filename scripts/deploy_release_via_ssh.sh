@@ -42,22 +42,10 @@ ssh_opts=(
   -o ConnectTimeout=20
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=3
+  -o StrictHostKeyChecking=accept-new
   -i "${DEPLOY_SSH_KEY_PATH}"
   -p "${deploy_port}"
 )
-
-if [ -n "${DEPLOY_SSH_KNOWN_HOSTS_PATH:-}" ]; then
-  if [ ! -f "${DEPLOY_SSH_KNOWN_HOSTS_PATH}" ]; then
-    echo "known_hosts file not found: ${DEPLOY_SSH_KNOWN_HOSTS_PATH}" >&2
-    exit 1
-  fi
-  ssh_opts+=(
-    -o StrictHostKeyChecking=yes
-    -o UserKnownHostsFile="${DEPLOY_SSH_KNOWN_HOSTS_PATH}"
-  )
-else
-  ssh_opts+=(-o StrictHostKeyChecking=accept-new)
-fi
 
 echo "upload release to ${remote}:${remote_tmp_tgz}"
 scp "${ssh_opts[@]}" "${DEPLOY_RELEASE_TARBALL}" "${remote}:${remote_tmp_tgz}"

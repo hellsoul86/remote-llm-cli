@@ -118,26 +118,17 @@ jobs:
       - name: Prepare SSH material
         env:
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
-          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
         run: |
           key_path="${RUNNER_TEMP}/deploy_key"
           printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "${key_path}"
           chmod 600 "${key_path}"
           echo "DEPLOY_SSH_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
 
-          if [ -n "${DEPLOY_SSH_KNOWN_HOSTS}" ]; then
-            known_hosts_path="${RUNNER_TEMP}/known_hosts"
-            printf '%s\n' "${DEPLOY_SSH_KNOWN_HOSTS}" > "${known_hosts_path}"
-            chmod 600 "${known_hosts_path}"
-            echo "DEPLOY_SSH_KNOWN_HOSTS_PATH=${known_hosts_path}" >> "${GITHUB_ENV}"
-          fi
-
       - name: Deploy via SSH
         env:
           DEPLOY_RELEASE_TARBALL: ${{ github.workspace }}/dist/remote-llm-release.tgz
           DEPLOY_RELEASE_ID: ${{ github.sha }}
           DEPLOY_SSH_KEY_PATH: ${{ env.DEPLOY_SSH_KEY_PATH }}
-          DEPLOY_SSH_KNOWN_HOSTS_PATH: ${{ env.DEPLOY_SSH_KNOWN_HOSTS_PATH }}
           DEPLOY_HOST: ${{ matrix.target.host }}
           DEPLOY_PORT: ${{ matrix.target.port || 22 }}
           DEPLOY_USER: ${{ matrix.target.user }}

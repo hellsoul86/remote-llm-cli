@@ -69,10 +69,6 @@ Optional keys:
 
 SSH private key content used by workflow to connect target hosts.
 
-### 2.3 Secret (optional): `DEPLOY_SSH_KNOWN_HOSTS`
-
-Pinned known_hosts entries. If empty, workflow uses `StrictHostKeyChecking=accept-new`.
-
 ## 3. Deployment behavior
 
 Per workflow run:
