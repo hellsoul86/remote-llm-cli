@@ -347,6 +347,72 @@ export function useSessionDomain() {
     }));
   }
 
+  function upsertAssistantStreamEntry(threadID: string, body: string) {
+    const trimmed = body.trim();
+    if (!trimmed) return;
+    const now = new Date().toISOString();
+    updateWorkspacesByThread(threadID, (thread) => {
+      const timeline = [...thread.timeline];
+      const last = timeline[timeline.length - 1];
+      if (last && last.kind === "assistant" && last.state === "running") {
+        if (last.body === trimmed) return thread;
+        timeline[timeline.length - 1] = {
+          ...last,
+          body: trimmed
+        };
+      } else {
+        timeline.push({
+          id: nextEntryID(),
+          kind: "assistant",
+          state: "running",
+          title: "Assistant",
+          body: trimmed,
+          createdAt: now
+        });
+      }
+      return {
+        ...thread,
+        timeline,
+        updatedAt: now
+      };
+    });
+  }
+
+  function finalizeAssistantStreamEntry(threadID: string, state: "success" | "error", body?: string) {
+    const trimmed = body?.trim() ?? "";
+    const now = new Date().toISOString();
+    updateWorkspacesByThread(threadID, (thread) => {
+      const timeline = [...thread.timeline];
+      const last = timeline[timeline.length - 1];
+      if (last && last.kind === "assistant" && last.state === "running") {
+        timeline[timeline.length - 1] = {
+          ...last,
+          state,
+          body: trimmed || last.body
+        };
+        return {
+          ...thread,
+          timeline,
+          updatedAt: now
+        };
+      }
+      if (!trimmed) return thread;
+      timeline.push({
+        id: nextEntryID(),
+        kind: "assistant",
+        state,
+        title: "Assistant",
+        body: trimmed,
+        createdAt: now
+      });
+      return {
+        ...thread,
+        timeline,
+        updatedAt: now
+      };
+    });
+  }
+
   function createThread() {
     if (!activeWorkspaceID) return;
     sessionCounterRef.current += 1;
@@ -596,6 +662,8 @@ export function useSessionDomain() {
     runningThreadJobs,
     updateThreadDraft,
     addTimelineEntry,
+    upsertAssistantStreamEntry,
+    finalizeAssistantStreamEntry,
     createThread,
     renameThread,
     switchThreadByOffset,

@@ -173,6 +173,7 @@ function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallbac
   if (!stdout.trim()) return "";
   const lines = stdout.split(/\r?\n/);
   const messages: string[] = [];
+  const deltas: string[] = [];
   const plainLines: string[] = [];
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -186,6 +187,13 @@ function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallbac
     }
     const event = asRecord(parsed);
     if (!event) continue;
+    const eventType = typeof event.type === "string" ? event.type : "";
+    if (eventType.endsWith(".delta")) {
+      const deltaText = gatherMessageText(event.delta ?? event).join("");
+      if (deltaText.trim()) {
+        deltas.push(deltaText);
+      }
+    }
     const text = pickAssistantTextFromEvent(event);
     if (!text) continue;
     if (!messages.includes(text)) {
@@ -194,6 +202,9 @@ function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallbac
   }
   if (messages.length > 0) {
     return messages[messages.length - 1] ?? "";
+  }
+  if (deltas.length > 0) {
+    return deltas.join("").trim();
   }
   if (allowPlainTextFallback && plainLines.length > 0) {
     return plainLines.join("\n").trim();
@@ -363,6 +374,8 @@ export function App() {
     activeDraft,
     updateThreadDraft,
     addTimelineEntry,
+    upsertAssistantStreamEntry,
+    finalizeAssistantStreamEntry,
     createThread,
     switchThreadByOffset,
     setThreadModel,
@@ -386,6 +399,7 @@ export function App() {
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
 
+  const timelineViewportRef = useRef<HTMLElement | null>(null);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -480,6 +494,7 @@ export function App() {
     return out;
   }, [sessionModelDefault, sessionModelOptions, activeThreadModelValue]);
   const hasSessionModelChoices = sessionModelChoices.length > 0;
+  const activeTimelineTail = activeTimeline[activeTimeline.length - 1];
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -641,6 +656,23 @@ export function App() {
     }));
   }
 
+  async function refreshProjectsFromDiscovery(authToken: string, sourceHosts: Host[], discoverEnabled: boolean) {
+    if (!discoverEnabled) {
+      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
+      return;
+    }
+    try {
+      const discovered = await discoverCodexSessions(authToken, {
+        all_hosts: true,
+        fanout: Math.max(1, Math.min(8, sourceHosts.length || 1)),
+        limit_per_host: 120
+      });
+      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []));
+    } catch {
+      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
+    }
+  }
+
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
     setIsRefreshing(true);
     try {
@@ -681,20 +713,7 @@ export function App() {
       } else if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
-      if (nextRuntimes.some((runtime) => runtime.name === "codex")) {
-        try {
-          const discovered = await discoverCodexSessions(authToken, {
-            all_hosts: true,
-            fanout: Math.max(1, Math.min(8, nextHosts.length || 1)),
-            limit_per_host: 120
-          });
-          syncProjectsFromDiscovery(buildDiscoveredProjects(nextHosts, discovered.body.targets ?? []));
-        } catch {
-          syncProjectsFromDiscovery(buildDiscoveredProjects(nextHosts, []));
-        }
-      } else {
-        syncProjectsFromDiscovery(buildDiscoveredProjects(nextHosts, []));
-      }
+      await refreshProjectsFromDiscovery(authToken, nextHosts, nextRuntimes.some((runtime) => runtime.name === "codex"));
 
       const running = nextJobs.find((job) => isJobActive(job));
       if (running) {
@@ -803,6 +822,32 @@ export function App() {
   }, [authPhase, token, activeSessionHostID, runtimes]);
 
   useEffect(() => {
+    if (authPhase !== "ready" || !token.trim()) return;
+    if (appMode !== "session") return;
+    if (!runtimes.some((runtime) => runtime.name === "codex")) return;
+    if (hosts.length === 0) return;
+
+    let canceled = false;
+    const refresh = async () => {
+      try {
+        await refreshProjectsFromDiscovery(token, hosts, true);
+      } catch {
+        // no-op: best-effort title/session sync
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      if (canceled) return;
+      void refresh();
+    }, 25000);
+
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [authPhase, token, appMode, hosts, runtimes]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     const syncFromHash = () => {
       setAppMode(modeFromHash(window.location.hash));
@@ -815,8 +860,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    timelineBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [activeTimeline.length, activeThreadID]);
+    const node = timelineViewportRef.current;
+    if (!node) return;
+    const frame = window.requestAnimationFrame(() => {
+      node.scrollTop = node.scrollHeight;
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [activeThreadID, activeTimeline.length, activeTimelineTail?.body, activeTimelineTail?.state]);
 
   useEffect(() => {
     if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
@@ -901,6 +953,7 @@ export function App() {
         );
         if (canceled) return;
 
+        let needsProjectRefresh = false;
         for (const result of jobResults) {
           const { item, job, error, events, nextAfter } = result;
           if (!job) {
@@ -939,27 +992,14 @@ export function App() {
               const contentOnly = parseCodexAssistantTextFromStdout(stdoutStream, false);
               if (contentOnly.trim()) {
                 jobStreamSeenRef.current.set(item.jobID, true);
-                addTimelineEntry(
-                  {
-                    kind: "assistant",
-                    state: "running",
-                    title: "Assistant",
-                    body: clipStreamText(contentOnly)
-                  },
-                  item.threadID
-                );
+                upsertAssistantStreamEntry(item.threadID, clipStreamText(contentOnly));
+              } else if (stdoutStream.includes('"type":"turn.started"') || stdoutStream.includes('"type":"thread.started"')) {
+                jobStreamSeenRef.current.set(item.jobID, true);
+                upsertAssistantStreamEntry(item.threadID, "Thinking...");
               }
             } else {
               jobStreamSeenRef.current.set(item.jobID, true);
-              addTimelineEntry(
-                {
-                  kind: "assistant",
-                  state: "running",
-                  title: "Assistant",
-                  body: clipStreamText(stdoutStream)
-                },
-                item.threadID
-              );
+              upsertAssistantStreamEntry(item.threadID, clipStreamText(stdoutStream));
             }
           }
           if (terminalHints.length > 0) {
@@ -984,6 +1024,9 @@ export function App() {
             continue;
           }
 
+          if (job.runtime === "codex") {
+            needsProjectRefresh = true;
+          }
           const responseFailed = jobHasTargetFailures(job);
           const terminalStatus =
             job.status === "failed" || job.status === "canceled"
@@ -1006,6 +1049,9 @@ export function App() {
             const assistantText = job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
             const failedSummary = summarizeTargetFailures(job);
             if (job.status === "failed" || job.status === "canceled" || responseFailed) {
+              if (sawStream) {
+                finalizeAssistantStreamEntry(item.threadID, "error");
+              }
               addTimelineEntry(
                 {
                   kind: "system",
@@ -1016,15 +1062,21 @@ export function App() {
                 item.threadID
               );
             } else if (assistantText) {
-              addTimelineEntry(
-                {
-                  kind: "assistant",
-                  state: "success",
-                  title: "Assistant",
-                  body: assistantText
-                },
-                item.threadID
-              );
+              if (sawStream) {
+                finalizeAssistantStreamEntry(item.threadID, "success", assistantText);
+              } else {
+                addTimelineEntry(
+                  {
+                    kind: "assistant",
+                    state: "success",
+                    title: "Assistant",
+                    body: assistantText
+                  },
+                  item.threadID
+                );
+              }
+            } else if (sawStream) {
+              finalizeAssistantStreamEntry(item.threadID, "success");
             } else if (!sawStream) {
               addTimelineEntry(
                 {
@@ -1057,6 +1109,10 @@ export function App() {
         setRuns(nextRuns);
         setAuditEvents(nextAudit);
         setMetrics(refreshedMetrics);
+        if (needsProjectRefresh) {
+          await refreshProjectsFromDiscovery(token, hosts, runtimes.some((runtime) => runtime.name === "codex"));
+          if (canceled) return;
+        }
       } catch {
         if (canceled) return;
       }
@@ -1071,7 +1127,7 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, appMode, runningThreadJobs, activeThreadID, threadTitleMap]);
+  }, [authPhase, token, appMode, runningThreadJobs, activeThreadID, threadTitleMap, hosts, runtimes]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
@@ -1251,6 +1307,7 @@ export function App() {
       },
       activeThread.id
     );
+    updateThreadDraft(activeThread.id, "");
 
     setSubmittingThreadID(activeThread.id);
     try {
@@ -1565,7 +1622,7 @@ export function App() {
             </section>
 
             <section className="inspect-block compact-session-meta">
-              <p className="pane-subtle-light">Ctrl/Cmd+K focus · Ctrl/Cmd+Enter send · Ctrl/Cmd+Shift+N new session</p>
+              <p className="pane-subtle-light">Ctrl/Cmd+K focus · Enter send · Shift+Enter newline · Ctrl/Cmd+Shift+N new session</p>
               <div className="ops-actions-row">
                 <button type="button" className="ghost" onClick={() => void onEnableNotifications()}>
                   Alerts: {notificationPermission}
@@ -1581,7 +1638,7 @@ export function App() {
               </div>
             </header>
 
-            <section className="timeline" aria-live="polite">
+            <section className="timeline" aria-live="polite" ref={timelineViewportRef}>
               {activeTimeline.length === 0 ? (
                 <article className="message message-system">
                   <div className="message-title-row">
@@ -1674,7 +1731,7 @@ export function App() {
                   </button>
                 ))}
                 {imageUploadError ? <span className="shortcut-hint">{imageUploadError}</span> : null}
-                <span className="shortcut-hint">Ctrl/Cmd+Enter send</span>
+                <span className="shortcut-hint">Enter send · Shift+Enter newline</span>
               </div>
 
               <textarea
@@ -1689,7 +1746,8 @@ export function App() {
                 placeholder={activeThread ? "Tell codex what to do in this workspace..." : "Select a session to start"}
                 disabled={!activeThread}
                 onKeyDown={(event) => {
-                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  const composing = "isComposing" in event.nativeEvent ? Boolean((event.nativeEvent as { isComposing?: boolean }).isComposing) : false;
+                  if (event.key === "Enter" && !event.shiftKey && !composing) {
                     event.preventDefault();
                     composerFormRef.current?.requestSubmit();
                   }
