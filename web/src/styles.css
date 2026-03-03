@@ -292,7 +292,7 @@ pre {
 .session-stage {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(580px, 1fr) 320px;
+  grid-template-columns: 320px minmax(580px, 1fr);
   gap: 12px;
 }
 
@@ -535,6 +535,10 @@ button.ghost.danger-ghost:hover {
   padding-bottom: 2px;
 }
 
+.workspace-list {
+  max-height: 220px;
+}
+
 .thread-chip {
   min-width: 124px;
   padding: 7px 10px;
@@ -675,6 +679,18 @@ button.ghost.danger-ghost:hover {
   padding: 6px 10px;
   font-size: 0.73rem;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.file-chip {
+  position: relative;
+  overflow: hidden;
+}
+
+.file-chip input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .shortcut-hint {
@@ -911,7 +927,7 @@ button.ghost.danger-ghost:hover {
 
 @media (max-width: 1320px) {
   .session-stage {
-    grid-template-columns: minmax(460px, 1fr) 300px;
+    grid-template-columns: 300px minmax(460px, 1fr);
   }
 
   .ops-stage {
