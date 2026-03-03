@@ -1,18 +1,25 @@
 import { defineConfig } from "@playwright/test";
 
+const liveBaseURL = (process.env.E2E_BASE_URL ?? "").trim();
+const useLocalDevServer = liveBaseURL === "";
+
 export default defineConfig({
   testDir: "./e2e",
-  timeout: 30_000,
+  timeout: useLocalDevServer ? 30_000 : 300_000,
   expect: {
-    timeout: 10_000
+    timeout: useLocalDevServer ? 10_000 : 120_000
   },
   use: {
-    baseURL: "http://127.0.0.1:4173",
-    headless: true
+    baseURL: useLocalDevServer ? "http://127.0.0.1:4173" : liveBaseURL,
+    headless: true,
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure"
   },
-  webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 4173",
-    port: 4173,
-    reuseExistingServer: !process.env.CI
-  }
+  webServer: useLocalDevServer
+    ? {
+        command: "npm run dev -- --host 127.0.0.1 --port 4173",
+        port: 4173,
+        reuseExistingServer: !process.env.CI
+      }
+    : undefined
 });

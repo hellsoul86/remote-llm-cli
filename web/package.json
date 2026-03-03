@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test:e2e": "playwright test",
-    "test:e2e:smoke": "playwright test e2e/async-jobs.spec.ts --reporter=line"
+    "test:e2e:smoke": "playwright test e2e/async-jobs.spec.ts e2e/session-ux.spec.ts --reporter=line",
+    "test:e2e:ux": "playwright test e2e/session-ux.spec.ts --reporter=line",
+    "test:e2e:live": "playwright test e2e/live-session.spec.ts --reporter=line"
   },
   "dependencies": {
     "react": "^18.3.1",
