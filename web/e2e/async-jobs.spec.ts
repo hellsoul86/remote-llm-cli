@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("queues async run job and observes terminal success", async ({ page }) => {
   let jobPollCount = 0;
+  let eventPollCount = 0;
 
   await page.route("**/v1/healthz", async (route) => {
     await route.fulfill({ status: 200, json: { ok: true, timestamp: "2026-03-02T00:00:00Z" } });
@@ -143,6 +144,35 @@ test("queues async run job and observes terminal success", async ({ page }) => {
       }
     });
   });
+  await page.route("**/v1/jobs/job_1/events**", async (route) => {
+    eventPollCount += 1;
+    if (eventPollCount === 1) {
+      await route.fulfill({
+        status: 200,
+        json: {
+          job_id: "job_1",
+          after: 0,
+          next_after: 4,
+          events: [
+            { seq: 1, job_id: "job_1", type: "job.running", created_at: "2026-03-02T00:00:00Z" },
+            { seq: 2, job_id: "job_1", type: "target.started", host_name: "local-default", attempt: 1, created_at: "2026-03-02T00:00:00Z" },
+            { seq: 3, job_id: "job_1", type: "target.stdout", host_name: "local-default", chunk: "stream-one\\n", created_at: "2026-03-02T00:00:00Z" },
+            { seq: 4, job_id: "job_1", type: "target.done", host_name: "local-default", status: "ok", exit_code: 0, created_at: "2026-03-02T00:00:00Z" }
+          ]
+        }
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        job_id: "job_1",
+        after: 4,
+        next_after: 4,
+        events: []
+      }
+    });
+  });
   await page.route("**/v1/jobs**", async (route) => {
     if (route.request().method() !== "GET") {
       await route.fallback();
@@ -184,5 +214,6 @@ test("queues async run job and observes terminal success", async ({ page }) => {
   await expect(page.getByText(/Connected\./)).toBeVisible();
   await page.getByRole("button", { name: "Send" }).click();
 
+  await expect(page.getByText(/stream-one/)).toBeVisible();
   await expect(page.getByText(/Job job_1 succeeded/)).toBeVisible();
 });

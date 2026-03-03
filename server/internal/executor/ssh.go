@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
@@ -49,6 +50,8 @@ const (
 type ExecOptions struct {
 	MaxStdoutBytes int
 	MaxStderrBytes int
+	OnStdoutChunk  func([]byte)
+	OnStderrChunk  func([]byte)
 }
 
 func normalizeExecOptions(opts ExecOptions) ExecOptions {
@@ -138,32 +141,10 @@ func RunViaSSH(ctx context.Context, h model.Host, spec runtime.CommandSpec, work
 	if isLocalHostMode(h) {
 		return runViaLocalShell(ctx, spec, workdir, opts)
 	}
-	started := time.Now().UTC()
 	remoteCmd := renderRemoteCommand(spec, workdir)
 	sshArgs := buildSSHArgs(h, remoteCmd)
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
-
-	normOpts := normalizeExecOptions(opts)
-	stdoutBuffer := newLimitedBuffer(normOpts.MaxStdoutBytes)
-	stderrBuffer := newLimitedBuffer(normOpts.MaxStderrBytes)
-	cmd.Stdout = stdoutBuffer
-	cmd.Stderr = stderrBuffer
-
-	err := cmd.Run()
-	finished := time.Now().UTC()
-	res := ExecResult{
-		Command:         "ssh " + strings.Join(sshArgs, " "),
-		Stdout:          stdoutBuffer.String(),
-		Stderr:          stderrBuffer.String(),
-		StdoutBytes:     stdoutBuffer.TotalBytes(),
-		StderrBytes:     stderrBuffer.TotalBytes(),
-		StdoutTruncated: stdoutBuffer.Truncated(),
-		StderrTruncated: stderrBuffer.Truncated(),
-		ExitCode:        0,
-		DurationMS:      finished.Sub(started).Milliseconds(),
-		StartedAt:       started,
-		FinishedAt:      finished,
-	}
+	res, err := runCommandStreaming(ctx, cmd, "ssh "+strings.Join(sshArgs, " "), opts)
 	if err == nil {
 		return res, nil
 	}
@@ -176,21 +157,88 @@ func RunViaSSH(ctx context.Context, h model.Host, spec runtime.CommandSpec, work
 }
 
 func runViaLocalShell(ctx context.Context, spec runtime.CommandSpec, workdir string, opts ExecOptions) (ExecResult, error) {
-	started := time.Now().UTC()
 	localCmd := renderRemoteCommand(spec, workdir)
 	args := []string{"-lc", localCmd}
 	cmd := exec.CommandContext(ctx, "sh", args...)
+	res, err := runCommandStreaming(ctx, cmd, "local sh -lc "+shellQuote(localCmd), opts)
+	if err == nil {
+		return res, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		res.ExitCode = exitErr.ExitCode()
+		return res, classifyLocalRunError(err, res.ExitCode, res.Stderr)
+	}
+	res.ExitCode = -1
+	return res, classifyLocalRunError(err, res.ExitCode, res.Stderr)
+}
 
+func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, command string, opts ExecOptions) (ExecResult, error) {
+	started := time.Now().UTC()
 	normOpts := normalizeExecOptions(opts)
 	stdoutBuffer := newLimitedBuffer(normOpts.MaxStdoutBytes)
 	stderrBuffer := newLimitedBuffer(normOpts.MaxStderrBytes)
-	cmd.Stdout = stdoutBuffer
-	cmd.Stderr = stderrBuffer
 
-	err := cmd.Run()
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		finished := time.Now().UTC()
+		return ExecResult{
+			Command:    command,
+			ExitCode:   -1,
+			DurationMS: finished.Sub(started).Milliseconds(),
+			StartedAt:  started,
+			FinishedAt: finished,
+		}, fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		finished := time.Now().UTC()
+		return ExecResult{
+			Command:    command,
+			ExitCode:   -1,
+			DurationMS: finished.Sub(started).Milliseconds(),
+			StartedAt:  started,
+			FinishedAt: finished,
+		}, fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		finished := time.Now().UTC()
+		return ExecResult{
+			Command:    command,
+			ExitCode:   -1,
+			DurationMS: finished.Sub(started).Milliseconds(),
+			StartedAt:  started,
+			FinishedAt: finished,
+		}, err
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	var stdoutErr error
+	var stderrErr error
+
+	go func() {
+		defer wg.Done()
+		stdoutErr = copyStreamToLimitedBuffer(stdoutPipe, stdoutBuffer, normOpts.OnStdoutChunk)
+	}()
+	go func() {
+		defer wg.Done()
+		stderrErr = copyStreamToLimitedBuffer(stderrPipe, stderrBuffer, normOpts.OnStderrChunk)
+	}()
+
+	waitErr := cmd.Wait()
+	wg.Wait()
+	if waitErr == nil {
+		if stdoutErr != nil {
+			waitErr = stdoutErr
+		} else if stderrErr != nil {
+			waitErr = stderrErr
+		}
+	}
+
 	finished := time.Now().UTC()
 	res := ExecResult{
-		Command:         "local sh -lc " + shellQuote(localCmd),
+		Command:         command,
 		Stdout:          stdoutBuffer.String(),
 		Stderr:          stderrBuffer.String(),
 		StdoutBytes:     stdoutBuffer.TotalBytes(),
@@ -202,15 +250,29 @@ func runViaLocalShell(ctx context.Context, spec runtime.CommandSpec, workdir str
 		StartedAt:       started,
 		FinishedAt:      finished,
 	}
-	if err == nil {
-		return res, nil
+	return res, waitErr
+}
+
+func copyStreamToLimitedBuffer(src io.Reader, dst *limitedBuffer, onChunk func([]byte)) error {
+	buf := make([]byte, 8192)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			chunk := append([]byte(nil), buf[:n]...)
+			if _, werr := dst.Write(chunk); werr != nil {
+				return werr
+			}
+			if onChunk != nil {
+				onChunk(chunk)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		res.ExitCode = exitErr.ExitCode()
-		return res, classifyLocalRunError(err, res.ExitCode, res.Stderr)
-	}
-	res.ExitCode = -1
-	return res, classifyLocalRunError(err, res.ExitCode, res.Stderr)
 }
 
 func renderRemoteCommand(spec runtime.CommandSpec, workdir string) string {

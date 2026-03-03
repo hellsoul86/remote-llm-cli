@@ -9,6 +9,7 @@ import {
   healthz,
   listAudit,
   listHosts,
+  listRunJobEvents,
   listRunJobs,
   listRuns,
   listRuntimes,
@@ -17,6 +18,7 @@ import {
   uploadImage,
   upsertHost,
   type Host,
+  type RunJobEvent,
   type RunJobRecord,
   type RunRequest,
   type RunResponse
@@ -73,6 +75,31 @@ function summarizeRunResponse(response: RunResponse): string {
     lines.push(`${target.host.name}: ${status} exit=${exit}${hint}${err}`);
   }
   return lines.join("\n");
+}
+
+function summarizeJobEventLine(event: RunJobEvent): string {
+  const host = event.host_name || event.host_id || "target";
+  switch (event.type) {
+    case "target.started":
+      return `${host} started (attempt=${event.attempt ?? 1})`;
+    case "target.done":
+      return `${host} done status=${event.status ?? "unknown"} exit=${event.exit_code ?? "n/a"}${event.error ? ` error=${event.error}` : ""}`;
+    case "job.cancel_requested":
+      return "cancel requested";
+    case "job.canceled":
+      return "job canceled";
+    case "job.failed":
+      return event.error ? `job failed: ${event.error}` : "job failed";
+    case "job.succeeded":
+      return "job completed";
+    default:
+      return "";
+  }
+}
+
+function clipStreamText(raw: string, maxChars = 3600): string {
+  if (raw.length <= maxChars) return raw;
+  return `${raw.slice(raw.length - maxChars)}\n...[stream truncated for UI]...`;
 }
 
 function formatClock(ts: string): string {
@@ -227,6 +254,7 @@ export function App() {
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const jobEventCursorRef = useRef<Map<string, number>>(new Map());
 
   const activeRuntime = useMemo(
     () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
@@ -407,6 +435,12 @@ export function App() {
         setActiveJobID("");
         setActiveJob(null);
       }
+      for (const job of nextJobs) {
+        if (!isJobActive(job)) continue;
+        if (!jobEventCursorRef.current.has(job.id)) {
+          jobEventCursorRef.current.set(job.id, 0);
+        }
+      }
 
       if (emitConnectedNote) {
         addTimelineEntry(
@@ -553,17 +587,27 @@ export function App() {
         const jobResults = await Promise.all(
           runningThreadJobs.map(async (item) => {
             try {
-              const job = await getRunJob(token, item.jobID);
-              return { item, job, error: "" };
+              const after = jobEventCursorRef.current.get(item.jobID) ?? 0;
+              const [job, eventFeed] = await Promise.all([
+                getRunJob(token, item.jobID),
+                listRunJobEvents(token, item.jobID, after, 240).catch(() => ({ events: [] as RunJobEvent[], next_after: after }))
+              ]);
+              return { item, job, error: "", events: eventFeed.events, nextAfter: eventFeed.next_after };
             } catch (error) {
-              return { item, job: null as RunJobRecord | null, error: String(error) };
+              return {
+                item,
+                job: null as RunJobRecord | null,
+                error: String(error),
+                events: [] as RunJobEvent[],
+                nextAfter: jobEventCursorRef.current.get(item.jobID) ?? 0
+              };
             }
           })
         );
         if (canceled) return;
 
         for (const result of jobResults) {
-          const { item, job, error } = result;
+          const { item, job, error, events, nextAfter } = result;
           if (!job) {
             addTimelineEntry(
               {
@@ -576,6 +620,54 @@ export function App() {
             );
             setThreadJobState(item.threadID, "", "failed");
             continue;
+          }
+          jobEventCursorRef.current.set(item.jobID, nextAfter);
+
+          const progressLines: string[] = [];
+          let stdoutStream = "";
+          let stderrStream = "";
+          for (const event of events) {
+            const line = summarizeJobEventLine(event);
+            if (line) progressLines.push(line);
+            if (event.type === "target.stdout" && typeof event.chunk === "string") {
+              stdoutStream += event.chunk;
+            }
+            if (event.type === "target.stderr" && typeof event.chunk === "string") {
+              stderrStream += event.chunk;
+            }
+          }
+          if (progressLines.length > 0) {
+            addTimelineEntry(
+              {
+                kind: "system",
+                state: "running",
+                title: `Job ${item.jobID} progress`,
+                body: progressLines.join("\n")
+              },
+              item.threadID
+            );
+          }
+          if (stdoutStream.trim()) {
+            addTimelineEntry(
+              {
+                kind: "assistant",
+                state: "running",
+                title: `Job ${item.jobID} stdout`,
+                body: clipStreamText(stdoutStream)
+              },
+              item.threadID
+            );
+          }
+          if (stderrStream.trim()) {
+            addTimelineEntry(
+              {
+                kind: "system",
+                state: "running",
+                title: `Job ${item.jobID} stderr`,
+                body: clipStreamText(stderrStream)
+              },
+              item.threadID
+            );
           }
 
           if (item.threadID === activeThreadID) {
@@ -591,6 +683,7 @@ export function App() {
           const terminalStatus =
             job.status === "succeeded" || job.status === "failed" || job.status === "canceled" ? job.status : "failed";
           setThreadJobState(item.threadID, "", terminalStatus);
+          jobEventCursorRef.current.delete(item.jobID);
           if (item.threadID !== activeThreadID) {
             setThreadUnread(item.threadID, true);
           }
@@ -710,6 +803,7 @@ export function App() {
     localStorage.removeItem(TOKEN_KEY);
     resetOpsDomain();
     resetSessionDomain();
+    jobEventCursorRef.current.clear();
     setSubmittingThreadID("");
     setSessionAlerts([]);
     setToken("");
@@ -825,6 +919,7 @@ export function App() {
     try {
       if (runAsyncMode) {
         const { body } = await enqueueRunJob(token, request);
+        jobEventCursorRef.current.set(body.job.id, 0);
         setActiveJobID(body.job.id);
         setActiveJobThreadID(activeThread.id);
         setActiveJob(body.job);
