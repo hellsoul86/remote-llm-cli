@@ -238,8 +238,8 @@ export function App() {
   );
   const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
   const [submittingThreadID, setSubmittingThreadID] = useState("");
-  const [sessionModelDefault, setSessionModelDefault] = useState("gpt-5-codex");
-  const [sessionModelOptions, setSessionModelOptions] = useState<string[]>(["gpt-5-codex", "gpt-5", "gpt-5-mini"]);
+  const [sessionModelDefault, setSessionModelDefault] = useState("");
+  const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
 
@@ -319,8 +319,9 @@ export function App() {
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
-    return sessionModelDefault;
-  }, [activeThread?.model, sessionModelDefault]);
+    if (sessionModelDefault.trim()) return sessionModelDefault.trim();
+    return sessionModelOptions[0]?.trim() ?? "";
+  }, [activeThread?.model, sessionModelDefault, sessionModelOptions]);
   const sessionModelChoices = useMemo(() => {
     const seen = new Set<string>();
     const out: string[] = [];
@@ -335,6 +336,7 @@ export function App() {
     if (activeThreadModelValue) push(activeThreadModelValue);
     return out;
   }, [sessionModelDefault, sessionModelOptions, activeThreadModelValue]);
+  const hasSessionModelChoices = sessionModelChoices.length > 0;
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -642,13 +644,15 @@ export function App() {
     void discoverCodexModels(token, { host_id: activeSessionHostID })
       .then((catalog) => {
         if (canceled) return;
-        const nextDefault = catalog.default_model?.trim() || "gpt-5-codex";
+        const nextDefault = catalog.default_model?.trim() || "";
         const nextModels = Array.isArray(catalog.models) ? catalog.models.filter((name) => name.trim() !== "") : [];
         setSessionModelDefault(nextDefault);
-        setSessionModelOptions(nextModels.length > 0 ? nextModels : [nextDefault]);
+        setSessionModelOptions(nextModels);
       })
       .catch(() => {
         if (canceled) return;
+        setSessionModelDefault("");
+        setSessionModelOptions([]);
       });
     return () => {
       canceled = true;
@@ -946,8 +950,8 @@ export function App() {
     jobStreamSeenRef.current.clear();
     setSubmittingThreadID("");
     setSessionAlerts([]);
-    setSessionModelDefault("gpt-5-codex");
-    setSessionModelOptions(["gpt-5-codex", "gpt-5", "gpt-5-mini"]);
+    setSessionModelDefault("");
+    setSessionModelOptions([]);
     setToken("");
     setTokenInput("");
     setAuthError("");
@@ -1031,7 +1035,7 @@ export function App() {
 
     const fanout = Math.max(1, Number.parseInt(fanoutValue, 10) || 1);
     const outputCap = Math.max(32, Number.parseInt(maxOutputKB, 10) || 256);
-    const effectiveModel = activeThread.model.trim() || sessionModelDefault.trim() || undefined;
+    const effectiveModel = activeThread.model.trim() || sessionModelDefault.trim() || sessionModelChoices[0]?.trim() || undefined;
     const effectiveSandbox = activeThread.sandbox || runSandbox || "workspace-write";
     const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
 
@@ -1427,18 +1431,23 @@ export function App() {
                   model
                   <select
                     value={activeThreadModelValue}
-                    disabled={!activeThread}
+                    disabled={!activeThread || !hasSessionModelChoices}
                     onChange={(event) => {
                       if (!activeThread) return;
                       setThreadModel(activeThread.id, event.target.value);
                     }}
                   >
-                    {sessionModelChoices.map((modelName) => (
-                      <option key={modelName} value={modelName}>
-                        {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
-                      </option>
-                    ))}
+                    {hasSessionModelChoices ? (
+                      sessionModelChoices.map((modelName) => (
+                        <option key={modelName} value={modelName}>
+                          {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">model unavailable</option>
+                    )}
                   </select>
+                  {!hasSessionModelChoices ? <small className="pane-subtle-light">No models discovered on this server.</small> : null}
                 </label>
                 <label className="session-setting-row">
                   sandbox

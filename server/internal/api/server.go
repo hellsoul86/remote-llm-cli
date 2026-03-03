@@ -1334,14 +1334,7 @@ func (s *Server) handleDiscoverCodexModels(w http.ResponseWriter, r *http.Reques
 	}
 
 	defaultModel, discoveredModels, probeErr := s.probeCodexModelCatalog(r.Context(), host)
-	observed := s.collectObservedCodexModels(1000)
-	models := mergeModelCatalog(defaultModel, append(discoveredModels, observed...))
-	if len(models) == 0 {
-		models = []string{"gpt-5-codex", "gpt-5", "gpt-5-mini"}
-	}
-	if strings.TrimSpace(defaultModel) == "" {
-		defaultModel = models[0]
-	}
+	models := mergeModelCatalog(defaultModel, discoveredModels)
 	resp := codexModelsResponse{
 		Host:         host,
 		DefaultModel: defaultModel,
@@ -1349,6 +1342,8 @@ func (s *Server) handleDiscoverCodexModels(w http.ResponseWriter, r *http.Reques
 	}
 	if probeErr != nil {
 		resp.Warning = probeErr.Error()
+	} else if len(models) == 0 && strings.TrimSpace(defaultModel) == "" {
+		resp.Warning = "no codex models discovered on target host"
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -2204,12 +2199,17 @@ if os.path.isfile(cache_path):
 print(json.dumps({"default_model": default_model, "models": models}))
 PY
 `
+	refreshScript := `
+if [ ! -f "$HOME/.codex/models_cache.json" ] && command -v codex >/dev/null 2>&1; then
+  codex exec --skip-git-repo-check --sandbox read-only --json "reply with exactly OK" >/dev/null 2>&1 || true
+fi
+`
 	res, err := s.runViaSSH(
 		ctx,
 		host,
 		runtime.CommandSpec{
 			Program: "sh",
-			Args:    []string{"-lc", script},
+			Args:    []string{"-lc", refreshScript + "\n" + script},
 		},
 		"",
 		executor.ExecOptions{
@@ -2295,7 +2295,7 @@ func (s *Server) collectObservedCodexModels(limit int) []string {
 	return out
 }
 
-func mergeModelCatalog(defaultModel string, observed []string) []string {
+func mergeModelCatalog(defaultModel string, discovered []string) []string {
 	out := make([]string, 0, 10)
 	seen := map[string]struct{}{}
 	appendIfNew := func(modelName string) {
@@ -2310,12 +2310,9 @@ func mergeModelCatalog(defaultModel string, observed []string) []string {
 		out = append(out, modelName)
 	}
 	appendIfNew(defaultModel)
-	for _, modelName := range observed {
+	for _, modelName := range discovered {
 		appendIfNew(modelName)
 	}
-	appendIfNew("gpt-5-codex")
-	appendIfNew("gpt-5")
-	appendIfNew("gpt-5-mini")
 	return out
 }
 
