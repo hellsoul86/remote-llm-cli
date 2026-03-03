@@ -153,6 +153,20 @@ func TestNormalizeModelList(t *testing.T) {
 	}
 }
 
+func TestMergeModelCatalogNoFallback(t *testing.T) {
+	models := mergeModelCatalog("", []string{})
+	if len(models) != 0 {
+		t.Fatalf("len(models)=%d want=0", len(models))
+	}
+	models = mergeModelCatalog("gpt-5.3-codex", []string{"gpt-5.3-codex", "gpt-5.2-codex"})
+	if len(models) != 2 {
+		t.Fatalf("len(models)=%d want=2", len(models))
+	}
+	if models[0] != "gpt-5.3-codex" || models[1] != "gpt-5.2-codex" {
+		t.Fatalf("models=%#v", models)
+	}
+}
+
 func TestResolveRetryPolicy(t *testing.T) {
 	retries, backoff := resolveRetryPolicy(10, 1)
 	if retries != 5 {

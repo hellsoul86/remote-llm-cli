@@ -184,21 +184,21 @@ func TestDiscoverCodexModels(t *testing.T) {
 	if strings.TrimSpace(modelResp.DefaultModel) != "gpt-5-codex" {
 		t.Fatalf("default_model=%q want=gpt-5-codex", modelResp.DefaultModel)
 	}
-	foundObserved := false
 	foundCatalog := false
+	foundInjected := false
 	for _, modelName := range modelResp.Models {
-		if modelName == "gpt-5-mini" {
-			foundObserved = true
-		}
 		if modelName == "gpt-5.3-codex" {
 			foundCatalog = true
 		}
-	}
-	if !foundObserved {
-		t.Fatalf("models should include observed gpt-5-mini: %#v", modelResp.Models)
+		if modelName == "gpt-5-mini" {
+			foundInjected = true
+		}
 	}
 	if !foundCatalog {
 		t.Fatalf("models should include discovered catalog gpt-5.3-codex: %#v", modelResp.Models)
+	}
+	if foundInjected {
+		t.Fatalf("models should not include injected fallback/observed gpt-5-mini: %#v", modelResp.Models)
 	}
 }
 
