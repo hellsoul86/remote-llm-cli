@@ -535,6 +535,7 @@ export function useSessionDomain() {
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
+    const incomingHostIDs = new Set<string>();
     for (const workspace of workspaces) {
       currentByWorkspaceID.set(workspace.id, workspace);
       for (const thread of workspace.sessions) {
@@ -547,6 +548,7 @@ export function useSessionDomain() {
       const hostID = project.hostID.trim();
       const path = project.path.trim();
       if (!hostID || !path) continue;
+      incomingHostIDs.add(hostID);
 
       const id = projectWorkspaceID(hostID, path);
       const existing = currentByWorkspaceID.get(id);
@@ -580,7 +582,6 @@ export function useSessionDomain() {
       if (existing) {
         for (const prior of existing.sessions) {
           if (seen.has(prior.id)) continue;
-          if (!prior.activeJobID && prior.timeline.length === 0 && !prior.draft.trim()) continue;
           sessions.push(prior);
           seen.add(prior.id);
         }
@@ -603,7 +604,20 @@ export function useSessionDomain() {
       });
     }
 
+    for (const existing of workspaces) {
+      if (nextWorkspaces.some((workspace) => workspace.id === existing.id)) continue;
+      const hostID = existing.hostID.trim();
+      if (incomingHostIDs.size > 0 && hostID && !incomingHostIDs.has(hostID)) continue;
+      nextWorkspaces.push({
+        ...existing,
+        updatedAt: now
+      });
+    }
+
     if (nextWorkspaces.length === 0) {
+      if (workspaces.length > 0) {
+        return;
+      }
       const fallback = createWorkspace(1, "/home/ecs-user");
       setWorkspaces([fallback]);
       setActiveWorkspaceID(fallback.id);
