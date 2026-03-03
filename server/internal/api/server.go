@@ -94,7 +94,25 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/runs", s.withAuth(http.HandlerFunc(s.handleListRuns)))
 	mux.Handle("GET /v1/audit", s.withAuth(http.HandlerFunc(s.handleListAudit)))
 
-	return s.requestLogMiddleware(mux)
+	return s.corsMiddleware(s.requestLogMiddleware(mux))
+}
+
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setCORSHeaders(w.Header())
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func setCORSHeaders(h http.Header) {
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	h.Set("Access-Control-Max-Age", "86400")
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
