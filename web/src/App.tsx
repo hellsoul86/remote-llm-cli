@@ -15,47 +15,18 @@ import {
   probeHost,
   runFanout,
   upsertHost,
-  type AuditEvent,
   type Host,
-  type MetricsResponse,
   type RunJobRecord,
-  type RunRecord,
   type RunRequest,
-  type RunResponse,
-  type RuntimeInfo
+  type RunResponse
 } from "./api";
+import { useOpsDomain } from "./domains/ops";
+import { useSessionDomain } from "./domains/session";
 
 const TOKEN_KEY = "remote_llm_access_key";
 
 type AuthPhase = "checking" | "locked" | "ready";
 type AppMode = "session" | "ops";
-type TimelineKind = "user" | "assistant" | "system";
-type TimelineState = "running" | "success" | "error";
-
-type TimelineEntry = {
-  id: string;
-  kind: TimelineKind;
-  title: string;
-  body: string;
-  state?: TimelineState;
-  createdAt: string;
-};
-
-type ConversationThread = {
-  id: string;
-  title: string;
-  draft: string;
-  timeline: TimelineEntry[];
-  createdAt: string;
-  updatedAt: string;
-};
-
-type AddHostForm = {
-  name: string;
-  host: string;
-  user: string;
-  workspace: string;
-};
 
 type QuickCommand = {
   label: string;
@@ -68,18 +39,6 @@ const QUICK_COMMANDS: QuickCommand[] = [
   { label: "/jobs", template: "summarize last 10 jobs and failures with hints" },
   { label: "/sync", template: "check workspace sync readiness and list next safe sync actions" }
 ];
-
-function createInitialThread(): ConversationThread {
-  const now = new Date().toISOString();
-  return {
-    id: "thread_1",
-    title: "Thread 1",
-    draft: "summarize current repo state and risks",
-    timeline: [],
-    createdAt: now,
-    updatedAt: now
-  };
-}
 
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
   if (!job) return false;
@@ -144,71 +103,106 @@ export function App() {
     typeof window === "undefined" ? "session" : modeFromHash(window.location.hash)
   );
 
-  const [health, setHealth] = useState("checking");
-  const [hosts, setHosts] = useState<Host[]>([]);
-  const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([]);
-  const [jobs, setJobs] = useState<RunJobRecord[]>([]);
-  const [runs, setRuns] = useState<RunRecord[]>([]);
-  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
+  const ops = useOpsDomain();
+  const session = useSessionDomain();
 
-  const [selectedRuntime, setSelectedRuntime] = useState("codex");
-  const [allHosts, setAllHosts] = useState(true);
-  const [selectedHostIDs, setSelectedHostIDs] = useState<string[]>([]);
-  const [runMode, setRunMode] = useState<"exec" | "resume" | "review">("exec");
-  const [runModel, setRunModel] = useState("");
-  const [runSandbox, setRunSandbox] = useState<"" | "read-only" | "workspace-write" | "danger-full-access">("");
-  const [runAsyncMode, setRunAsyncMode] = useState(true);
-  const [workdir, setWorkdir] = useState("");
-  const [fanoutValue, setFanoutValue] = useState("3");
-  const [maxOutputKB, setMaxOutputKB] = useState("256");
+  const {
+    health,
+    setHealth,
+    hosts,
+    setHosts,
+    runtimes,
+    setRuntimes,
+    jobs,
+    setJobs,
+    runs,
+    setRuns,
+    auditEvents,
+    setAuditEvents,
+    metrics,
+    setMetrics,
+    selectedRuntime,
+    setSelectedRuntime,
+    allHosts,
+    setAllHosts,
+    selectedHostIDs,
+    setSelectedHostIDs,
+    runMode,
+    setRunMode,
+    runModel,
+    setRunModel,
+    runSandbox,
+    setRunSandbox,
+    runAsyncMode,
+    setRunAsyncMode,
+    workdir,
+    setWorkdir,
+    fanoutValue,
+    setFanoutValue,
+    maxOutputKB,
+    setMaxOutputKB,
+    isSubmitting,
+    setIsSubmitting,
+    isRefreshing,
+    setIsRefreshing,
+    activeJobID,
+    setActiveJobID,
+    activeJob,
+    setActiveJob,
+    hostForm,
+    setHostForm,
+    hostFilter,
+    setHostFilter,
+    editingHostID,
+    setEditingHostID,
+    addingHost,
+    setAddingHost,
+    opsHostBusyID,
+    setOpsHostBusyID,
+    opsNotice,
+    setOpsNotice,
+    opsJobStatusFilter,
+    setOpsJobStatusFilter,
+    opsJobTypeFilter,
+    setOpsJobTypeFilter,
+    opsRunStatusFilter,
+    setOpsRunStatusFilter,
+    opsAuditMethodFilter,
+    setOpsAuditMethodFilter,
+    opsAuditStatusFilter,
+    setOpsAuditStatusFilter,
+    resetOpsDomain
+  } = ops;
 
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const {
+    threads,
+    activeThreadID,
+    setActiveThreadID,
+    threadRenameDraft,
+    setThreadRenameDraft,
+    activeJobThreadID,
+    setActiveJobThreadID,
+    completedJobsRef,
+    activeThread,
+    activeTimeline,
+    activeDraft,
+    updateThreadDraft,
+    addTimelineEntry,
+    createThread,
+    renameThread,
+    switchThreadByOffset,
+    resetSessionDomain
+  } = session;
 
-  const [activeJobID, setActiveJobID] = useState("");
-  const [activeJobThreadID, setActiveJobThreadID] = useState("thread_1");
-  const [activeJob, setActiveJob] = useState<RunJobRecord | null>(null);
-
-  const [hostForm, setHostForm] = useState<AddHostForm>({ name: "", host: "", user: "", workspace: "" });
-  const [hostFilter, setHostFilter] = useState("");
-  const [editingHostID, setEditingHostID] = useState("");
-  const [addingHost, setAddingHost] = useState(false);
-  const [opsHostBusyID, setOpsHostBusyID] = useState("");
-  const [opsNotice, setOpsNotice] = useState("");
-  const [opsJobStatusFilter, setOpsJobStatusFilter] = useState<"all" | "pending" | "running" | "succeeded" | "failed" | "canceled">(
-    "all"
-  );
-  const [opsJobTypeFilter, setOpsJobTypeFilter] = useState<"all" | "run" | "sync">("all");
-  const [opsRunStatusFilter, setOpsRunStatusFilter] = useState<"all" | "ok" | "error">("all");
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
-  const [opsAuditMethodFilter, setOpsAuditMethodFilter] = useState<"all" | "GET" | "POST" | "DELETE">("all");
-  const [opsAuditStatusFilter, setOpsAuditStatusFilter] = useState<"all" | "2xx" | "4xx" | "5xx">("all");
-
-  const [threads, setThreads] = useState<ConversationThread[]>(() => [createInitialThread()]);
-  const [activeThreadID, setActiveThreadID] = useState("thread_1");
-  const [threadRenameDraft, setThreadRenameDraft] = useState("Thread 1");
-
-  const completedJobsRef = useRef<Set<string>>(new Set());
-  const entryCounter = useRef(0);
-  const threadCounterRef = useRef(1);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
-
-  const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
 
   const activeRuntime = useMemo(
     () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
     [runtimes, selectedRuntime]
   );
-
-  const activeThread = useMemo(
-    () => threads.find((thread) => thread.id === activeThreadID) ?? threads[0] ?? null,
-    [threads, activeThreadID]
-  );
-
-  const activeTimeline = activeThread?.timeline ?? [];
-  const activeDraft = activeThread?.draft ?? "";
+  const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -250,90 +244,9 @@ export function App() {
     });
   }, [auditEvents, opsAuditMethodFilter, opsAuditStatusFilter]);
 
-  function nextEntryID(): string {
-    entryCounter.current += 1;
-    return `entry_${Date.now()}_${entryCounter.current}`;
-  }
-
-  function updateThreadDraft(threadID: string, draft: string) {
-    setThreads((prev) =>
-      prev.map((thread) =>
-        thread.id === threadID
-          ? {
-              ...thread,
-              draft,
-              updatedAt: new Date().toISOString()
-            }
-          : thread
-      )
-    );
-  }
-
-  function addTimelineEntry(entry: Omit<TimelineEntry, "id" | "createdAt">, threadID = activeThreadID) {
-    const createdAt = new Date().toISOString();
-    setThreads((prev) =>
-      prev.map((thread) => {
-        if (thread.id !== threadID) return thread;
-        return {
-          ...thread,
-          timeline: [
-            ...thread.timeline,
-            {
-              id: nextEntryID(),
-              createdAt,
-              ...entry
-            }
-          ],
-          updatedAt: createdAt
-        };
-      })
-    );
-  }
-
-  function createThread() {
-    threadCounterRef.current += 1;
-    const idx = threadCounterRef.current;
-    const now = new Date().toISOString();
-    const next: ConversationThread = {
-      id: `thread_${Date.now()}_${idx}`,
-      title: `Thread ${idx}`,
-      draft: "",
-      timeline: [],
-      createdAt: now,
-      updatedAt: now
-    };
-    setThreads((prev) => [...prev, next]);
-    setActiveThreadID(next.id);
-    setThreadRenameDraft(next.title);
+  function createThreadAndFocus() {
+    createThread();
     promptInputRef.current?.focus();
-  }
-
-  function renameThread(threadID: string, nextTitle: string) {
-    const trimmed = nextTitle.trim();
-    if (!trimmed) return;
-    const now = new Date().toISOString();
-    setThreads((prev) =>
-      prev.map((thread) =>
-        thread.id === threadID
-          ? {
-              ...thread,
-              title: trimmed,
-              updatedAt: now
-            }
-          : thread
-      )
-    );
-    setThreadRenameDraft(trimmed);
-  }
-
-  function switchThreadByOffset(offset: number) {
-    if (threads.length === 0) return;
-    const currentIndex = Math.max(
-      0,
-      threads.findIndex((thread) => thread.id === activeThreadID)
-    );
-    const nextIndex = (currentIndex + offset + threads.length) % threads.length;
-    setActiveThreadID(threads[nextIndex].id);
   }
 
   function applyQuickCommand(command: QuickCommand) {
@@ -456,16 +369,6 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!threads.some((thread) => thread.id === activeThreadID) && threads.length > 0) {
-      setActiveThreadID(threads[0].id);
-    }
-  }, [threads, activeThreadID]);
-
-  useEffect(() => {
-    setThreadRenameDraft(activeThread?.title ?? "");
-  }, [activeThreadID, activeThread?.title]);
-
-  useEffect(() => {
     timelineBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [activeTimeline.length, activeThreadID]);
 
@@ -483,7 +386,7 @@ export function App() {
 
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
         event.preventDefault();
-        createThread();
+        createThreadAndFocus();
         return;
       }
 
@@ -509,6 +412,7 @@ export function App() {
     if (authPhase !== "ready" || !token.trim() || !activeJobID) return;
 
     let canceled = false;
+    const pollIntervalMs = appMode === "session" ? 1800 : 3000;
     const timer = window.setInterval(async () => {
       try {
         const [job, nextJobs, nextMetrics] = await Promise.all([
@@ -573,13 +477,49 @@ export function App() {
         setActiveJobID("");
         setIsSubmitting(false);
       }
-    }, 2200);
+    }, pollIntervalMs);
 
     return () => {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, activeJobID, activeJobThreadID, activeThreadID]);
+  }, [authPhase, token, activeJobID, activeJobThreadID, activeThreadID, appMode]);
+
+  useEffect(() => {
+    if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
+
+    let canceled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const [nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
+          listRunJobs(token, 20),
+          listRuns(token, 20),
+          listAudit(token, 80),
+          getMetrics(token)
+        ]);
+        if (canceled) return;
+        setJobs(nextJobs);
+        setRuns(nextRuns);
+        setAuditEvents(nextAudit);
+        setMetrics(nextMetrics);
+
+        if (!activeJobID) {
+          const running = nextJobs.find((job) => isJobActive(job));
+          if (running) {
+            setActiveJobID(running.id);
+            setActiveJob(running);
+          }
+        }
+      } catch {
+        if (canceled) return;
+      }
+    }, 5000);
+
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [authPhase, token, appMode, activeJobID]);
 
   async function onSubmitToken(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -598,34 +538,10 @@ export function App() {
 
   function onLogout() {
     localStorage.removeItem(TOKEN_KEY);
-    const initial = createInitialThread();
-    completedJobsRef.current.clear();
-    threadCounterRef.current = 1;
-
+    resetOpsDomain();
+    resetSessionDomain();
     setToken("");
     setTokenInput("");
-    setHosts([]);
-    setRuntimes([]);
-    setJobs([]);
-    setRuns([]);
-    setAuditEvents([]);
-    setMetrics(null);
-    setSelectedHostIDs([]);
-    setHostForm({ name: "", host: "", user: "", workspace: "" });
-    setHostFilter("");
-    setEditingHostID("");
-    setOpsHostBusyID("");
-    setOpsNotice("");
-    setOpsJobStatusFilter("all");
-    setOpsJobTypeFilter("all");
-    setOpsRunStatusFilter("all");
-    setOpsAuditMethodFilter("all");
-    setOpsAuditStatusFilter("all");
-    setThreads([initial]);
-    setActiveThreadID(initial.id);
-    setActiveJobThreadID(initial.id);
-    setActiveJob(null);
-    setActiveJobID("");
     setAuthError("");
     setAuthPhase("locked");
     switchMode("session");
@@ -946,7 +862,7 @@ export function App() {
                   </button>
                 ))}
               </div>
-              <button type="button" className="ghost new-thread" onClick={createThread}>
+              <button type="button" className="ghost new-thread" onClick={createThreadAndFocus}>
                 New Thread
               </button>
             </section>
