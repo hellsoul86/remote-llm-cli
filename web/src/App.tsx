@@ -68,10 +68,23 @@ function summarizeRunResponse(response: RunResponse): string {
   return lines.join("\n");
 }
 
-function formatShortTime(ts: string): string {
+function formatClock(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDateTime(ts: string | undefined): string {
+  if (!ts) return "-";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString();
+}
+
+function statusTone(status: string): "ok" | "warn" | "err" {
+  if (status === "succeeded") return "ok";
+  if (status === "failed" || status === "canceled") return "err";
+  return "warn";
 }
 
 export function App() {
@@ -98,20 +111,22 @@ export function App() {
   const [workdir, setWorkdir] = useState("");
   const [fanoutValue, setFanoutValue] = useState("3");
   const [maxOutputKB, setMaxOutputKB] = useState("256");
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const [activeJobID, setActiveJobID] = useState("");
   const [activeJob, setActiveJob] = useState<RunJobRecord | null>(null);
-  const [completedJobMessages, setCompletedJobMessages] = useState<string[]>([]);
 
   const [hostForm, setHostForm] = useState<AddHostForm>({ name: "", host: "", user: "", workspace: "" });
   const [addingHost, setAddingHost] = useState(false);
 
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
 
+  const completedJobsRef = useRef<Set<string>>(new Set());
   const entryCounter = useRef(0);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
 
   const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
 
@@ -119,6 +134,15 @@ export function App() {
     () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
     [runtimes, selectedRuntime]
   );
+
+  const activeProgress = useMemo(() => {
+    if (!activeJob) return 0;
+    const total = activeJob.total_hosts ?? 0;
+    if (total <= 0) return isJobActive(activeJob) ? 0 : 100;
+    const done = (activeJob.succeeded_hosts ?? 0) + (activeJob.failed_hosts ?? 0);
+    if (!isJobActive(activeJob)) return 100;
+    return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  }, [activeJob]);
 
   function nextEntryID(): string {
     entryCounter.current += 1;
@@ -136,7 +160,7 @@ export function App() {
     ]);
   }
 
-  async function loadWorkspace(authToken: string, emitSystemNote: boolean) {
+  async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
     setIsRefreshing(true);
     try {
       const [healthBody, nextHosts, nextRuntimes, nextJobs, nextRuns, nextMetrics] = await Promise.all([
@@ -155,7 +179,7 @@ export function App() {
       setRuns(nextRuns);
       setMetrics(nextMetrics);
 
-      setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
+      setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((host) => host.id === id)));
       if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
@@ -166,7 +190,7 @@ export function App() {
         setActiveJob(running);
       }
 
-      if (emitSystemNote) {
+      if (emitConnectedNote) {
         addTimelineEntry({
           kind: "system",
           state: "success",
@@ -176,7 +200,7 @@ export function App() {
       }
     } catch (error) {
       setHealth(`error: ${String(error)}`);
-      if (emitSystemNote) {
+      if (emitConnectedNote) {
         addTimelineEntry({
           kind: "system",
           state: "error",
@@ -240,8 +264,8 @@ export function App() {
           listRunJobs(token, 20),
           getMetrics(token)
         ]);
-        if (canceled) return;
 
+        if (canceled) return;
         setActiveJob(job);
         setJobs(nextJobs);
         setMetrics(nextMetrics);
@@ -250,8 +274,8 @@ export function App() {
           setActiveJobID("");
           setIsSubmitting(false);
 
-          if (!completedJobMessages.includes(job.id)) {
-            setCompletedJobMessages((prev) => [...prev, job.id]);
+          if (!completedJobsRef.current.has(job.id)) {
+            completedJobsRef.current.add(job.id);
             if (isRunResponsePayload(job.response)) {
               addTimelineEntry({
                 kind: "assistant",
@@ -291,7 +315,7 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, activeJobID, completedJobMessages]);
+  }, [authPhase, token, activeJobID]);
 
   async function onSubmitToken(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -300,6 +324,7 @@ export function App() {
 
   function onLogout() {
     localStorage.removeItem(TOKEN_KEY);
+    completedJobsRef.current.clear();
     setToken("");
     setTokenInput("");
     setHosts([]);
@@ -310,7 +335,6 @@ export function App() {
     setTimeline([]);
     setActiveJob(null);
     setActiveJobID("");
-    setCompletedJobMessages([]);
     setAuthError("");
     setAuthPhase("locked");
   }
@@ -336,6 +360,7 @@ export function App() {
       addTimelineEntry({ kind: "system", state: "error", title: "Prompt Missing", body: "Prompt is required." });
       return;
     }
+
     if (!allHosts && selectedHostIDs.length === 0) {
       addTimelineEntry({
         kind: "system",
@@ -397,7 +422,12 @@ export function App() {
           title: `Run Finished (HTTP ${status})`,
           body: summarizeRunResponse(body)
         });
-        const [nextRuns, nextJobs, nextMetrics] = await Promise.all([listRuns(token, 20), listRunJobs(token, 20), getMetrics(token)]);
+
+        const [nextRuns, nextJobs, nextMetrics] = await Promise.all([
+          listRuns(token, 20),
+          listRunJobs(token, 20),
+          getMetrics(token)
+        ]);
         setRuns(nextRuns);
         setJobs(nextJobs);
         setMetrics(nextMetrics);
@@ -418,17 +448,19 @@ export function App() {
       return;
     }
 
+    const hostName = hostForm.name.trim();
+
     setAddingHost(true);
     try {
       await upsertHost(token, {
-        name: hostForm.name.trim(),
+        name: hostName,
         host: hostForm.host.trim(),
         user: hostForm.user.trim() || undefined,
         workspace: hostForm.workspace.trim() || undefined
       });
       setHostForm({ name: "", host: "", user: "", workspace: "" });
       await loadWorkspace(token, false);
-      addTimelineEntry({ kind: "system", state: "success", title: "Host Saved", body: `Saved host ${hostForm.name.trim()}.` });
+      addTimelineEntry({ kind: "system", state: "success", title: "Host Saved", body: `Saved host ${hostName}.` });
     } catch (error) {
       addTimelineEntry({ kind: "system", state: "error", title: "Host Save Failed", body: String(error) });
     } finally {
@@ -438,12 +470,13 @@ export function App() {
 
   if (authPhase !== "ready") {
     return (
-      <div className="lockscreen-root">
-        <section className="lockscreen-card">
-          <p className="eyebrow">remote-llm web workspace</p>
-          <h1>Token-Gated Access</h1>
-          <p>Enter your access key to unlock controller operations.</p>
-          <form onSubmit={onSubmitToken} className="lockscreen-form">
+      <div className="gate-shell">
+        <div className="gate-noise" />
+        <section className="gate-card">
+          <p className="gate-eyebrow">remote-llm workspace</p>
+          <h1>Token Required</h1>
+          <p className="gate-copy">Use your access token to unlock the operator console. No token means no workspace access.</p>
+          <form onSubmit={onSubmitToken} className="gate-form">
             <label>
               Access Token
               <input
@@ -457,241 +490,270 @@ export function App() {
               {authPhase === "checking" ? "Unlocking..." : "Unlock Workspace"}
             </button>
           </form>
-          {authError ? <p className="lockscreen-error">{authError}</p> : null}
-          <p className="lockscreen-hint">API base: {(import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8080"}</p>
+          {authError ? <p className="gate-error">{authError}</p> : null}
+          <p className="gate-hint">API base: {(import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8080"}</p>
         </section>
       </div>
     );
   }
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">remote-llm</p>
-          <h1>Codex-style Control Room</h1>
-        </div>
-        <div className="topbar-actions">
-          <span className="health-pill">{health}</span>
-          <button onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
-            {isRefreshing ? "Syncing..." : "Sync"}
-          </button>
-          <button className="ghost" onClick={onLogout}>
-            Logout
-          </button>
-        </div>
-      </header>
+    <div className="workspace-shell">
+      <aside className="nav-pane">
+        <header className="pane-head">
+          <p className="pane-eyebrow">controller</p>
+          <h2>Codex Operator</h2>
+          <p className="pane-subtle">health: {health}</p>
+        </header>
 
-      <div className="layout-grid">
-        <aside className="panel left-panel">
-          <section>
-            <h2>Targets</h2>
-            <label className="toggle-line">
+        <section className="pane-block">
+          <div className="pane-title-line">
+            <h3>Targets</h3>
+            <label className="switch-inline">
               <input type="checkbox" checked={allHosts} onChange={(event) => setAllHosts(event.target.checked)} />
-              all hosts
+              all
             </label>
-            <div className="host-list">
-              {hosts.length === 0 ? (
-                <p className="muted">No hosts yet.</p>
-              ) : (
-                hosts.map((host) => (
-                  <label key={host.id} className="host-chip">
-                    <input
-                      type="checkbox"
-                      disabled={allHosts}
-                      checked={allHosts || selectedHostIDs.includes(host.id)}
-                      onChange={() => toggleHostSelection(host.id)}
-                    />
-                    <span>
-                      <strong>{host.name}</strong>
-                      <small>
-                        {host.user ? `${host.user}@` : ""}
-                        {host.host}:{host.port}
-                      </small>
-                    </span>
-                  </label>
-                ))
-              )}
-            </div>
-          </section>
-
-          <section>
-            <h2>Runtime</h2>
-            <label>
-              runtime
-              <select value={selectedRuntime} onChange={(event) => setSelectedRuntime(event.target.value)}>
-                {runtimes.map((runtime) => (
-                  <option key={runtime.name} value={runtime.name}>
-                    {runtime.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              mode
-              <select value={runMode} onChange={(event) => setRunMode(event.target.value as "exec" | "resume" | "review")}> 
-                <option value="exec">exec</option>
-                <option value="resume">resume</option>
-                <option value="review">review</option>
-              </select>
-            </label>
-            <label>
-              model
-              <input value={runModel} onChange={(event) => setRunModel(event.target.value)} placeholder="optional" />
-            </label>
-            <label>
-              sandbox
-              <select
-                value={runSandbox}
-                onChange={(event) =>
-                  setRunSandbox(event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
-                }
-              >
-                <option value="">default</option>
-                <option value="read-only">read-only</option>
-                <option value="workspace-write">workspace-write</option>
-                <option value="danger-full-access">danger-full-access</option>
-              </select>
-            </label>
-            <label className="toggle-line">
-              <input type="checkbox" checked={runAsyncMode} onChange={(event) => setRunAsyncMode(event.target.checked)} />
-              async job mode
-            </label>
-          </section>
-
-          <section>
-            <h2>Overview</h2>
-            <ul className="mono-list">
-              <li>hosts={hosts.length}</li>
-              <li>selected={selectedHostCount}</li>
-              <li>jobs={jobs.length}</li>
-              <li>runs={runs.length}</li>
-              <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
-            </ul>
-          </section>
-        </aside>
-
-        <main className="panel center-panel">
-          <div className="timeline" aria-live="polite">
-            {timeline.length === 0 ? (
-              <article className="entry entry-system">
-                <h3>Workspace Ready</h3>
-                <p>Send a prompt to execute against selected hosts.</p>
-              </article>
+          </div>
+          <p className="pane-subtle">selected={selectedHostCount}</p>
+          <div className="target-list">
+            {hosts.length === 0 ? (
+              <p className="pane-subtle">No hosts configured.</p>
             ) : (
-              timeline.map((entry) => (
-                <article key={entry.id} className={`entry entry-${entry.kind} ${entry.state ? `entry-${entry.state}` : ""}`}>
-                  <div className="entry-head">
-                    <h3>{entry.title}</h3>
-                    <time>{formatShortTime(entry.createdAt)}</time>
-                  </div>
-                  <pre>{entry.body}</pre>
-                </article>
+              hosts.map((host) => (
+                <label key={host.id} className="target-item">
+                  <input
+                    type="checkbox"
+                    disabled={allHosts}
+                    checked={allHosts || selectedHostIDs.includes(host.id)}
+                    onChange={() => toggleHostSelection(host.id)}
+                  />
+                  <span className="target-meta">
+                    <strong>{host.name}</strong>
+                    <small>
+                      {host.user ? `${host.user}@` : ""}
+                      {host.host}:{host.port}
+                    </small>
+                  </span>
+                </label>
               ))
             )}
-            <div ref={timelineBottomRef} />
           </div>
+        </section>
 
-          <form className="composer" onSubmit={onSendPrompt}>
-            <textarea
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              rows={4}
-              placeholder="Type your instruction. Ctrl/Cmd + Enter to send."
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  event.preventDefault();
-                  void onSendPrompt(event as unknown as FormEvent<HTMLFormElement>);
-                }
-              }}
-            />
-            <div className="composer-row">
-              <input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="workdir override (optional)" />
-              <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
-              <input value={maxOutputKB} onChange={(event) => setMaxOutputKB(event.target.value)} placeholder="max output KB" />
-              <button type="submit" disabled={isSubmitting}>
-                {isSubmitting ? "Running..." : "Send"}
-              </button>
-            </div>
-          </form>
-        </main>
+        <section className="pane-block">
+          <h3>Runtime</h3>
+          <label>
+            runtime
+            <select value={selectedRuntime} onChange={(event) => setSelectedRuntime(event.target.value)}>
+              {runtimes.map((runtime) => (
+                <option key={runtime.name} value={runtime.name}>
+                  {runtime.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            mode
+            <select value={runMode} onChange={(event) => setRunMode(event.target.value as "exec" | "resume" | "review")}>
+              <option value="exec">exec</option>
+              <option value="resume">resume</option>
+              <option value="review">review</option>
+            </select>
+          </label>
+          <label>
+            model
+            <input value={runModel} onChange={(event) => setRunModel(event.target.value)} placeholder="optional" />
+          </label>
+          <label>
+            sandbox
+            <select
+              value={runSandbox}
+              onChange={(event) =>
+                setRunSandbox(event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+              }
+            >
+              <option value="">default</option>
+              <option value="read-only">read-only</option>
+              <option value="workspace-write">workspace-write</option>
+              <option value="danger-full-access">danger-full-access</option>
+            </select>
+          </label>
+          <label className="switch-inline">
+            <input type="checkbox" checked={runAsyncMode} onChange={(event) => setRunAsyncMode(event.target.checked)} />
+            async queue
+          </label>
+        </section>
 
-        <aside className="panel right-panel">
-          <section>
-            <h2>Active Job</h2>
-            {activeJob ? (
-              <div className="job-card">
-                <p>
-                  <strong>{activeJob.id}</strong>
-                </p>
-                <p>
-                  status={activeJob.status} runtime={activeJob.runtime}
-                </p>
-                <p>
-                  total={activeJob.total_hosts ?? 0} ok={activeJob.succeeded_hosts ?? 0} failed={activeJob.failed_hosts ?? 0}
-                </p>
-                <p>http={activeJob.result_status ?? "n/a"}</p>
-                {activeJob.error ? <p className="error-text">{activeJob.error}</p> : null}
+        <section className="pane-block">
+          <h3>Overview</h3>
+          <ul className="metric-list">
+            <li>hosts={hosts.length}</li>
+            <li>jobs={jobs.length}</li>
+            <li>runs={runs.length}</li>
+            <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
+            <li>workers={metrics?.queue.workers_active ?? "-"}/{metrics?.queue.workers_total ?? "-"}</li>
+          </ul>
+        </section>
+      </aside>
+
+      <main className="chat-pane">
+        <header className="chat-head">
+          <div>
+            <p className="pane-eyebrow">live session</p>
+            <h1>{activeRuntime?.name ?? "codex"} control thread</h1>
+          </div>
+          <div className="chat-head-actions">
+            <button onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+              {isRefreshing ? "Syncing..." : "Sync"}
+            </button>
+            <button className="ghost" onClick={onLogout}>
+              Logout
+            </button>
+          </div>
+        </header>
+
+        <section className="timeline" aria-live="polite">
+          {timeline.length === 0 ? (
+            <article className="message message-system">
+              <div className="message-title-row">
+                <h4>Workspace Ready</h4>
               </div>
-            ) : (
-              <p className="muted">No active async job.</p>
-            )}
-          </section>
+              <pre>Send your first instruction to start a distributed codex run.</pre>
+            </article>
+          ) : (
+            timeline.map((entry) => (
+              <article key={entry.id} className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}>
+                <div className="message-title-row">
+                  <h4>{entry.title}</h4>
+                  <time>{formatClock(entry.createdAt)}</time>
+                </div>
+                <pre>{entry.body}</pre>
+              </article>
+            ))
+          )}
+          <div ref={timelineBottomRef} />
+        </section>
 
-          <section>
-            <h2>Recent Jobs</h2>
-            {jobs.length === 0 ? (
-              <p className="muted">No jobs yet.</p>
-            ) : (
-              <ul className="job-list">
-                {jobs.slice(0, 8).map((job) => (
-                  <li key={job.id}>
-                    <button
-                      className="ghost"
-                      onClick={() => {
-                        setActiveJobID(job.id);
-                        setActiveJob(job);
-                      }}
-                    >
-                      {job.id}
-                    </button>
-                    <span>{job.status}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+        <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={4}
+            placeholder="Tell codex what to execute on selected hosts..."
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                event.preventDefault();
+                composerFormRef.current?.requestSubmit();
+              }
+            }}
+          />
+          <div className="composer-controls">
+            <input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="workdir override" />
+            <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
+            <input value={maxOutputKB} onChange={(event) => setMaxOutputKB(event.target.value)} placeholder="max output KB" />
+            <button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? "Running..." : "Send"}
+            </button>
+          </div>
+        </form>
+      </main>
 
-          <section>
-            <h2>Add Host</h2>
-            <form className="host-form" onSubmit={onAddHost}>
-              <input
-                placeholder="name"
-                value={hostForm.name}
-                onChange={(event) => setHostForm((prev) => ({ ...prev, name: event.target.value }))}
-              />
-              <input
-                placeholder="host"
-                value={hostForm.host}
-                onChange={(event) => setHostForm((prev) => ({ ...prev, host: event.target.value }))}
-              />
-              <input
-                placeholder="user"
-                value={hostForm.user}
-                onChange={(event) => setHostForm((prev) => ({ ...prev, user: event.target.value }))}
-              />
-              <input
-                placeholder="workspace"
-                value={hostForm.workspace}
-                onChange={(event) => setHostForm((prev) => ({ ...prev, workspace: event.target.value }))}
-              />
-              <button type="submit" disabled={addingHost}>
-                {addingHost ? "Saving..." : "Save Host"}
-              </button>
-            </form>
-          </section>
-        </aside>
-      </div>
+      <aside className="inspect-pane">
+        <section className="inspect-block">
+          <h3>Active Job</h3>
+          {activeJob ? (
+            <div className="job-card">
+              <div className="job-head">
+                <strong>{activeJob.id}</strong>
+                <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
+              </div>
+              <p>runtime={activeJob.runtime}</p>
+              <p>queued={formatDateTime(activeJob.queued_at)}</p>
+              <p>
+                hosts total={activeJob.total_hosts ?? 0} ok={activeJob.succeeded_hosts ?? 0} failed={activeJob.failed_hosts ?? 0}
+              </p>
+              <div className="progress-track" aria-label="job progress">
+                <span style={{ width: `${activeProgress}%` }} />
+              </div>
+              <p>http={activeJob.result_status ?? "n/a"}</p>
+              {activeJob.error ? <p className="tone-err">{activeJob.error}</p> : null}
+            </div>
+          ) : (
+            <p className="pane-subtle">No active async job.</p>
+          )}
+        </section>
+
+        <section className="inspect-block">
+          <h3>Recent Jobs</h3>
+          {jobs.length === 0 ? (
+            <p className="pane-subtle">No jobs yet.</p>
+          ) : (
+            <ul className="history-list">
+              {jobs.slice(0, 8).map((job) => (
+                <li key={job.id}>
+                  <button
+                    className="ghost"
+                    onClick={() => {
+                      setActiveJobID(job.id);
+                      setActiveJob(job);
+                    }}
+                  >
+                    {job.id}
+                  </button>
+                  <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="inspect-block">
+          <h3>Recent Runs</h3>
+          {runs.length === 0 ? (
+            <p className="pane-subtle">No run results yet.</p>
+          ) : (
+            <ul className="history-list history-runs">
+              {runs.slice(0, 6).map((run) => (
+                <li key={run.id}>
+                  <span>{run.id}</span>
+                  <span className={`tone-${run.status_code < 400 ? "ok" : "err"}`}>
+                    {run.status_code < 400 ? "ok" : `http_${run.status_code}`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="inspect-block">
+          <h3>Add Host</h3>
+          <form className="host-form" onSubmit={onAddHost}>
+            <input
+              placeholder="name"
+              value={hostForm.name}
+              onChange={(event) => setHostForm((prev) => ({ ...prev, name: event.target.value }))}
+            />
+            <input
+              placeholder="host"
+              value={hostForm.host}
+              onChange={(event) => setHostForm((prev) => ({ ...prev, host: event.target.value }))}
+            />
+            <input
+              placeholder="user"
+              value={hostForm.user}
+              onChange={(event) => setHostForm((prev) => ({ ...prev, user: event.target.value }))}
+            />
+            <input
+              placeholder="workspace"
+              value={hostForm.workspace}
+              onChange={(event) => setHostForm((prev) => ({ ...prev, workspace: event.target.value }))}
+            />
+            <button type="submit" disabled={addingHost}>
+              {addingHost ? "Saving..." : "Save Host"}
+            </button>
+          </form>
+        </section>
+      </aside>
     </div>
   );
 }
