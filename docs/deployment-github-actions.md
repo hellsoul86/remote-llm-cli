@@ -67,15 +67,15 @@ Private key content for SSH login to all hosts in `DEPLOY_TARGETS`.
 
 ## 2. Web deploy configuration (Cloudflare Pages)
 
-### 2.1 Environment variables
+### 2.1 Environment secrets
 
 - `CF_PAGES_PROJECT`: Cloudflare Pages project name (required)
 - `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account id (required)
-- `CF_PAGES_BRANCH`: Pages branch override (optional; default `github.ref_name`)
-
-### 2.2 Environment secret
-
 - `CLOUDFLARE_API_TOKEN`: API token with Pages deploy permission (required)
+
+### 2.2 Environment variable (optional)
+
+- `CF_PAGES_BRANCH`: Pages branch override (optional; default `github.ref_name`)
 
 ## 3. Workflow behavior
 
