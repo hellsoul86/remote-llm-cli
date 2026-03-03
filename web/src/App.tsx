@@ -31,24 +31,12 @@ const TOKEN_KEY = "remote_llm_access_key";
 type AuthPhase = "checking" | "locked" | "ready";
 type AppMode = "session" | "ops";
 
-type QuickCommand = {
-  label: string;
-  template: string;
-};
-
 type SessionAlert = {
   id: string;
   threadID: string;
   title: string;
   body: string;
 };
-
-const QUICK_COMMANDS: QuickCommand[] = [
-  { label: "/status", template: "report controller status, queue depth, and active jobs" },
-  { label: "/hosts", template: "list all configured hosts with connectivity summary" },
-  { label: "/jobs", template: "summarize last 10 jobs and failures with hints" },
-  { label: "/sync", template: "check workspace sync readiness and list next safe sync actions" }
-];
 
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
   if (!job) return false;
@@ -171,9 +159,7 @@ export function App() {
     runAsyncMode,
     setRunAsyncMode,
     fanoutValue,
-    setFanoutValue,
     maxOutputKB,
-    setMaxOutputKB,
     isRefreshing,
     setIsRefreshing,
     activeJobID,
@@ -326,13 +312,6 @@ export function App() {
 
   function createThreadAndFocus() {
     createThread();
-    promptInputRef.current?.focus();
-  }
-
-  function applyQuickCommand(command: QuickCommand) {
-    if (!activeThread) return;
-    const nextDraft = activeThread.draft.trim() ? `${activeThread.draft}\n${command.template}` : command.template;
-    updateThreadDraft(activeThread.id, nextDraft);
     promptInputRef.current?.focus();
   }
 
@@ -623,48 +602,51 @@ export function App() {
           }
           jobEventCursorRef.current.set(item.jobID, nextAfter);
 
-          const progressLines: string[] = [];
           let stdoutStream = "";
           let stderrStream = "";
+          const terminalHints: string[] = [];
+          const showLiveStream = appMode === "session" && item.threadID === activeThreadID;
           for (const event of events) {
-            const line = summarizeJobEventLine(event);
-            if (line) progressLines.push(line);
             if (event.type === "target.stdout" && typeof event.chunk === "string") {
               stdoutStream += event.chunk;
             }
             if (event.type === "target.stderr" && typeof event.chunk === "string") {
               stderrStream += event.chunk;
             }
+            if (event.type === "job.failed" || event.type === "job.canceled" || event.type === "job.cancel_requested") {
+              const line = summarizeJobEventLine(event);
+              if (line) terminalHints.push(line);
+            }
           }
-          if (progressLines.length > 0) {
-            addTimelineEntry(
-              {
-                kind: "system",
-                state: "running",
-                title: `Job ${item.jobID} progress`,
-                body: progressLines.join("\n")
-              },
-              item.threadID
-            );
-          }
-          if (stdoutStream.trim()) {
+          if (showLiveStream && stdoutStream.trim()) {
             addTimelineEntry(
               {
                 kind: "assistant",
                 state: "running",
-                title: `Job ${item.jobID} stdout`,
+                title: `Job ${item.jobID} stream`,
                 body: clipStreamText(stdoutStream)
               },
               item.threadID
             );
           }
-          if (stderrStream.trim()) {
+          if (showLiveStream && stderrStream.trim()) {
             addTimelineEntry(
               {
                 kind: "system",
                 state: "running",
                 title: `Job ${item.jobID} stderr`,
                 body: clipStreamText(stderrStream)
+              },
+              item.threadID
+            );
+          }
+          if (terminalHints.length > 0) {
+            addTimelineEntry(
+              {
+                kind: "system",
+                state: "running",
+                title: `Job ${item.jobID}`,
+                body: terminalHints.join("\n")
               },
               item.threadID
             );
@@ -746,7 +728,7 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, runningThreadJobs, activeThreadID, threadTitleMap]);
+  }, [authPhase, token, appMode, runningThreadJobs, activeThreadID, threadTitleMap]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
@@ -1254,39 +1236,28 @@ export function App() {
                 />
                 <button type="submit">Rename</button>
               </form>
-              <button type="button" className="ghost" onClick={() => void onEnableNotifications()}>
-                Alerts: {notificationPermission}
-              </button>
             </section>
 
-            <section className="inspect-block">
-              <h3>Session Context</h3>
-              <ul className="metric-list metric-list-light">
-                <li>workdir={activeWorkspace?.path ?? "-"}</li>
-                <li>session={activeThread?.title ?? "-"}</li>
-                <li>sessions={threads.length}</li>
-                <li>targets={selectedHostCount}</li>
-                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
-              </ul>
-              <ul className="session-keymap">
-                <li>Ctrl/Cmd + K: focus prompt</li>
-                <li>Ctrl/Cmd + Shift + N: new session</li>
-                <li>Ctrl/Cmd + Shift + [ or ArrowUp: previous session</li>
-                <li>Ctrl/Cmd + Shift + ] or ArrowDown: next session</li>
-              </ul>
-              <button type="button" className="ghost" onClick={() => switchMode("ops")}>
-                Open Remote Ops
-              </button>
+            <section className="inspect-block compact-session-meta">
+              <p className="pane-subtle-light">Ctrl/Cmd+K focus · Ctrl/Cmd+Enter send · Ctrl/Cmd+Shift+N new session</p>
+              <div className="ops-actions-row">
+                <button type="button" className="ghost" onClick={() => void onEnableNotifications()}>
+                  Alerts: {notificationPermission}
+                </button>
+                <button type="button" className="ghost" onClick={() => switchMode("ops")}>
+                  Remote Ops
+                </button>
+              </div>
             </section>
           </aside>
 
           <main className="chat-pane">
             <header className="chat-head">
               <div>
-                <p className="pane-eyebrow">local-first codex session</p>
-                <h1>{activeThread?.title ?? "Session"} · {activeWorkspace?.path ?? "/home/ecs-user"}</h1>
+                <h1>{activeThread?.title ?? "Session"}</h1>
+                <p className="pane-subtle-light">{activeWorkspace?.path ?? "/home/ecs-user"}</p>
               </div>
-              <p className={`chat-health ${healthIsError ? "is-error" : ""}`}>health: {health}</p>
+              <p className={`chat-health ${healthIsError ? "is-error" : ""}`}>{healthIsError ? "degraded" : "online"}</p>
             </header>
 
             <section className="timeline" aria-live="polite">
@@ -1317,19 +1288,9 @@ export function App() {
 
             <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
               <div className="session-strip">
-                <span>runtime={activeRuntime?.name ?? selectedRuntime}</span>
-                <span>mode={runMode}</span>
-                <span>workdir={activeWorkspace?.path ?? "-"}</span>
-                <span>async={String(runAsyncMode)}</span>
-              </div>
-
-              <div className="quick-strip">
-                {QUICK_COMMANDS.map((command) => (
-                  <button key={command.label} type="button" className="quick-chip ghost" onClick={() => applyQuickCommand(command)}>
-                    {command.label}
-                  </button>
-                ))}
-                <span className="shortcut-hint">Ctrl/Cmd+K focus, Ctrl/Cmd+Shift+N new session</span>
+                <span>{activeRuntime?.name ?? selectedRuntime}</span>
+                <span>{runMode}</span>
+                <span>{activeThread?.sandbox ?? "workspace-write"}</span>
               </div>
 
               <div className="composer-controls">
@@ -1354,8 +1315,6 @@ export function App() {
                   <option value="workspace-write">workspace-write</option>
                   <option value="danger-full-access">danger-full-access</option>
                 </select>
-                <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
-                <input value={maxOutputKB} onChange={(event) => setMaxOutputKB(event.target.value)} placeholder="max output KB" />
               </div>
 
               <div className="quick-strip">
@@ -1384,6 +1343,7 @@ export function App() {
                   </button>
                 ))}
                 {imageUploadError ? <span className="shortcut-hint">{imageUploadError}</span> : null}
+                <span className="shortcut-hint">Ctrl/Cmd+Enter send</span>
               </div>
 
               <textarea

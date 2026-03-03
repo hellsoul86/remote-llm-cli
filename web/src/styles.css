@@ -511,26 +511,25 @@ button.ghost.danger-ghost:hover {
 }
 
 .chat-pane {
-  background: rgba(255, 255, 255, 0.88);
+  background: #ffffff;
   border: 1px solid #cbdbec;
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto 1fr auto;
   overflow: hidden;
 }
 
 .chat-head {
-  padding: 16px;
+  padding: 14px 16px 12px;
   border-bottom: 1px solid #d3e0ef;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  background:
-    linear-gradient(180deg, #ffffff 0%, #f4f9ff 100%);
+  background: #ffffff;
 }
 
 .chat-head h1 {
-  font-size: clamp(1.12rem, 1.9vw, 1.45rem);
+  font-size: clamp(1.04rem, 1.8vw, 1.28rem);
   color: #10223a;
 }
 
@@ -545,9 +544,10 @@ button.ghost.danger-ghost:hover {
 
 .chat-health {
   margin: 0;
-  color: var(--muted);
+  color: #4c5f7a;
   font-size: 0.8rem;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+  text-transform: lowercase;
 }
 
 .chat-health.is-error {
@@ -615,9 +615,7 @@ button.ghost.danger-ghost:hover {
   display: grid;
   gap: 10px;
   align-content: start;
-  background:
-    radial-gradient(620px 260px at 20% -10%, rgba(17, 127, 116, 0.12), transparent 74%),
-    linear-gradient(180deg, #f7fbff 0%, #fefcf7 100%);
+  background: #f8fafc;
 }
 
 .message {
@@ -632,13 +630,13 @@ button.ghost.danger-ghost:hover {
 
 .message-user {
   margin-left: auto;
-  background: #e8fbf6;
-  border-color: #7dc8b9;
+  background: #ecf8f4;
+  border-color: #9ecfc5;
 }
 
 .message-assistant {
-  background: #fff7e8;
-  border-color: #dec38b;
+  background: #ffffff;
+  border-color: #d7e2ef;
 }
 
 .message-system {
@@ -696,8 +694,8 @@ button.ghost.danger-ghost:hover {
 
 .session-strip span {
   border-radius: 999px;
-  border: 1px solid #d2deec;
-  background: #f5f9ff;
+  border: 1px solid #dbe4f0;
+  background: #ffffff;
   font-size: 0.72rem;
   padding: 4px 9px;
   color: #334964;
@@ -743,12 +741,12 @@ button.ghost.danger-ghost:hover {
 
 .composer-controls {
   display: grid;
-  grid-template-columns: 1fr 112px 144px auto;
+  grid-template-columns: 120px 1fr 172px;
   gap: 8px;
 }
 
 .session-side {
-  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-alt) 100%);
+  background: #f9fbfe;
   border: 1px solid #cbdbec;
   padding: 14px;
   overflow: auto;
@@ -777,8 +775,8 @@ button.ghost.danger-ghost:hover {
 }
 
 .focus-block {
-  border-color: #9ecfc5;
-  background: #f2fcf9;
+  border-color: #d3e0ef;
+  background: #ffffff;
 }
 
 .inspect-block h3 {
@@ -787,6 +785,10 @@ button.ghost.danger-ghost:hover {
 
 .metric-list-light {
   color: #2f425c;
+}
+
+.compact-session-meta {
+  gap: 10px;
 }
 
 .pane-subtle-light {
