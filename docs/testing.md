@@ -23,6 +23,10 @@ cd web
 npm run test:e2e:smoke
 ```
 
+This now covers:
+- async session/job behavior (mocked API)
+- session UX baseline (desktop/mobile layout + key interaction behavior)
+
 4. Web live headless e2e against deployed environment (no API mocking):
 
 ```bash
@@ -46,6 +50,7 @@ Post-merge push to `staging`/`main` runs deployment workflow (`Deploy`) when env
 ## Notes
 
 - E2E smoke uses route-mocked API responses and validates async job submission/polling UX.
+- Additional UX-focused smoke is in `web/e2e/session-ux.spec.ts`.
 - Live e2e requires a real access token and does not intercept network requests.
 - If Playwright browsers are missing locally, install with:
 
