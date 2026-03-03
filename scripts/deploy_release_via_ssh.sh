@@ -37,18 +37,27 @@ deploy_addr="${DEPLOY_ADDR:-:8080}"
 remote="${DEPLOY_USER}@${DEPLOY_HOST}"
 remote_tmp_tgz="/tmp/remote-llm-release-${DEPLOY_RELEASE_ID}.tgz"
 
-ssh_opts=(
+common_opts=(
   -o BatchMode=yes
   -o ConnectTimeout=20
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=3
   -o StrictHostKeyChecking=accept-new
   -i "${DEPLOY_SSH_KEY_PATH}"
+)
+
+ssh_opts=(
+  "${common_opts[@]}"
   -p "${deploy_port}"
 )
 
+scp_opts=(
+  "${common_opts[@]}"
+  -P "${deploy_port}"
+)
+
 echo "upload release to ${remote}:${remote_tmp_tgz}"
-scp "${ssh_opts[@]}" "${DEPLOY_RELEASE_TARBALL}" "${remote}:${remote_tmp_tgz}"
+scp "${scp_opts[@]}" "${DEPLOY_RELEASE_TARBALL}" "${remote}:${remote_tmp_tgz}"
 
 echo "deploy release ${DEPLOY_RELEASE_ID} on ${remote}"
 ssh "${ssh_opts[@]}" "${remote}" "bash -s -- \
