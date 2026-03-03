@@ -44,12 +44,6 @@ function isJobActive(job: RunJobRecord | null | undefined): boolean {
   return job.status === "pending" || job.status === "running";
 }
 
-function isRunResponsePayload(value: unknown): value is RunResponse {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return typeof candidate.runtime === "string" && typeof candidate.summary === "object" && Array.isArray(candidate.targets);
-}
-
 function summarizeRunResponse(response: RunResponse): string {
   const lines = [
     `runtime=${response.runtime}`,
@@ -151,10 +145,6 @@ export function App() {
     setAllHosts,
     selectedHostIDs,
     setSelectedHostIDs,
-    runMode,
-    setRunMode,
-    runModel,
-    setRunModel,
     runSandbox,
     setRunSandbox,
     runAsyncMode,
@@ -244,6 +234,7 @@ export function App() {
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
+  const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
 
   const activeRuntime = useMemo(
     () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
@@ -452,6 +443,9 @@ export function App() {
         if (!jobEventCursorRef.current.has(job.id)) {
           jobEventCursorRef.current.set(job.id, 0);
         }
+        if (!jobStreamSeenRef.current.has(job.id)) {
+          jobStreamSeenRef.current.set(job.id, false);
+        }
       }
 
       if (emitConnectedNote) {
@@ -636,15 +630,11 @@ export function App() {
           jobEventCursorRef.current.set(item.jobID, nextAfter);
 
           let stdoutStream = "";
-          let stderrStream = "";
           const terminalHints: string[] = [];
           const showLiveStream = appMode === "session" && item.threadID === activeThreadID;
           for (const event of events) {
             if (event.type === "target.stdout" && typeof event.chunk === "string") {
               stdoutStream += event.chunk;
-            }
-            if (event.type === "target.stderr" && typeof event.chunk === "string") {
-              stderrStream += event.chunk;
             }
             if (event.type === "job.failed" || event.type === "job.canceled" || event.type === "job.cancel_requested") {
               const line = summarizeJobEventLine(event);
@@ -652,23 +642,13 @@ export function App() {
             }
           }
           if (showLiveStream && stdoutStream.trim()) {
+            jobStreamSeenRef.current.set(item.jobID, true);
             addTimelineEntry(
               {
                 kind: "assistant",
                 state: "running",
-                title: `Job ${item.jobID} stream`,
+                title: "Assistant",
                 body: clipStreamText(stdoutStream)
-              },
-              item.threadID
-            );
-          }
-          if (showLiveStream && stderrStream.trim()) {
-            addTimelineEntry(
-              {
-                kind: "system",
-                state: "running",
-                title: `Job ${item.jobID} stderr`,
-                body: clipStreamText(stderrStream)
               },
               item.threadID
             );
@@ -677,8 +657,8 @@ export function App() {
             addTimelineEntry(
               {
                 kind: "system",
-                state: "running",
-                title: `Job ${item.jobID}`,
+                state: "error",
+                title: "System",
                 body: terminalHints.join("\n")
               },
               item.threadID
@@ -699,29 +679,31 @@ export function App() {
             job.status === "succeeded" || job.status === "failed" || job.status === "canceled" ? job.status : "failed";
           setThreadJobState(item.threadID, "", terminalStatus);
           jobEventCursorRef.current.delete(item.jobID);
+          const sawStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
+          jobStreamSeenRef.current.delete(item.jobID);
           if (item.threadID !== activeThreadID) {
             setThreadUnread(item.threadID, true);
           }
 
           if (!completedJobsRef.current.has(job.id)) {
             completedJobsRef.current.add(job.id);
-            if (isRunResponsePayload(job.response)) {
+            if (job.status === "failed" || job.status === "canceled") {
               addTimelineEntry(
                 {
-                  kind: "assistant",
-                  state: job.status === "succeeded" ? "success" : "error",
-                  title: `Job ${job.id} ${job.status}`,
-                  body: summarizeRunResponse(job.response)
+                  kind: "system",
+                  state: "error",
+                  title: "System",
+                  body: job.error ? String(job.error) : "Session failed."
                 },
                 item.threadID
               );
-            } else {
+            } else if (!sawStream) {
               addTimelineEntry(
                 {
                   kind: "assistant",
-                  state: job.status === "succeeded" ? "success" : "error",
-                  title: `Job ${job.id} ${job.status}`,
-                  body: job.error ? String(job.error) : `runtime=${job.runtime} status=${job.status}`
+                  state: "success",
+                  title: "Assistant",
+                  body: item.threadID === activeThreadID ? "Done." : "Completed in background."
                 },
                 item.threadID
               );
@@ -819,6 +801,7 @@ export function App() {
     resetOpsDomain();
     resetSessionDomain();
     jobEventCursorRef.current.clear();
+    jobStreamSeenRef.current.clear();
     setSubmittingThreadID("");
     setSessionAlerts([]);
     setSessionModelDefault("gpt-5-codex");
@@ -926,8 +909,8 @@ export function App() {
     addTimelineEntry(
       {
         kind: "user",
-        title: `Run ${request.runtime}`,
-        body: `${trimmedPrompt}\n\nasync=${String(runAsyncMode)} hosts=${targetHostIDs.join(",")} workdir=${effectiveWorkdir ?? "-"} model=${effectiveModel ?? "-"} sandbox=${effectiveSandbox}`
+        title: "You",
+        body: trimmedPrompt
       },
       activeThread.id
     );
@@ -937,21 +920,13 @@ export function App() {
       if (runAsyncMode) {
         const { body } = await enqueueRunJob(token, request);
         jobEventCursorRef.current.set(body.job.id, 0);
+        jobStreamSeenRef.current.set(body.job.id, false);
         setActiveJobID(body.job.id);
         setActiveJobThreadID(activeThread.id);
         setActiveJob(body.job);
         setThreadJobState(activeThread.id, body.job.id, "running");
         setJobs((prev) => [body.job, ...prev.filter((job) => job.id !== body.job.id)]);
         setSubmittingThreadID("");
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "running",
-            title: "Job Queued",
-            body: `Job ${body.job.id} accepted. status=${body.job.status}`
-          },
-          activeThread.id
-        );
       } else {
         const { status, body } = await runFanout(token, request);
         addTimelineEntry(
@@ -1275,12 +1250,39 @@ export function App() {
 
             <section className="inspect-block compact-session-meta">
               <p className="pane-subtle-light">Ctrl/Cmd+K focus · Ctrl/Cmd+Enter send · Ctrl/Cmd+Shift+N new session</p>
+              <label className="session-setting-row">
+                model
+                <select
+                  value={activeThreadModelValue}
+                  onChange={(event) => {
+                    if (!activeThread) return;
+                    setThreadModel(activeThread.id, event.target.value);
+                  }}
+                >
+                  {sessionModelChoices.map((modelName) => (
+                    <option key={modelName} value={modelName}>
+                      {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="session-setting-row">
+                sandbox
+                <select
+                  value={activeThread?.sandbox ?? "workspace-write"}
+                  onChange={(event) =>
+                    activeThread &&
+                    setThreadSandbox(activeThread.id, event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                  }
+                >
+                  <option value="read-only">read-only</option>
+                  <option value="workspace-write">workspace-write</option>
+                  <option value="danger-full-access">danger-full-access</option>
+                </select>
+              </label>
               <div className="ops-actions-row">
                 <button type="button" className="ghost" onClick={() => void onEnableNotifications()}>
                   Alerts: {notificationPermission}
-                </button>
-                <button type="button" className="ghost" onClick={() => switchMode("ops")}>
-                  Remote Ops
                 </button>
               </div>
             </section>
@@ -1290,21 +1292,19 @@ export function App() {
             <header className="chat-head">
               <div>
                 <h1>{activeThread?.title ?? "Session"}</h1>
-                <p className="pane-subtle-light">{activeWorkspace?.path ?? "/home/ecs-user"}</p>
               </div>
-              <p className={`chat-health ${healthIsError ? "is-error" : ""}`}>{healthIsError ? "degraded" : "online"}</p>
             </header>
 
             <section className="timeline" aria-live="polite">
               {activeTimeline.length === 0 ? (
                 <article className="message message-system">
                   <div className="message-title-row">
-                    <h4>{isRefreshing ? "Sync In Progress" : "Workspace Ready"}</h4>
+                    <h4>{isRefreshing ? "Loading" : "Start"}</h4>
                   </div>
                   <pre>
                     {isRefreshing
-                      ? "Loading local codex runtime and background session state..."
-                      : "Start chatting with codex. Non-active sessions continue syncing in background."}
+                      ? "Preparing session..."
+                      : "Ask Codex what to do in this workspace."}
                   </pre>
                 </article>
               ) : (
@@ -1322,39 +1322,6 @@ export function App() {
             </section>
 
             <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
-              <div className="session-strip">
-                <span>{activeRuntime?.name ?? selectedRuntime}</span>
-                <span>{activeThreadModelValue || "model-auto"}</span>
-                <span>{activeThread?.sandbox ?? "workspace-write"}</span>
-              </div>
-
-              <div className="composer-controls">
-                <select
-                  value={activeThreadModelValue}
-                  onChange={(event) => {
-                    if (!activeThread) return;
-                    setThreadModel(activeThread.id, event.target.value);
-                  }}
-                >
-                  {sessionModelChoices.map((modelName) => (
-                    <option key={modelName} value={modelName}>
-                      {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={activeThread?.sandbox ?? "workspace-write"}
-                  onChange={(event) =>
-                    activeThread &&
-                    setThreadSandbox(activeThread.id, event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
-                  }
-                >
-                  <option value="read-only">read-only</option>
-                  <option value="workspace-write">workspace-write</option>
-                  <option value="danger-full-access">danger-full-access</option>
-                </select>
-              </div>
-
               <div className="quick-strip">
                 <label className="quick-chip ghost file-chip">
                   <input
@@ -1402,7 +1369,7 @@ export function App() {
                 }}
               />
 
-              <div className="composer-controls">
+              <div className="composer-actions">
                 <button type="submit" disabled={activeThreadBusy}>
                   {activeThreadBusy ? "Running..." : "Send"}
                 </button>
@@ -1493,18 +1460,6 @@ export function App() {
                     </option>
                   ))}
                 </select>
-              </label>
-              <label>
-                mode
-                <select value={runMode} onChange={(event) => setRunMode(event.target.value as "exec" | "resume" | "review")}>
-                  <option value="exec">exec</option>
-                  <option value="resume">resume</option>
-                  <option value="review">review</option>
-                </select>
-              </label>
-              <label>
-                model
-                <input value={runModel} onChange={(event) => setRunModel(event.target.value)} placeholder="optional" />
               </label>
               <label>
                 sandbox

@@ -21,8 +21,6 @@ export function useOpsDomain() {
   const [selectedRuntime, setSelectedRuntime] = useState("codex");
   const [allHosts, setAllHosts] = useState(true);
   const [selectedHostIDs, setSelectedHostIDs] = useState<string[]>([]);
-  const [runMode, setRunMode] = useState<"exec" | "resume" | "review">("exec");
-  const [runModel, setRunModel] = useState("");
   const [runSandbox, setRunSandbox] = useState<"" | "read-only" | "workspace-write" | "danger-full-access">("");
   const [runAsyncMode, setRunAsyncMode] = useState(true);
   const [workdir, setWorkdir] = useState("");
@@ -60,8 +58,6 @@ export function useOpsDomain() {
     setSelectedRuntime("codex");
     setAllHosts(true);
     setSelectedHostIDs([]);
-    setRunMode("exec");
-    setRunModel("");
     setRunSandbox("");
     setRunAsyncMode(true);
     setWorkdir("");
@@ -105,10 +101,6 @@ export function useOpsDomain() {
     setAllHosts,
     selectedHostIDs,
     setSelectedHostIDs,
-    runMode,
-    setRunMode,
-    runModel,
-    setRunModel,
     runSandbox,
     setRunSandbox,
     runAsyncMode,

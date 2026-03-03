@@ -41,6 +41,16 @@ test("queues async run job and observes terminal success", async ({ page }) => {
   await page.route("**/v1/runs**", async (route) => {
     await route.fulfill({ status: 200, json: { runs: [] } });
   });
+  await page.route("**/v1/codex/models**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      json: {
+        runtime: "codex",
+        default_model: "gpt-5-codex",
+        models: ["gpt-5-codex", "gpt-5"]
+      }
+    });
+  });
   await page.route("**/v1/audit**", async (route) => {
     await route.fulfill({ status: 200, json: { events: [] } });
   });
@@ -215,5 +225,11 @@ test("queues async run job and observes terminal success", async ({ page }) => {
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.getByText(/stream-one/)).toBeVisible();
-  await expect(page.getByText(/Job job_1 succeeded/)).toBeVisible();
+  await expect(
+    page
+      .locator("section")
+      .filter({ has: page.getByRole("heading", { name: "Sessions" }) })
+      .locator(".thread-chip.active small")
+  ).toHaveText("succeeded");
+  await expect(page.getByText(/Job job_1 succeeded/)).toHaveCount(0);
 });
