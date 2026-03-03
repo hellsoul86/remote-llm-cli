@@ -63,48 +63,12 @@ jobs:
           path: dist/remote-llm-release.tgz
           if-no-files-found: error
 
-  validate-deploy-config:
-    name: Validate Deploy Config
+  deploy-api:
+    name: Deploy API (SSH Targets)
     runs-on: ubuntu-latest
     needs:
       - build-release
-    outputs:
-      deploy_targets: ${{ steps.validate.outputs.deploy_targets }}
     environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
-    steps:
-      - name: Validate targets and secrets
-        id: validate
-        env:
-          DEPLOY_TARGETS: ${{ secrets.DEPLOY_TARGETS }}
-          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
-        run: |
-          if [ -z "${DEPLOY_TARGETS}" ]; then
-            echo "::error::missing environment secret DEPLOY_TARGETS"
-            exit 1
-          fi
-          echo "${DEPLOY_TARGETS}" | jq -e '. | type=="array" and length>0' >/dev/null
-          echo "${DEPLOY_TARGETS}" | jq -e '.[] | has("name") and has("host") and has("user")' >/dev/null
-          if [ -z "${DEPLOY_SSH_PRIVATE_KEY}" ]; then
-            echo "::error::missing environment secret DEPLOY_SSH_PRIVATE_KEY"
-            exit 1
-          fi
-          {
-            echo "deploy_targets<<EOF"
-            echo "${DEPLOY_TARGETS}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
-
-  deploy:
-    name: Deploy (${{ matrix.target.name }})
-    runs-on: ubuntu-latest
-    needs:
-      - build-release
-      - validate-deploy-config
-    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJson(needs.validate-deploy-config.outputs.deploy_targets) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -121,29 +85,55 @@ jobs:
         env:
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
+          if [ -z "${DEPLOY_SSH_PRIVATE_KEY}" ]; then
+            echo "::error::missing environment secret DEPLOY_SSH_PRIVATE_KEY"
+            exit 1
+          fi
           key_path="${RUNNER_TEMP}/deploy_key"
           printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "${key_path}"
           chmod 600 "${key_path}"
           echo "DEPLOY_SSH_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
 
-      - name: Deploy via SSH
+      - name: Deploy API targets via SSH
         env:
+          DEPLOY_TARGETS: ${{ secrets.DEPLOY_TARGETS }}
           DEPLOY_RELEASE_TARBALL: ${{ github.workspace }}/dist/remote-llm-release.tgz
           DEPLOY_RELEASE_ID: ${{ github.sha }}
           DEPLOY_SSH_KEY_PATH: ${{ env.DEPLOY_SSH_KEY_PATH }}
-          DEPLOY_HOST: ${{ matrix.target.host }}
-          DEPLOY_PORT: ${{ matrix.target.port || 22 }}
-          DEPLOY_USER: ${{ matrix.target.user }}
-          DEPLOY_PATH: ${{ matrix.target.deploy_path || '/opt/remote-llm-cli' }}
-          DEPLOY_SERVICE_NAME: ${{ matrix.target.service_name || 'remote-llm-server' }}
-          DEPLOY_ADDR: ${{ matrix.target.addr || ':8080' }}
-          DEPLOY_DATA_PATH: ${{ matrix.target.data_path }}
-          DEPLOY_RUNTIME_CONFIG_PATH: ${{ matrix.target.runtime_config_path }}
-          DEPLOY_KEEP_RELEASES: ${{ matrix.target.keep_releases || 5 }}
-          DEPLOY_HEALTHCHECK_URL: ${{ matrix.target.healthcheck_url || 'http://127.0.0.1:8080/v1/healthz' }}
         run: |
-          chmod +x scripts/deploy_release_via_ssh.sh
-          scripts/deploy_release_via_ssh.sh
+          if [ -z "${DEPLOY_TARGETS}" ]; then
+            echo "::error::missing environment secret DEPLOY_TARGETS"
+            exit 1
+          fi
+          echo "${DEPLOY_TARGETS}" | jq -e '. | type=="array" and length>0' >/dev/null
+          echo "${DEPLOY_TARGETS}" | jq -e '.[] | has("name") and has("host") and has("user")' >/dev/null
+
+          while IFS= read -r target; do
+            name="$(echo "${target}" | jq -r '.name')"
+            host="$(echo "${target}" | jq -r '.host')"
+            user="$(echo "${target}" | jq -r '.user')"
+
+            echo "::add-mask::${host}"
+            echo "::add-mask::${user}"
+            echo "deploying target: ${name}"
+
+            export DEPLOY_HOST="${host}"
+            export DEPLOY_USER="${user}"
+            export DEPLOY_PORT="$(echo "${target}" | jq -r '.port // empty')"
+            export DEPLOY_PATH="$(echo "${target}" | jq -r '.deploy_path // empty')"
+            export DEPLOY_SERVICE_NAME="$(echo "${target}" | jq -r '.service_name // empty')"
+            export DEPLOY_ADDR="$(echo "${target}" | jq -r '.addr // empty')"
+            export DEPLOY_DATA_PATH="$(echo "${target}" | jq -r '.data_path // empty')"
+            export DEPLOY_RUNTIME_CONFIG_PATH="$(echo "${target}" | jq -r '.runtime_config_path // empty')"
+            export DEPLOY_KEEP_RELEASES="$(echo "${target}" | jq -r '.keep_releases // empty')"
+            export DEPLOY_HEALTHCHECK_URL="$(echo "${target}" | jq -r '.healthcheck_url // empty')"
+
+            chmod +x scripts/deploy_release_via_ssh.sh
+            scripts/deploy_release_via_ssh.sh
+          done < <(echo "${DEPLOY_TARGETS}" | jq -c '.[]')
+
+          unset DEPLOY_HOST DEPLOY_USER DEPLOY_PORT DEPLOY_PATH DEPLOY_SERVICE_NAME
+          unset DEPLOY_ADDR DEPLOY_DATA_PATH DEPLOY_RUNTIME_CONFIG_PATH DEPLOY_KEEP_RELEASES DEPLOY_HEALTHCHECK_URL
 
   deploy-web-pages:
     name: Deploy Web (Cloudflare Pages)
