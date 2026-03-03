@@ -1221,7 +1221,7 @@ export function App() {
               sandbox: effectiveSandbox,
               images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
               json_output: true,
-              skip_git_repo_check: false,
+              skip_git_repo_check: true,
               ephemeral: false
             }
           : undefined

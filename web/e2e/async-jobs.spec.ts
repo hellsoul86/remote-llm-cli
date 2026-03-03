@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 test("queues async run job and observes terminal success", async ({ page }) => {
   let jobPollCount = 0;
   let eventPollCount = 0;
+  let observedSkipGitRepoCheck: boolean | null = null;
 
   await page.route("**/v1/healthz", async (route) => {
     await route.fulfill({ status: 200, json: { ok: true, timestamp: "2026-03-02T00:00:00Z" } });
@@ -107,6 +108,8 @@ test("queues async run job and observes terminal success", async ({ page }) => {
     await route.fallback();
   });
   await page.route("**/v1/jobs/run", async (route) => {
+    const payload = route.request().postDataJSON() as { codex?: { skip_git_repo_check?: boolean } } | null;
+    observedSkipGitRepoCheck = payload?.codex?.skip_git_repo_check ?? null;
     await route.fulfill({
       status: 202,
       json: {
@@ -250,6 +253,7 @@ test("queues async run job and observes terminal success", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.getByPlaceholder("Tell codex what to do in this workspace...").fill("smoke");
   await page.getByRole("button", { name: "Send" }).click();
+  expect(observedSkipGitRepoCheck).toBe(true);
 
   await expect(page.getByText(/stream-one/)).toBeVisible();
   await expect(
