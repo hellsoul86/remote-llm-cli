@@ -34,12 +34,45 @@ type TimelineEntry = {
   createdAt: string;
 };
 
+type ConversationThread = {
+  id: string;
+  title: string;
+  draft: string;
+  timeline: TimelineEntry[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 type AddHostForm = {
   name: string;
   host: string;
   user: string;
   workspace: string;
 };
+
+type QuickCommand = {
+  label: string;
+  template: string;
+};
+
+const QUICK_COMMANDS: QuickCommand[] = [
+  { label: "/status", template: "report controller status, queue depth, and active jobs" },
+  { label: "/hosts", template: "list all configured hosts with connectivity summary" },
+  { label: "/jobs", template: "summarize last 10 jobs and failures with hints" },
+  { label: "/sync", template: "check workspace sync readiness and list next safe sync actions" }
+];
+
+function createInitialThread(): ConversationThread {
+  const now = new Date().toISOString();
+  return {
+    id: "thread_1",
+    title: "Thread 1",
+    draft: "summarize current repo state and risks",
+    timeline: [],
+    createdAt: now,
+    updatedAt: now
+  };
+}
 
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
   if (!job) return false;
@@ -107,7 +140,6 @@ export function App() {
   const [runModel, setRunModel] = useState("");
   const [runSandbox, setRunSandbox] = useState<"" | "read-only" | "workspace-write" | "danger-full-access">("");
   const [runAsyncMode, setRunAsyncMode] = useState(true);
-  const [prompt, setPrompt] = useState("summarize current repo state and risks");
   const [workdir, setWorkdir] = useState("");
   const [fanoutValue, setFanoutValue] = useState("3");
   const [maxOutputKB, setMaxOutputKB] = useState("256");
@@ -116,17 +148,21 @@ export function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const [activeJobID, setActiveJobID] = useState("");
+  const [activeJobThreadID, setActiveJobThreadID] = useState("thread_1");
   const [activeJob, setActiveJob] = useState<RunJobRecord | null>(null);
 
   const [hostForm, setHostForm] = useState<AddHostForm>({ name: "", host: "", user: "", workspace: "" });
   const [addingHost, setAddingHost] = useState(false);
 
-  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [threads, setThreads] = useState<ConversationThread[]>(() => [createInitialThread()]);
+  const [activeThreadID, setActiveThreadID] = useState("thread_1");
 
   const completedJobsRef = useRef<Set<string>>(new Set());
   const entryCounter = useRef(0);
+  const threadCounterRef = useRef(1);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
   const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
 
@@ -134,6 +170,14 @@ export function App() {
     () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
     [runtimes, selectedRuntime]
   );
+
+  const activeThread = useMemo(
+    () => threads.find((thread) => thread.id === activeThreadID) ?? threads[0] ?? null,
+    [threads, activeThreadID]
+  );
+
+  const activeTimeline = activeThread?.timeline ?? [];
+  const activeDraft = activeThread?.draft ?? "";
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -149,15 +193,63 @@ export function App() {
     return `entry_${Date.now()}_${entryCounter.current}`;
   }
 
-  function addTimelineEntry(entry: Omit<TimelineEntry, "id" | "createdAt">) {
-    setTimeline((prev) => [
-      ...prev,
-      {
-        id: nextEntryID(),
-        createdAt: new Date().toISOString(),
-        ...entry
-      }
-    ]);
+  function updateThreadDraft(threadID: string, draft: string) {
+    setThreads((prev) =>
+      prev.map((thread) =>
+        thread.id === threadID
+          ? {
+              ...thread,
+              draft,
+              updatedAt: new Date().toISOString()
+            }
+          : thread
+      )
+    );
+  }
+
+  function addTimelineEntry(entry: Omit<TimelineEntry, "id" | "createdAt">, threadID = activeThreadID) {
+    const createdAt = new Date().toISOString();
+    setThreads((prev) =>
+      prev.map((thread) => {
+        if (thread.id !== threadID) return thread;
+        return {
+          ...thread,
+          timeline: [
+            ...thread.timeline,
+            {
+              id: nextEntryID(),
+              createdAt,
+              ...entry
+            }
+          ],
+          updatedAt: createdAt
+        };
+      })
+    );
+  }
+
+  function createThread() {
+    threadCounterRef.current += 1;
+    const idx = threadCounterRef.current;
+    const now = new Date().toISOString();
+    const next: ConversationThread = {
+      id: `thread_${Date.now()}_${idx}`,
+      title: `Thread ${idx}`,
+      draft: "",
+      timeline: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    setThreads((prev) => [...prev, next]);
+    setActiveThreadID(next.id);
+    promptInputRef.current?.focus();
+  }
+
+  function applyQuickCommand(command: QuickCommand) {
+    if (!activeThread) return;
+    const nextDraft = activeThread.draft.trim() ? `${activeThread.draft}\n${command.template}` : command.template;
+    updateThreadDraft(activeThread.id, nextDraft);
+    promptInputRef.current?.focus();
   }
 
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
@@ -191,22 +283,28 @@ export function App() {
       }
 
       if (emitConnectedNote) {
-        addTimelineEntry({
-          kind: "system",
-          state: "success",
-          title: "Connected",
-          body: `Connected. hosts=${nextHosts.length} runtimes=${nextRuntimes.length} queue_depth=${nextMetrics.queue.depth}`
-        });
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "success",
+            title: "Connected",
+            body: `Connected. hosts=${nextHosts.length} runtimes=${nextRuntimes.length} queue_depth=${nextMetrics.queue.depth}`
+          },
+          activeThreadID
+        );
       }
     } catch (error) {
       setHealth(`error: ${String(error)}`);
       if (emitConnectedNote) {
-        addTimelineEntry({
-          kind: "system",
-          state: "error",
-          title: "Connection Failed",
-          body: String(error)
-        });
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "error",
+            title: "Connection Failed",
+            body: String(error)
+          },
+          activeThreadID
+        );
       }
       throw error;
     } finally {
@@ -250,8 +348,30 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!threads.some((thread) => thread.id === activeThreadID) && threads.length > 0) {
+      setActiveThreadID(threads[0].id);
+    }
+  }, [threads, activeThreadID]);
+
+  useEffect(() => {
     timelineBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [timeline.length]);
+  }, [activeTimeline.length, activeThreadID]);
+
+  useEffect(() => {
+    if (authPhase !== "ready") return;
+
+    const handleGlobalKeydown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        promptInputRef.current?.focus();
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeydown);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeydown);
+    };
+  }, [authPhase]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || !activeJobID) return;
@@ -274,22 +394,29 @@ export function App() {
           setActiveJobID("");
           setIsSubmitting(false);
 
+          const targetThreadID = activeJobThreadID || activeThreadID;
           if (!completedJobsRef.current.has(job.id)) {
             completedJobsRef.current.add(job.id);
             if (isRunResponsePayload(job.response)) {
-              addTimelineEntry({
-                kind: "assistant",
-                state: job.status === "succeeded" ? "success" : "error",
-                title: `Job ${job.id} ${job.status}`,
-                body: summarizeRunResponse(job.response)
-              });
+              addTimelineEntry(
+                {
+                  kind: "assistant",
+                  state: job.status === "succeeded" ? "success" : "error",
+                  title: `Job ${job.id} ${job.status}`,
+                  body: summarizeRunResponse(job.response)
+                },
+                targetThreadID
+              );
             } else {
-              addTimelineEntry({
-                kind: "assistant",
-                state: job.status === "succeeded" ? "success" : "error",
-                title: `Job ${job.id} ${job.status}`,
-                body: job.error ? String(job.error) : `runtime=${job.runtime} status=${job.status}`
-              });
+              addTimelineEntry(
+                {
+                  kind: "assistant",
+                  state: job.status === "succeeded" ? "success" : "error",
+                  title: `Job ${job.id} ${job.status}`,
+                  body: job.error ? String(job.error) : `runtime=${job.runtime} status=${job.status}`
+                },
+                targetThreadID
+              );
             }
           }
 
@@ -297,15 +424,19 @@ export function App() {
           if (canceled) return;
           setRuns(nextRuns);
           setMetrics(refreshedMetrics);
+          setActiveJobThreadID(activeThreadID);
         }
       } catch (error) {
         if (canceled) return;
-        addTimelineEntry({
-          kind: "system",
-          state: "error",
-          title: "Job Poll Failed",
-          body: String(error)
-        });
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "error",
+            title: "Job Poll Failed",
+            body: String(error)
+          },
+          activeJobThreadID || activeThreadID
+        );
         setActiveJobID("");
         setIsSubmitting(false);
       }
@@ -315,7 +446,7 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, activeJobID]);
+  }, [authPhase, token, activeJobID, activeJobThreadID, activeThreadID]);
 
   async function onSubmitToken(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -324,7 +455,10 @@ export function App() {
 
   function onLogout() {
     localStorage.removeItem(TOKEN_KEY);
+    const initial = createInitialThread();
     completedJobsRef.current.clear();
+    threadCounterRef.current = 1;
+
     setToken("");
     setTokenInput("");
     setHosts([]);
@@ -332,7 +466,9 @@ export function App() {
     setJobs([]);
     setRuns([]);
     setMetrics(null);
-    setTimeline([]);
+    setThreads([initial]);
+    setActiveThreadID(initial.id);
+    setActiveJobThreadID(initial.id);
     setActiveJob(null);
     setActiveJobID("");
     setAuthError("");
@@ -353,21 +489,24 @@ export function App() {
 
   async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (authPhase !== "ready" || !token.trim()) return;
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
 
-    const trimmedPrompt = prompt.trim();
+    const trimmedPrompt = activeThread.draft.trim();
     if (!trimmedPrompt) {
-      addTimelineEntry({ kind: "system", state: "error", title: "Prompt Missing", body: "Prompt is required." });
+      addTimelineEntry({ kind: "system", state: "error", title: "Prompt Missing", body: "Prompt is required." }, activeThread.id);
       return;
     }
 
     if (!allHosts && selectedHostIDs.length === 0) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "No Target Host",
-        body: "Select at least one host or switch to all-host mode."
-      });
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "No Target Host",
+          body: "Select at least one host or switch to all-host mode."
+        },
+        activeThread.id
+      );
       return;
     }
 
@@ -395,33 +534,43 @@ export function App() {
           : undefined
     };
 
-    addTimelineEntry({
-      kind: "user",
-      title: `Run ${request.runtime}`,
-      body: `${trimmedPrompt}\n\nmode=${runMode} async=${String(runAsyncMode)} hosts=${allHosts ? "all" : selectedHostIDs.join(",")}`
-    });
+    addTimelineEntry(
+      {
+        kind: "user",
+        title: `Run ${request.runtime}`,
+        body: `${trimmedPrompt}\n\nmode=${runMode} async=${String(runAsyncMode)} hosts=${allHosts ? "all" : selectedHostIDs.join(",")}`
+      },
+      activeThread.id
+    );
 
     setIsSubmitting(true);
     try {
       if (runAsyncMode) {
         const { body } = await enqueueRunJob(token, request);
         setActiveJobID(body.job.id);
+        setActiveJobThreadID(activeThread.id);
         setActiveJob(body.job);
         setJobs((prev) => [body.job, ...prev.filter((job) => job.id !== body.job.id)]);
-        addTimelineEntry({
-          kind: "system",
-          state: "running",
-          title: "Job Queued",
-          body: `Job ${body.job.id} accepted. status=${body.job.status}`
-        });
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "running",
+            title: "Job Queued",
+            body: `Job ${body.job.id} accepted. status=${body.job.status}`
+          },
+          activeThread.id
+        );
       } else {
         const { status, body } = await runFanout(token, request);
-        addTimelineEntry({
-          kind: "assistant",
-          state: status >= 400 ? "error" : "success",
-          title: `Run Finished (HTTP ${status})`,
-          body: summarizeRunResponse(body)
-        });
+        addTimelineEntry(
+          {
+            kind: "assistant",
+            state: status >= 400 ? "error" : "success",
+            title: `Run Finished (HTTP ${status})`,
+            body: summarizeRunResponse(body)
+          },
+          activeThread.id
+        );
 
         const [nextRuns, nextJobs, nextMetrics] = await Promise.all([
           listRuns(token, 20),
@@ -434,7 +583,7 @@ export function App() {
         setIsSubmitting(false);
       }
     } catch (error) {
-      addTimelineEntry({ kind: "system", state: "error", title: "Run Failed", body: String(error) });
+      addTimelineEntry({ kind: "system", state: "error", title: "Run Failed", body: String(error) }, activeThread.id);
       setIsSubmitting(false);
     }
   }
@@ -592,6 +741,7 @@ export function App() {
             <li>runs={runs.length}</li>
             <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
             <li>workers={metrics?.queue.workers_active ?? "-"}/{metrics?.queue.workers_total ?? "-"}</li>
+            <li>threads={threads.length}</li>
           </ul>
         </section>
       </aside>
@@ -612,8 +762,27 @@ export function App() {
           </div>
         </header>
 
+        <section className="thread-bar">
+          <div className="thread-list">
+            {threads.map((thread) => (
+              <button
+                key={thread.id}
+                type="button"
+                className={`thread-chip ${thread.id === activeThreadID ? "active" : ""}`}
+                onClick={() => setActiveThreadID(thread.id)}
+              >
+                <span>{thread.title}</span>
+                <small>{thread.timeline.length}</small>
+              </button>
+            ))}
+          </div>
+          <button type="button" className="ghost new-thread" onClick={createThread}>
+            New Thread
+          </button>
+        </section>
+
         <section className="timeline" aria-live="polite">
-          {timeline.length === 0 ? (
+          {activeTimeline.length === 0 ? (
             <article className="message message-system">
               <div className="message-title-row">
                 <h4>Workspace Ready</h4>
@@ -621,7 +790,7 @@ export function App() {
               <pre>Send your first instruction to start a distributed codex run.</pre>
             </article>
           ) : (
-            timeline.map((entry) => (
+            activeTimeline.map((entry) => (
               <article key={entry.id} className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}>
                 <div className="message-title-row">
                   <h4>{entry.title}</h4>
@@ -635,9 +804,30 @@ export function App() {
         </section>
 
         <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
+          <div className="session-strip">
+            <span>runtime={activeRuntime?.name ?? selectedRuntime}</span>
+            <span>mode={runMode}</span>
+            <span>hosts={allHosts ? "all" : selectedHostIDs.length}</span>
+            <span>async={String(runAsyncMode)}</span>
+          </div>
+
+          <div className="quick-strip">
+            {QUICK_COMMANDS.map((command) => (
+              <button key={command.label} type="button" className="quick-chip ghost" onClick={() => applyQuickCommand(command)}>
+                {command.label}
+              </button>
+            ))}
+            <span className="shortcut-hint">Ctrl/Cmd+K focus</span>
+          </div>
+
           <textarea
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
+            ref={promptInputRef}
+            value={activeDraft}
+            onChange={(event) => {
+              if (activeThread) {
+                updateThreadDraft(activeThread.id, event.target.value);
+              }
+            }}
             rows={4}
             placeholder="Tell codex what to execute on selected hosts..."
             onKeyDown={(event) => {
@@ -647,6 +837,7 @@ export function App() {
               }
             }}
           />
+
           <div className="composer-controls">
             <input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="workdir override" />
             <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
@@ -668,6 +859,7 @@ export function App() {
                 <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
               </div>
               <p>runtime={activeJob.runtime}</p>
+              <p>thread={activeJobThreadID}</p>
               <p>queued={formatDateTime(activeJob.queued_at)}</p>
               <p>
                 hosts total={activeJob.total_hosts ?? 0} ok={activeJob.succeeded_hosts ?? 0} failed={activeJob.failed_hosts ?? 0}

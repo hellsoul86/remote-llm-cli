@@ -305,7 +305,7 @@ pre {
   background: rgba(255, 255, 255, 0.88);
   border: 1px solid #cbdbec;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
   overflow: hidden;
 }
 
@@ -332,6 +332,56 @@ pre {
 .chat-head-actions {
   display: flex;
   gap: 8px;
+}
+
+.thread-bar {
+  padding: 10px 12px;
+  border-bottom: 1px solid #d3e0ef;
+  background: #f7fbff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.thread-list {
+  display: flex;
+  gap: 8px;
+  overflow: auto;
+  padding-bottom: 2px;
+}
+
+.thread-chip {
+  min-width: 124px;
+  padding: 7px 10px;
+  border-radius: 11px;
+  border: 1px solid #c8d7eb;
+  background: #ffffff;
+  color: #0f2340;
+  display: inline-flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.thread-chip small {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.74rem;
+  color: #516583;
+}
+
+.thread-chip.active {
+  border-color: #2f8a7d;
+  background: #e5f8f3;
+  color: #0b4741;
+}
+
+.new-thread {
+  flex-shrink: 0;
+  padding: 8px 10px;
+  font-size: 0.8rem;
 }
 
 .timeline {
@@ -412,6 +462,42 @@ pre {
   padding: 12px;
   display: grid;
   gap: 8px;
+}
+
+.session-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.session-strip span {
+  border-radius: 999px;
+  border: 1px solid #d2deec;
+  background: #f5f9ff;
+  font-size: 0.72rem;
+  padding: 4px 9px;
+  color: #334964;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.quick-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quick-chip {
+  padding: 6px 10px;
+  font-size: 0.73rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.shortcut-hint {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
 .composer textarea {
@@ -592,6 +678,24 @@ pre {
   .chat-head-actions {
     width: 100%;
     flex-wrap: wrap;
+  }
+
+  .thread-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .thread-list {
+    width: 100%;
+  }
+
+  .new-thread {
+    width: 100%;
+  }
+
+  .shortcut-hint {
+    margin-left: 0;
+    width: 100%;
   }
 
   .composer-controls {
