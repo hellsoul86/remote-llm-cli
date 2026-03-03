@@ -656,7 +656,12 @@ export function App() {
     }));
   }
 
-  async function refreshProjectsFromDiscovery(authToken: string, sourceHosts: Host[], discoverEnabled: boolean) {
+  async function refreshProjectsFromDiscovery(
+    authToken: string,
+    sourceHosts: Host[],
+    discoverEnabled: boolean,
+    preserveOnError = true
+  ) {
     if (!discoverEnabled) {
       syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
       return;
@@ -669,7 +674,9 @@ export function App() {
       });
       syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []));
     } catch {
-      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
+      if (!preserveOnError) {
+        syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
+      }
     }
   }
 
@@ -713,7 +720,12 @@ export function App() {
       } else if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
-      await refreshProjectsFromDiscovery(authToken, nextHosts, nextRuntimes.some((runtime) => runtime.name === "codex"));
+      await refreshProjectsFromDiscovery(
+        authToken,
+        nextHosts,
+        nextRuntimes.some((runtime) => runtime.name === "codex"),
+        workspaces.length > 0
+      );
 
       const running = nextJobs.find((job) => isJobActive(job));
       if (running) {
@@ -830,7 +842,7 @@ export function App() {
     let canceled = false;
     const refresh = async () => {
       try {
-        await refreshProjectsFromDiscovery(token, hosts, true);
+        await refreshProjectsFromDiscovery(token, hosts, true, true);
       } catch {
         // no-op: best-effort title/session sync
       }
@@ -1110,7 +1122,7 @@ export function App() {
         setAuditEvents(nextAudit);
         setMetrics(refreshedMetrics);
         if (needsProjectRefresh) {
-          await refreshProjectsFromDiscovery(token, hosts, runtimes.some((runtime) => runtime.name === "codex"));
+          await refreshProjectsFromDiscovery(token, hosts, runtimes.some((runtime) => runtime.name === "codex"), true);
           if (canceled) return;
         }
       } catch {
