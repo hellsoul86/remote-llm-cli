@@ -179,10 +179,10 @@ test("queues async run job and observes terminal success", async ({ page }) => {
 
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Unlock Workspace" }).click();
 
-  await expect(page.getByText(/loaded 1 hosts/)).toBeVisible();
-  await page.getByRole("button", { name: "Queue Codex Run" }).click();
+  await expect(page.getByText(/Connected\./)).toBeVisible();
+  await page.getByRole("button", { name: "Send" }).click();
 
-  await expect(page.getByText(/active=job_1 status=succeeded/)).toBeVisible();
+  await expect(page.getByText(/Job job_1 succeeded/)).toBeVisible();
 });

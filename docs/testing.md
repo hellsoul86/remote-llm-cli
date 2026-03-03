@@ -32,6 +32,8 @@ PRs to `staging`/`main` run:
 3. `Web E2E Smoke`
 4. `Target Branch Rules`
 
+Post-merge push to `staging`/`main` runs deployment workflow (`Deploy`) when environment deploy config is present.
+
 ## Notes
 
 - E2E smoke uses route-mocked API responses and validates async job submission/polling UX.

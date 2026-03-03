@@ -1,1026 +1,1404 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  API_BASE,
   cancelRunJob,
-  discoverCodexSessions,
+  deleteHost,
   enqueueRunJob,
-  enqueueSyncJob,
   getMetrics,
-  getRetentionPolicy,
   getRunJob,
   healthz,
   listAudit,
   listHosts,
   listRunJobs,
   listRuns,
-  setRetentionPolicy,
   listRuntimes,
+  probeHost,
   runFanout,
-  syncHosts,
   upsertHost,
-  type AuditEvent,
   type Host,
-  type MetricsResponse,
-  type RetentionPolicy,
   type RunJobRecord,
-  type RunRecord,
-  type RunResponse,
-  type RuntimeInfo,
-  type SyncResponse
+  type RunRequest,
+  type RunResponse
 } from "./api";
+import { useOpsDomain } from "./domains/ops";
+import { useSessionDomain } from "./domains/session";
 
 const TOKEN_KEY = "remote_llm_access_key";
 
+type AuthPhase = "checking" | "locked" | "ready";
+type AppMode = "session" | "ops";
+
+type QuickCommand = {
+  label: string;
+  template: string;
+};
+
+const QUICK_COMMANDS: QuickCommand[] = [
+  { label: "/status", template: "report controller status, queue depth, and active jobs" },
+  { label: "/hosts", template: "list all configured hosts with connectivity summary" },
+  { label: "/jobs", template: "summarize last 10 jobs and failures with hints" },
+  { label: "/sync", template: "check workspace sync readiness and list next safe sync actions" }
+];
+
+function isJobActive(job: RunJobRecord | null | undefined): boolean {
+  if (!job) return false;
+  return job.status === "pending" || job.status === "running";
+}
+
+function isRunResponsePayload(value: unknown): value is RunResponse {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.runtime === "string" && typeof candidate.summary === "object" && Array.isArray(candidate.targets);
+}
+
+function summarizeRunResponse(response: RunResponse): string {
+  const lines = [
+    `runtime=${response.runtime}`,
+    `total=${response.summary.total} succeeded=${response.summary.succeeded} failed=${response.summary.failed}`,
+    `fanout=${response.summary.fanout} duration=${response.summary.duration_ms}ms`
+  ];
+  for (const target of response.targets) {
+    const status = target.ok ? "ok" : "failed";
+    const exit = target.result.exit_code ?? "n/a";
+    const hint = target.error_hint ? ` hint=${target.error_hint}` : "";
+    const err = target.error ? ` error=${target.error}` : "";
+    lines.push(`${target.host.name}: ${status} exit=${exit}${hint}${err}`);
+  }
+  return lines.join("\n");
+}
+
+function formatClock(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDateTime(ts: string | undefined): string {
+  if (!ts) return "-";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString();
+}
+
+function statusTone(status: string): "ok" | "warn" | "err" {
+  if (status === "succeeded") return "ok";
+  if (status === "failed" || status === "canceled") return "err";
+  return "warn";
+}
+
+function modeFromHash(hash: string): AppMode {
+  return hash === "#/ops" ? "ops" : "session";
+}
+
+function modeToHash(mode: AppMode): string {
+  return mode === "ops" ? "#/ops" : "#/session";
+}
+
 export function App() {
-  const [token, setToken] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? "");
-  const [health, setHealth] = useState<string>("checking");
-  const [hosts, setHosts] = useState<Host[]>([]);
-  const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([]);
-  const [message, setMessage] = useState<string>("");
-  const [loading, setLoading] = useState(false);
-  const [runLoading, setRunLoading] = useState(false);
-  const [runPrompt, setRunPrompt] = useState("summarize current repo state and risks");
-  const [runWorkdir, setRunWorkdir] = useState("");
-  const [runFanoutValue, setRunFanoutValue] = useState("3");
-  const [runMaxOutputKB, setRunMaxOutputKB] = useState("256");
-  const [runAllHosts, setRunAllHosts] = useState(true);
-  const [runMode, setRunMode] = useState<"exec" | "resume" | "review">("exec");
-  const [runModel, setRunModel] = useState("");
-  const [runSandbox, setRunSandbox] = useState<"" | "read-only" | "workspace-write" | "danger-full-access">("");
-  const [runJSONOutput, setRunJSONOutput] = useState(true);
-  const [runSkipGitRepoCheck, setRunSkipGitRepoCheck] = useState(false);
-  const [runEphemeral, setRunEphemeral] = useState(false);
-  const [runResumeLast, setRunResumeLast] = useState(true);
-  const [runSessionID, setRunSessionID] = useState("");
-  const [runRetryCountValue, setRunRetryCountValue] = useState("0");
-  const [runRetryBackoffMSValue, setRunRetryBackoffMSValue] = useState("1000");
-  const [selectedHostIDs, setSelectedHostIDs] = useState<string[]>([]);
-  const [runAsyncMode, setRunAsyncMode] = useState(true);
-  const [runStatus, setRunStatus] = useState<number | null>(null);
-  const [runResult, setRunResult] = useState<RunResponse | null>(null);
-  const [runJobs, setRunJobs] = useState<RunJobRecord[]>([]);
-  const [jobStatusFilter, setJobStatusFilter] = useState("pending,running,failed,canceled,succeeded");
-  const [jobRuntimeFilter, setJobRuntimeFilter] = useState("");
-  const [jobHostFilter, setJobHostFilter] = useState("");
-  const [activeRunJobID, setActiveRunJobID] = useState("");
-  const [activeRunJob, setActiveRunJob] = useState<RunJobRecord | null>(null);
-  const [runJobPolling, setRunJobPolling] = useState(false);
-  const [syncLoading, setSyncLoading] = useState(false);
-  const [syncAsyncMode, setSyncAsyncMode] = useState(true);
-  const [syncAllHosts, setSyncAllHosts] = useState(true);
-  const [syncSelectedHostIDs, setSyncSelectedHostIDs] = useState<string[]>([]);
-  const [syncSrc, setSyncSrc] = useState("./");
-  const [syncDst, setSyncDst] = useState("workspace");
-  const [syncDelete, setSyncDelete] = useState(false);
-  const [syncExcludes, setSyncExcludes] = useState(".git,node_modules");
-  const [syncFanoutValue, setSyncFanoutValue] = useState("3");
-  const [syncMaxOutputKB, setSyncMaxOutputKB] = useState("256");
-  const [syncRetryCountValue, setSyncRetryCountValue] = useState("0");
-  const [syncRetryBackoffMSValue, setSyncRetryBackoffMSValue] = useState("1000");
-  const [syncStatus, setSyncStatus] = useState<number | null>(null);
-  const [syncResult, setSyncResult] = useState<SyncResponse | null>(null);
-  const [runHistory, setRunHistory] = useState<RunRecord[]>([]);
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
-  const [auditStatusFilter, setAuditStatusFilter] = useState("");
-  const [auditActionFilter, setAuditActionFilter] = useState("");
-  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
-  const [retention, setRetention] = useState<RetentionPolicy | null>(null);
-  const [retRunRecordsMax, setRetRunRecordsMax] = useState("500");
-  const [retRunJobsMax, setRetRunJobsMax] = useState("1000");
-  const [retAuditEventsMax, setRetAuditEventsMax] = useState("5000");
+  const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
+  const [token, setToken] = useState("");
+  const [tokenInput, setTokenInput] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? "");
+  const [authError, setAuthError] = useState("");
+  const [appMode, setAppMode] = useState<AppMode>(() =>
+    typeof window === "undefined" ? "session" : modeFromHash(window.location.hash)
+  );
 
-  useEffect(() => {
-    healthz()
-      .then((h) => setHealth(`ok (${h.timestamp})`))
-      .catch((e) => setHealth(`error: ${String(e)}`));
-  }, []);
+  const ops = useOpsDomain();
+  const session = useSessionDomain();
 
-  function isRunJobActive(job: RunJobRecord | null | undefined): boolean {
-    if (!job) return false;
-    return job.status === "pending" || job.status === "running";
+  const {
+    health,
+    setHealth,
+    hosts,
+    setHosts,
+    runtimes,
+    setRuntimes,
+    jobs,
+    setJobs,
+    runs,
+    setRuns,
+    auditEvents,
+    setAuditEvents,
+    metrics,
+    setMetrics,
+    selectedRuntime,
+    setSelectedRuntime,
+    allHosts,
+    setAllHosts,
+    selectedHostIDs,
+    setSelectedHostIDs,
+    runMode,
+    setRunMode,
+    runModel,
+    setRunModel,
+    runSandbox,
+    setRunSandbox,
+    runAsyncMode,
+    setRunAsyncMode,
+    workdir,
+    setWorkdir,
+    fanoutValue,
+    setFanoutValue,
+    maxOutputKB,
+    setMaxOutputKB,
+    isSubmitting,
+    setIsSubmitting,
+    isRefreshing,
+    setIsRefreshing,
+    activeJobID,
+    setActiveJobID,
+    activeJob,
+    setActiveJob,
+    hostForm,
+    setHostForm,
+    hostFilter,
+    setHostFilter,
+    editingHostID,
+    setEditingHostID,
+    addingHost,
+    setAddingHost,
+    opsHostBusyID,
+    setOpsHostBusyID,
+    opsNotice,
+    setOpsNotice,
+    opsJobStatusFilter,
+    setOpsJobStatusFilter,
+    opsJobTypeFilter,
+    setOpsJobTypeFilter,
+    opsRunStatusFilter,
+    setOpsRunStatusFilter,
+    opsAuditMethodFilter,
+    setOpsAuditMethodFilter,
+    opsAuditStatusFilter,
+    setOpsAuditStatusFilter,
+    resetOpsDomain
+  } = ops;
+
+  const {
+    threads,
+    activeThreadID,
+    setActiveThreadID,
+    threadRenameDraft,
+    setThreadRenameDraft,
+    activeJobThreadID,
+    setActiveJobThreadID,
+    completedJobsRef,
+    activeThread,
+    activeTimeline,
+    activeDraft,
+    updateThreadDraft,
+    addTimelineEntry,
+    createThread,
+    renameThread,
+    switchThreadByOffset,
+    resetSessionDomain
+  } = session;
+
+  const timelineBottomRef = useRef<HTMLDivElement | null>(null);
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const activeRuntime = useMemo(
+    () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
+    [runtimes, selectedRuntime]
+  );
+  const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
+
+  const activeProgress = useMemo(() => {
+    if (!activeJob) return 0;
+    const total = activeJob.total_hosts ?? 0;
+    if (total <= 0) return isJobActive(activeJob) ? 0 : 100;
+    const done = (activeJob.succeeded_hosts ?? 0) + (activeJob.failed_hosts ?? 0);
+    if (!isJobActive(activeJob)) return 100;
+    return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  }, [activeJob]);
+
+  const filteredOpsJobs = useMemo(() => {
+    const byStatus = opsJobStatusFilter === "all" ? jobs : jobs.filter((job) => job.status === opsJobStatusFilter);
+    if (opsJobTypeFilter === "all") return byStatus;
+    return byStatus.filter((job) => job.type === opsJobTypeFilter);
+  }, [jobs, opsJobStatusFilter, opsJobTypeFilter]);
+
+  const filteredHosts = useMemo(() => {
+    const query = hostFilter.trim().toLowerCase();
+    if (!query) return hosts;
+    return hosts.filter((host) => {
+      const text = `${host.name} ${host.host} ${host.user} ${host.workspace ?? ""} ${host.connection_mode ?? "ssh"}`.toLowerCase();
+      return text.includes(query);
+    });
+  }, [hosts, hostFilter]);
+
+  const filteredOpsRuns = useMemo(() => {
+    if (opsRunStatusFilter === "all") return runs;
+    if (opsRunStatusFilter === "ok") return runs.filter((run) => run.status_code < 400);
+    return runs.filter((run) => run.status_code >= 400);
+  }, [runs, opsRunStatusFilter]);
+
+  const filteredAuditEvents = useMemo(() => {
+    return auditEvents.filter((evt) => {
+      if (opsAuditMethodFilter !== "all" && evt.method !== opsAuditMethodFilter) return false;
+      if (opsAuditStatusFilter === "2xx" && (evt.status_code < 200 || evt.status_code >= 300)) return false;
+      if (opsAuditStatusFilter === "4xx" && (evt.status_code < 400 || evt.status_code >= 500)) return false;
+      if (opsAuditStatusFilter === "5xx" && (evt.status_code < 500 || evt.status_code >= 600)) return false;
+      return true;
+    });
+  }, [auditEvents, opsAuditMethodFilter, opsAuditStatusFilter]);
+  const healthIsError = health.startsWith("error");
+  const opsNoticeIsError = /fail|error|degraded/i.test(opsNotice);
+  const syncLabel = isRefreshing ? "syncing" : "live";
+
+  function createThreadAndFocus() {
+    createThread();
+    promptInputRef.current?.focus();
   }
 
-  function isRunJobCancelable(job: RunJobRecord | null | undefined): boolean {
-    return isRunJobActive(job);
+  function applyQuickCommand(command: QuickCommand) {
+    if (!activeThread) return;
+    const nextDraft = activeThread.draft.trim() ? `${activeThread.draft}\n${command.template}` : command.template;
+    updateThreadDraft(activeThread.id, nextDraft);
+    promptInputRef.current?.focus();
   }
 
-  function isRunResponsePayload(v: unknown): v is RunResponse {
-    if (!v || typeof v !== "object") return false;
-    return "runtime" in v && "summary" in v && "targets" in v && !("operation" in v);
-  }
-
-  function parseCSV(value: string): string[] {
-    return value
-      .split(",")
-      .map((v) => v.trim())
-      .filter((v) => v.length > 0);
-  }
-
-  async function refresh() {
-    if (!token.trim()) {
-      setMessage("set access key first");
-      return;
-    }
-    setLoading(true);
-    setMessage("");
+  async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
+    setIsRefreshing(true);
     try {
-      const [nextHosts, nextRuntimes, nextRuns, nextAudit, nextJobs, nextMetrics, nextRetention] = await Promise.all([
-        listHosts(token),
-        listRuntimes(token),
-        listRuns(token, 20),
-        listAudit(token, 80, {
-          status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
-          action: auditActionFilter.trim() || undefined
-        }),
-        listRunJobs(token, 30, {
-          status: parseCSV(jobStatusFilter),
-          runtime: parseCSV(jobRuntimeFilter),
-          host_id: jobHostFilter.trim() || undefined
-        }),
-        getMetrics(token),
-        getRetentionPolicy(token)
+      const [healthBody, nextHosts, nextRuntimes, nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
+        healthz(),
+        listHosts(authToken),
+        listRuntimes(authToken),
+        listRunJobs(authToken, 20),
+        listRuns(authToken, 20),
+        listAudit(authToken, 80),
+        getMetrics(authToken)
       ]);
+
+      setHealth(`ok ${healthBody.timestamp}`);
       setHosts(nextHosts);
       setRuntimes(nextRuntimes);
-      setRunHistory(nextRuns);
+      setJobs(nextJobs);
+      setRuns(nextRuns);
       setAuditEvents(nextAudit);
-      setRunJobs(nextJobs);
       setMetrics(nextMetrics);
-      setRetention(nextRetention);
-      setRetRunRecordsMax(String(nextRetention.run_records_max));
-      setRetRunJobsMax(String(nextRetention.run_jobs_max));
-      setRetAuditEventsMax(String(nextRetention.audit_events_max));
-      setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
-      setSyncSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((h) => h.id === id)));
-      const ongoing = nextJobs.find((job) => isRunJobActive(job));
-      if (ongoing) {
-        setActiveRunJobID((prev) => prev || ongoing.id);
-        setActiveRunJob((prev) => (prev && prev.id === ongoing.id ? prev : ongoing));
-        setRunJobPolling(true);
+
+      setSelectedHostIDs((prev) => prev.filter((id) => nextHosts.some((host) => host.id === id)));
+      if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
+        setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
-      setMessage(
-        `loaded ${nextHosts.length} hosts, ${nextRuns.length} runs, ${nextAudit.length} events, ${nextJobs.length} jobs, queue=${nextMetrics.queue.depth}`
-      );
-    } catch (e) {
-      setMessage(String(e));
+
+      const running = nextJobs.find((job) => isJobActive(job));
+      if (running) {
+        setActiveJobID(running.id);
+        setActiveJob(running);
+      } else {
+        setActiveJobID("");
+        setActiveJob(null);
+      }
+
+      if (emitConnectedNote) {
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "success",
+            title: "Connected",
+            body: `Connected. hosts=${nextHosts.length} runtimes=${nextRuntimes.length} queue_depth=${nextMetrics.queue.depth}`
+          },
+          activeThreadID
+        );
+      }
+    } catch (error) {
+      setHealth(`error: ${String(error)}`);
+      if (emitConnectedNote) {
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "error",
+            title: "Connection Failed",
+            body: String(error)
+          },
+          activeThreadID
+        );
+      }
+      throw error;
     } finally {
-      setLoading(false);
+      setIsRefreshing(false);
+    }
+  }
+
+  async function unlockWorkspace(candidateToken: string) {
+    const trimmed = candidateToken.trim();
+    if (!trimmed) {
+      setAuthError("token is required");
+      setAuthPhase("locked");
+      return;
+    }
+
+    setAuthPhase("checking");
+    setAuthError("");
+
+    try {
+      await Promise.all([listRuntimes(trimmed), listHosts(trimmed)]);
+      localStorage.setItem(TOKEN_KEY, trimmed);
+      setToken(trimmed);
+      setTokenInput(trimmed);
+      setAuthPhase("ready");
+      await loadWorkspace(trimmed, true);
+    } catch (error) {
+      localStorage.removeItem(TOKEN_KEY);
+      setToken("");
+      setAuthPhase("locked");
+      setAuthError(`token validation failed: ${String(error)}`);
     }
   }
 
   useEffect(() => {
-    if (!runJobPolling || !token.trim() || !activeRunJobID) {
+    const cached = localStorage.getItem(TOKEN_KEY) ?? "";
+    if (!cached.trim()) {
+      setAuthPhase("locked");
       return;
     }
+    void unlockWorkspace(cached);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncFromHash = () => {
+      setAppMode(modeFromHash(window.location.hash));
+    };
+    syncFromHash();
+    window.addEventListener("hashchange", syncFromHash);
+    return () => {
+      window.removeEventListener("hashchange", syncFromHash);
+    };
+  }, []);
+
+  useEffect(() => {
+    timelineBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [activeTimeline.length, activeThreadID]);
+
+  useEffect(() => {
+    if (authPhase !== "ready") return;
+
+    const handleGlobalKeydown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        promptInputRef.current?.focus();
+        return;
+      }
+
+      if (appMode !== "session") return;
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        createThreadAndFocus();
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "ArrowUp" || event.key === "[")) {
+        event.preventDefault();
+        switchThreadByOffset(-1);
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "ArrowDown" || event.key === "]")) {
+        event.preventDefault();
+        switchThreadByOffset(1);
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeydown);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeydown);
+    };
+  }, [authPhase, appMode, threads, activeThreadID]);
+
+  useEffect(() => {
+    if (authPhase !== "ready" || !token.trim() || !activeJobID) return;
+
     let canceled = false;
+    const pollIntervalMs = appMode === "session" ? 1800 : 3000;
     const timer = window.setInterval(async () => {
       try {
-        const [job, jobs, nextMetrics] = await Promise.all([
-          getRunJob(token, activeRunJobID),
-          listRunJobs(token, 30, {
-            status: parseCSV(jobStatusFilter),
-            runtime: parseCSV(jobRuntimeFilter),
-            host_id: jobHostFilter.trim() || undefined
-          }),
+        const [job, nextJobs, nextMetrics] = await Promise.all([
+          getRunJob(token, activeJobID),
+          listRunJobs(token, 20),
           getMetrics(token)
         ]);
+
         if (canceled) return;
-        setActiveRunJob(job);
-        setRunJobs(jobs);
+        setActiveJob(job);
+        setJobs(nextJobs);
         setMetrics(nextMetrics);
-        if (!isRunJobActive(job)) {
-          setRunJobPolling(false);
-          setRunStatus(job.result_status ?? null);
-          if (isRunResponsePayload(job.response)) setRunResult(job.response);
-          const [nextRuns, nextAudit] = await Promise.all([
-            listRuns(token, 20),
-            listAudit(token, 80, {
-              status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
-              action: auditActionFilter.trim() || undefined
-            })
-          ]);
+
+        if (!isJobActive(job)) {
+          setActiveJobID("");
+          setIsSubmitting(false);
+
+          const targetThreadID = activeJobThreadID || activeThreadID;
+          if (!completedJobsRef.current.has(job.id)) {
+            completedJobsRef.current.add(job.id);
+            if (isRunResponsePayload(job.response)) {
+              addTimelineEntry(
+                {
+                  kind: "assistant",
+                  state: job.status === "succeeded" ? "success" : "error",
+                  title: `Job ${job.id} ${job.status}`,
+                  body: summarizeRunResponse(job.response)
+                },
+                targetThreadID
+              );
+            } else {
+              addTimelineEntry(
+                {
+                  kind: "assistant",
+                  state: job.status === "succeeded" ? "success" : "error",
+                  title: `Job ${job.id} ${job.status}`,
+                  body: job.error ? String(job.error) : `runtime=${job.runtime} status=${job.status}`
+                },
+                targetThreadID
+              );
+            }
+          }
+
+          const [nextRuns, nextAudit, refreshedMetrics] = await Promise.all([listRuns(token, 20), listAudit(token, 80), getMetrics(token)]);
           if (canceled) return;
-          setRunHistory(nextRuns);
+          setRuns(nextRuns);
           setAuditEvents(nextAudit);
-          setMessage(`job ${job.id} completed: ${job.status}, http=${job.result_status ?? "n/a"}`);
+          setMetrics(refreshedMetrics);
+          setActiveJobThreadID(activeThreadID);
         }
-      } catch (err) {
+      } catch (error) {
         if (canceled) return;
-        setRunJobPolling(false);
-        setMessage(`job polling error: ${String(err)}`);
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "error",
+            title: "Job Poll Failed",
+            body: String(error)
+          },
+          activeJobThreadID || activeThreadID
+        );
+        setActiveJobID("");
+        setIsSubmitting(false);
       }
-    }, 2000);
+    }, pollIntervalMs);
+
     return () => {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [runJobPolling, token, activeRunJobID, jobStatusFilter, jobRuntimeFilter, jobHostFilter, auditStatusFilter, auditActionFilter]);
+  }, [authPhase, token, activeJobID, activeJobThreadID, activeThreadID, appMode]);
 
-  async function onAddHost(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const form = new FormData(e.currentTarget);
-    const name = String(form.get("name") ?? "").trim();
-    const hostRaw = String(form.get("host") ?? "").trim();
-    const connectionModeRaw = String(form.get("connection_mode") ?? "").trim();
-    const connectionMode: "ssh" | "local" = connectionModeRaw === "local" ? "local" : "ssh";
-    const host = connectionMode === "local" ? hostRaw || "localhost" : hostRaw;
-    const user = String(form.get("user") ?? "").trim();
-    const workspace = String(form.get("workspace") ?? "").trim();
-    const identityFile = String(form.get("identity_file") ?? "").trim();
-    const sshProxyJump = String(form.get("ssh_proxy_jump") ?? "").trim();
-    const sshHostKeyPolicyRaw = String(form.get("ssh_host_key_policy") ?? "").trim();
-    const sshConnectTimeoutRaw = String(form.get("ssh_connect_timeout_sec") ?? "").trim();
-    const sshAliveIntervalRaw = String(form.get("ssh_server_alive_interval_sec") ?? "").trim();
-    const sshAliveCountRaw = String(form.get("ssh_server_alive_count_max") ?? "").trim();
-    if (!name) {
-      setMessage("name is required");
-      return;
-    }
-    if (connectionMode === "ssh" && !host) {
-      setMessage("host is required for ssh mode");
-      return;
-    }
-    const parseOptionalInt = (raw: string, field: string, min: number, max: number): number | undefined => {
-      if (!raw) return undefined;
-      const v = Number.parseInt(raw, 10);
-      if (!Number.isFinite(v) || v < min || v > max) {
-        throw new Error(`${field} must be an integer in [${min}, ${max}]`);
-      }
-      return v;
-    };
-    try {
-      const sshConnectTimeoutSec = parseOptionalInt(sshConnectTimeoutRaw, "ssh_connect_timeout_sec", 1, 300);
-      const sshServerAliveIntervalSec = parseOptionalInt(sshAliveIntervalRaw, "ssh_server_alive_interval_sec", 1, 300);
-      const sshServerAliveCountMax = parseOptionalInt(sshAliveCountRaw, "ssh_server_alive_count_max", 1, 10);
-      let sshHostKeyPolicy: "accept-new" | "strict" | "insecure-ignore" | undefined = undefined;
-      if (sshHostKeyPolicyRaw) {
-        if (sshHostKeyPolicyRaw === "accept-new" || sshHostKeyPolicyRaw === "strict" || sshHostKeyPolicyRaw === "insecure-ignore") {
-          sshHostKeyPolicy = sshHostKeyPolicyRaw;
-        } else {
-          throw new Error("ssh_host_key_policy must be one of: accept-new, strict, insecure-ignore");
+  useEffect(() => {
+    if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
+
+    let canceled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const [nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
+          listRunJobs(token, 20),
+          listRuns(token, 20),
+          listAudit(token, 80),
+          getMetrics(token)
+        ]);
+        if (canceled) return;
+        setJobs(nextJobs);
+        setRuns(nextRuns);
+        setAuditEvents(nextAudit);
+        setMetrics(nextMetrics);
+
+        if (!activeJobID) {
+          const running = nextJobs.find((job) => isJobActive(job));
+          if (running) {
+            setActiveJobID(running.id);
+            setActiveJob(running);
+          }
         }
+      } catch {
+        if (canceled) return;
       }
-      await upsertHost(token, {
-        name,
-        connection_mode: connectionMode,
-        host,
-        user,
-        workspace,
-        identity_file: identityFile || undefined,
-        ssh_proxy_jump: sshProxyJump || undefined,
-        ssh_host_key_policy: sshHostKeyPolicy,
-        ssh_connect_timeout_sec: sshConnectTimeoutSec,
-        ssh_server_alive_interval_sec: sshServerAliveIntervalSec,
-        ssh_server_alive_count_max: sshServerAliveCountMax
-      });
-      setMessage(`host ${name} saved`);
-      await refresh();
-      e.currentTarget.reset();
-    } catch (err) {
-      setMessage(String(err));
+    }, 5000);
+
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [authPhase, token, appMode, activeJobID]);
+
+  async function onSubmitToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await unlockWorkspace(tokenInput);
+  }
+
+  function switchMode(nextMode: AppMode) {
+    setAppMode(nextMode);
+    if (typeof window !== "undefined") {
+      const nextHash = modeToHash(nextMode);
+      if (window.location.hash !== nextHash) {
+        window.history.replaceState(null, "", nextHash);
+      }
     }
   }
 
-  function toggleHost(id: string) {
+  function onLogout() {
+    localStorage.removeItem(TOKEN_KEY);
+    resetOpsDomain();
+    resetSessionDomain();
+    setToken("");
+    setTokenInput("");
+    setAuthError("");
+    setAuthPhase("locked");
+    switchMode("session");
+  }
+
+  function toggleHostSelection(hostID: string) {
     setSelectedHostIDs((prev) => {
-      if (prev.includes(id)) return prev.filter((v) => v !== id);
-      return [...prev, id];
+      if (prev.includes(hostID)) return prev.filter((id) => id !== hostID);
+      return [...prev, hostID];
     });
   }
 
-  function toggleSyncHost(id: string) {
-    setSyncSelectedHostIDs((prev) => {
-      if (prev.includes(id)) return prev.filter((v) => v !== id);
-      return [...prev, id];
-    });
+  async function onRefreshWorkspace() {
+    if (authPhase !== "ready" || !token.trim()) return;
+    await loadWorkspace(token, false);
   }
 
-  async function onRunCodex(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!token.trim()) {
-      setMessage("set access key first");
-      return;
-    }
-    if (runMode === "exec" && !runPrompt.trim()) {
-      setMessage("prompt is required for exec mode");
-      return;
-    }
-    if (runMode === "resume" && !runResumeLast && !runSessionID.trim()) {
-      setMessage("session id is required when resume_last is disabled");
-      return;
-    }
-    if (!runAllHosts && selectedHostIDs.length === 0) {
-      setMessage("select at least one host or enable all hosts");
+  async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+
+    const trimmedPrompt = activeThread.draft.trim();
+    if (!trimmedPrompt) {
+      addTimelineEntry({ kind: "system", state: "error", title: "Prompt Missing", body: "Prompt is required." }, activeThread.id);
       return;
     }
 
-    const fanout = Math.max(1, Number.parseInt(runFanoutValue, 10) || 1);
-    const maxOutputKB = Math.max(32, Number.parseInt(runMaxOutputKB, 10) || 256);
-    const retryCount = Math.max(0, Number.parseInt(runRetryCountValue, 10) || 0);
-    const retryBackoffMS = Math.max(100, Number.parseInt(runRetryBackoffMSValue, 10) || 1000);
-    setRunLoading(true);
-    setRunResult(null);
-    setRunStatus(null);
-    setMessage("");
+    if (!allHosts && selectedHostIDs.length === 0) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "No Target Host",
+          body: "Select at least one host or switch to all-host mode."
+        },
+        activeThread.id
+      );
+      return;
+    }
+
+    const fanout = Math.max(1, Number.parseInt(fanoutValue, 10) || 1);
+    const outputCap = Math.max(32, Number.parseInt(maxOutputKB, 10) || 256);
+
+    const request: RunRequest = {
+      runtime: activeRuntime?.name ?? selectedRuntime,
+      prompt: trimmedPrompt,
+      all_hosts: allHosts,
+      host_ids: allHosts ? undefined : selectedHostIDs,
+      workdir: workdir.trim() || undefined,
+      fanout,
+      max_output_kb: outputCap,
+      codex:
+        (activeRuntime?.name ?? selectedRuntime) === "codex"
+          ? {
+              mode: runMode,
+              model: runModel.trim() || undefined,
+              sandbox: runSandbox || undefined,
+              json_output: true,
+              skip_git_repo_check: false,
+              ephemeral: false
+            }
+          : undefined
+    };
+
+    addTimelineEntry(
+      {
+        kind: "user",
+        title: `Run ${request.runtime}`,
+        body: `${trimmedPrompt}\n\nmode=${runMode} async=${String(runAsyncMode)} hosts=${allHosts ? "all" : selectedHostIDs.join(",")}`
+      },
+      activeThread.id
+    );
+
+    setIsSubmitting(true);
     try {
-      const codex = {
-        mode: runMode,
-        model: runModel.trim() || undefined,
-        sandbox: runMode === "exec" ? runSandbox || undefined : undefined,
-        json_output: runJSONOutput,
-        skip_git_repo_check: runSkipGitRepoCheck,
-        ephemeral: runEphemeral,
-        resume_last: runMode === "resume" ? runResumeLast : undefined,
-        session_id: runMode === "resume" && !runResumeLast ? runSessionID.trim() : undefined
-      };
-      const runRequest = {
-        runtime: "codex",
-        prompt: runPrompt.trim(),
-        fanout,
-        max_output_kb: maxOutputKB,
-        retry_count: retryCount,
-        retry_backoff_ms: retryBackoffMS,
-        all_hosts: runAllHosts,
-        host_ids: runAllHosts ? undefined : selectedHostIDs,
-        workdir: runWorkdir.trim() || undefined,
-        codex
-      };
       if (runAsyncMode) {
-        const { status, body } = await enqueueRunJob(token, runRequest);
-        setActiveRunJobID(body.job.id);
-        setActiveRunJob(body.job);
-        setRunJobPolling(isRunJobActive(body.job));
-        setMessage(`run job accepted with HTTP ${status}: ${body.job.id}`);
-        const [nextJobs, nextAudit, nextMetrics] = await Promise.all([
-          listRunJobs(token, 30, {
-            status: parseCSV(jobStatusFilter),
-            runtime: parseCSV(jobRuntimeFilter),
-            host_id: jobHostFilter.trim() || undefined
-          }),
-          listAudit(token, 80, {
-            status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
-            action: auditActionFilter.trim() || undefined
-          }),
-          getMetrics(token)
-        ]);
-        setRunJobs(nextJobs);
-        setAuditEvents(nextAudit);
-        setMetrics(nextMetrics);
+        const { body } = await enqueueRunJob(token, request);
+        setActiveJobID(body.job.id);
+        setActiveJobThreadID(activeThread.id);
+        setActiveJob(body.job);
+        setJobs((prev) => [body.job, ...prev.filter((job) => job.id !== body.job.id)]);
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "running",
+            title: "Job Queued",
+            body: `Job ${body.job.id} accepted. status=${body.job.status}`
+          },
+          activeThread.id
+        );
       } else {
-        const { status, body } = await runFanout(token, runRequest);
-        setRunStatus(status);
-        setRunResult(body);
-        setMessage(`run finished with HTTP ${status}, failed=${body.summary.failed}`);
-        const [nextRuns, nextAudit, nextMetrics] = await Promise.all([
+        const { status, body } = await runFanout(token, request);
+        addTimelineEntry(
+          {
+            kind: "assistant",
+            state: status >= 400 ? "error" : "success",
+            title: `Run Finished (HTTP ${status})`,
+            body: summarizeRunResponse(body)
+          },
+          activeThread.id
+        );
+
+        const [nextRuns, nextJobs, nextAudit, nextMetrics] = await Promise.all([
           listRuns(token, 20),
-          listAudit(token, 80, {
-            status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
-            action: auditActionFilter.trim() || undefined
-          }),
+          listRunJobs(token, 20),
+          listAudit(token, 80),
           getMetrics(token)
         ]);
-        setRunHistory(nextRuns);
+        setRuns(nextRuns);
+        setJobs(nextJobs);
         setAuditEvents(nextAudit);
         setMetrics(nextMetrics);
+        setIsSubmitting(false);
       }
-    } catch (err) {
-      setMessage(String(err));
-    } finally {
-      setRunLoading(false);
+    } catch (error) {
+      addTimelineEntry({ kind: "system", state: "error", title: "Run Failed", body: String(error) }, activeThread.id);
+      setIsSubmitting(false);
     }
   }
 
-  async function onUseLatestSession() {
-    if (!token.trim()) {
-      setMessage("set access key first");
+  async function onAddHost(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (authPhase !== "ready" || !token.trim()) return;
+
+    const mode = hostForm.connectionMode ?? "ssh";
+    if (!hostForm.name.trim() || (mode === "ssh" && !hostForm.host.trim())) {
+      const validationMessage = mode === "ssh" ? "name and host are required for ssh mode." : "name is required.";
+      addTimelineEntry({ kind: "system", state: "error", title: "Host Validation", body: validationMessage });
       return;
     }
-    if (runAllHosts || selectedHostIDs.length === 0) {
-      setMessage("disable all-hosts and select one host first");
-      return;
-    }
+
+    const hostName = hostForm.name.trim();
+    const editing = editingHostID;
+
+    setAddingHost(true);
     try {
-      const hostID = selectedHostIDs[0];
-      const { body } = await discoverCodexSessions(token, {
-        host_id: hostID,
-        limit_per_host: 1,
-        timeout_sec: 60
+      await upsertHost(token, {
+        id: editing || undefined,
+        name: hostName,
+        connection_mode: mode,
+        host: hostForm.host.trim() || undefined,
+        user: hostForm.user.trim() || undefined,
+        workspace: hostForm.workspace.trim() || undefined
       });
-      const target = body.targets?.[0];
-      const session = target?.sessions?.[0];
-      if (!session?.session_id) {
-        setMessage("no resumable codex session found on selected host");
-        return;
-      }
-      setRunMode("resume");
-      setRunResumeLast(false);
-      setRunSessionID(session.session_id);
-      setMessage(`selected latest session: ${session.session_id}`);
-    } catch (err) {
-      setMessage(String(err));
-    }
-  }
-
-  async function onSyncHosts(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!token.trim()) {
-      setMessage("set access key first");
-      return;
-    }
-    if (!syncSrc.trim() || !syncDst.trim()) {
-      setMessage("sync src and dst are required");
-      return;
-    }
-    if (!syncAllHosts && syncSelectedHostIDs.length === 0) {
-      setMessage("select at least one host or enable sync all hosts");
-      return;
-    }
-
-    const fanout = Math.max(1, Number.parseInt(syncFanoutValue, 10) || 1);
-    const maxOutputKB = Math.max(32, Number.parseInt(syncMaxOutputKB, 10) || 256);
-    const retryCount = Math.max(0, Number.parseInt(syncRetryCountValue, 10) || 0);
-    const retryBackoffMS = Math.max(100, Number.parseInt(syncRetryBackoffMSValue, 10) || 1000);
-    const excludes = syncExcludes
-      .split(",")
-      .map((x) => x.trim())
-      .filter((x) => x.length > 0);
-
-    setSyncLoading(true);
-    setSyncStatus(null);
-    setSyncResult(null);
-    setMessage("");
-    try {
-      const syncRequest = {
-        src: syncSrc.trim(),
-        dst: syncDst.trim(),
-        fanout,
-        max_output_kb: maxOutputKB,
-        retry_count: retryCount,
-        retry_backoff_ms: retryBackoffMS,
-        all_hosts: syncAllHosts,
-        host_ids: syncAllHosts ? undefined : syncSelectedHostIDs,
-        delete: syncDelete,
-        excludes: excludes.length > 0 ? excludes : undefined
-      };
-      if (syncAsyncMode) {
-        const { status, body } = await enqueueSyncJob(token, syncRequest);
-        setActiveRunJobID(body.job.id);
-        setActiveRunJob(body.job);
-        setRunJobPolling(isRunJobActive(body.job));
-        setMessage(`sync job accepted with HTTP ${status}: ${body.job.id}`);
-        const [nextJobs, nextAudit, nextMetrics] = await Promise.all([
-          listRunJobs(token, 30, {
-            status: parseCSV(jobStatusFilter),
-            runtime: parseCSV(jobRuntimeFilter),
-            host_id: jobHostFilter.trim() || undefined
-          }),
-          listAudit(token, 80, {
-            status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
-            action: auditActionFilter.trim() || undefined
-          }),
-          getMetrics(token)
-        ]);
-        setRunJobs(nextJobs);
-        setAuditEvents(nextAudit);
-        setMetrics(nextMetrics);
-      } else {
-        const { status, body } = await syncHosts(token, syncRequest);
-        setSyncStatus(status);
-        setSyncResult(body);
-        setMessage(`sync finished with HTTP ${status}, failed=${body.summary.failed}`);
-        const [nextRuns, nextAudit, nextMetrics] = await Promise.all([
-          listRuns(token, 20),
-          listAudit(token, 80, {
-            status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
-            action: auditActionFilter.trim() || undefined
-          }),
-          getMetrics(token)
-        ]);
-        setRunHistory(nextRuns);
-        setAuditEvents(nextAudit);
-        setMetrics(nextMetrics);
-      }
-    } catch (err) {
-      setMessage(String(err));
-    } finally {
-      setSyncLoading(false);
-    }
-  }
-
-  async function onCancelJob(jobID: string) {
-    if (!token.trim()) {
-      setMessage("set access key first");
-      return;
-    }
-    try {
-      const { state, job } = await cancelRunJob(token, jobID);
-      setMessage(`job ${jobID}: ${state}`);
-      setActiveRunJobID(jobID);
-      setActiveRunJob(job);
-      const [nextJobs, nextAudit, nextMetrics] = await Promise.all([
-        listRunJobs(token, 30, {
-          status: parseCSV(jobStatusFilter),
-          runtime: parseCSV(jobRuntimeFilter),
-          host_id: jobHostFilter.trim() || undefined
-        }),
-        listAudit(token, 80, {
-          status: auditStatusFilter ? Number.parseInt(auditStatusFilter, 10) || undefined : undefined,
-          action: auditActionFilter.trim() || undefined
-        }),
-        getMetrics(token)
-      ]);
-      setRunJobs(nextJobs);
-      setAuditEvents(nextAudit);
-      setMetrics(nextMetrics);
-      if (!isRunJobActive(job)) {
-        setRunJobPolling(false);
-      }
-    } catch (err) {
-      setMessage(String(err));
-    }
-  }
-
-  async function onApplyRetention() {
-    if (!token.trim()) {
-      setMessage("set access key first");
-      return;
-    }
-    try {
-      const next = await setRetentionPolicy(token, {
-        run_records_max: Math.max(100, Number.parseInt(retRunRecordsMax, 10) || 100),
-        run_jobs_max: Math.max(100, Number.parseInt(retRunJobsMax, 10) || 100),
-        audit_events_max: Math.max(100, Number.parseInt(retAuditEventsMax, 10) || 100)
+      setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
+      setEditingHostID("");
+      await loadWorkspace(token, false);
+      addTimelineEntry({
+        kind: "system",
+        state: "success",
+        title: editing ? "Host Updated" : "Host Saved",
+        body: `${editing ? "Updated" : "Saved"} host ${hostName}.`
       });
-      setRetention(next);
-      setRetRunRecordsMax(String(next.run_records_max));
-      setRetRunJobsMax(String(next.run_jobs_max));
-      setRetAuditEventsMax(String(next.audit_events_max));
-      setMessage("retention policy updated");
-      const nextMetrics = await getMetrics(token);
-      setMetrics(nextMetrics);
-    } catch (err) {
-      setMessage(String(err));
+      setOpsNotice(`${editing ? "Updated" : "Saved"} host ${hostName}.`);
+    } catch (error) {
+      addTimelineEntry({ kind: "system", state: "error", title: "Host Save Failed", body: String(error) });
+    } finally {
+      setAddingHost(false);
     }
+  }
+
+  function onStartEditHost(host: Host) {
+    setEditingHostID(host.id);
+    setHostForm({
+      name: host.name,
+      connectionMode: host.connection_mode === "local" ? "local" : "ssh",
+      host: host.host,
+      user: host.user ?? "",
+      workspace: host.workspace ?? ""
+    });
+    setOpsNotice(`Editing host ${host.name}.`);
+  }
+
+  function onCancelHostEdit() {
+    setEditingHostID("");
+    setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
+    setOpsNotice("Canceled host edit.");
+  }
+
+  async function onProbeHost(host: Host) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    setOpsHostBusyID(host.id);
+    setOpsNotice(`Probing ${host.name}...`);
+    try {
+      const result = await probeHost(token, host.id, { preflight: true });
+      const ssh = result.ssh?.ok ? "ok" : "fail";
+      const codex = result.codex?.ok ? "ok" : "fail";
+      const login = result.codex_login?.ok ? "ok" : "fail";
+      const sshErr = result.ssh?.error ? ` ssh_error=${result.ssh.error}` : "";
+      const codexErr = result.codex?.error ? ` codex_error=${result.codex.error}` : "";
+      const loginErr = result.codex_login?.error ? ` login_error=${result.codex_login.error}` : "";
+      setOpsNotice(`Probe ${host.name}: ssh=${ssh} codex=${codex} login=${login}${sshErr}${codexErr}${loginErr}`);
+    } catch (error) {
+      setOpsNotice(`Probe failed for ${host.name}: ${String(error)}`);
+    } finally {
+      setOpsHostBusyID("");
+    }
+  }
+
+  async function onDeleteHost(host: Host) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(`Delete host '${host.name}'?`);
+      if (!confirmed) return;
+    }
+
+    setOpsHostBusyID(host.id);
+    try {
+      await deleteHost(token, host.id);
+      setSelectedHostIDs((prev) => prev.filter((id) => id !== host.id));
+      if (editingHostID === host.id) {
+        onCancelHostEdit();
+      }
+      await loadWorkspace(token, false);
+      setOpsNotice(`Deleted host ${host.name}.`);
+    } catch (error) {
+      setOpsNotice(`Delete failed for ${host.name}: ${String(error)}`);
+    } finally {
+      setOpsHostBusyID("");
+    }
+  }
+
+  async function onCancelJob(job: RunJobRecord) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    if (!isJobActive(job)) return;
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(`Cancel job '${job.id}'?`);
+      if (!confirmed) return;
+    }
+    try {
+      await cancelRunJob(token, job.id);
+      setOpsNotice(`Cancel requested for ${job.id}.`);
+      await loadWorkspace(token, false);
+    } catch (error) {
+      setOpsNotice(`Cancel failed for ${job.id}: ${String(error)}`);
+    }
+  }
+
+  function onRenameActiveThread(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!activeThread) return;
+    renameThread(activeThread.id, threadRenameDraft);
+  }
+
+  if (authPhase !== "ready") {
+    return (
+      <div className="gate-shell">
+        <div className="gate-noise" />
+        <section className="gate-card">
+          <p className="gate-eyebrow">remote-llm workspace</p>
+          <h1>Token Required</h1>
+          <p className="gate-copy">Use your access token to unlock the operator console. No token means no workspace access.</p>
+          <form onSubmit={onSubmitToken} className="gate-form">
+            <label>
+              Access Token
+              <input
+                placeholder="rlm_xxx.yyy"
+                value={tokenInput}
+                onChange={(event) => setTokenInput(event.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <button type="submit" disabled={authPhase === "checking"}>
+              {authPhase === "checking" ? "Unlocking..." : "Unlock Workspace"}
+            </button>
+          </form>
+          {authError ? <p className="gate-error">{authError}</p> : null}
+          <p className="gate-hint">API base: {API_BASE || "not configured"}</p>
+        </section>
+      </div>
+    );
   }
 
   return (
-    <div className="page">
-      <header>
-        <h1>remote-llm console</h1>
-        <p>Universal runtime controller. Codex runtime is enabled first.</p>
+    <div className="workspace-shell">
+      <header className="app-topbar">
+        <div className="topbar-title">
+          <p className="topbar-eyebrow">remote-llm workspace</p>
+          <h1>Codex Control App</h1>
+        </div>
+        <div className="topbar-controls">
+          <div className="mode-switch">
+            <button type="button" className={appMode === "session" ? "mode-btn active" : "mode-btn"} onClick={() => switchMode("session")}>
+              Session
+            </button>
+            <button type="button" className={appMode === "ops" ? "mode-btn active" : "mode-btn"} onClick={() => switchMode("ops")}>
+              Ops
+            </button>
+          </div>
+          <span className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}>{syncLabel}</span>
+          <button onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+            {isRefreshing ? "Syncing..." : "Sync"}
+          </button>
+          <button className="ghost" onClick={onLogout}>
+            Logout
+          </button>
+        </div>
       </header>
 
-      <section className="card">
-        <h2>Server</h2>
-        <p>Health: {health}</p>
-      </section>
+      {healthIsError ? <section className="workspace-alert">Controller state degraded: {health}</section> : null}
 
-      <section className="card">
-        <h2>Access Key</h2>
-        <input
-          type="password"
-          value={token}
-          onChange={(e) => {
-            setToken(e.target.value);
-            localStorage.setItem(TOKEN_KEY, e.target.value);
-          }}
-          placeholder="rlm_xxx.yyy"
-        />
-        <button onClick={refresh} disabled={loading}>
-          {loading ? "Loading..." : "Refresh"}
-        </button>
-      </section>
+      {appMode === "session" ? (
+        <div className="session-stage">
+          <main className="chat-pane">
+            <header className="chat-head">
+              <div>
+                <p className="pane-eyebrow">focused session</p>
+                <h1>{activeRuntime?.name ?? "codex"} conversation workspace</h1>
+              </div>
+              <p className={`chat-health ${healthIsError ? "is-error" : ""}`}>health: {health}</p>
+            </header>
 
-      <section className="card">
-        <h2>Control Plane Metrics</h2>
-        {metrics ? (
-          <p>
-            queue_depth={metrics.queue.depth} workers={metrics.queue.workers_active}/{metrics.queue.workers_total} util=
-            {(metrics.queue.worker_utilization * 100).toFixed(1)}% success_rate={(metrics.success_rate * 100).toFixed(1)}% pending=
-            {metrics.jobs.pending} running={metrics.jobs.running} failed={metrics.jobs.failed} canceled={metrics.jobs.canceled} retry_attempts=
-            {metrics.jobs.retry_attempts}
-          </p>
-        ) : (
-          <p>no metrics loaded yet</p>
-        )}
-      </section>
-
-      <section className="card">
-        <h2>Retention Policy</h2>
-        <form
-          className="grid"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void onApplyRetention();
-          }}
-        >
-          <label>
-            run records max
-            <input value={retRunRecordsMax} onChange={(e) => setRetRunRecordsMax(e.target.value)} />
-          </label>
-          <label>
-            run jobs max
-            <input value={retRunJobsMax} onChange={(e) => setRetRunJobsMax(e.target.value)} />
-          </label>
-          <label>
-            audit events max
-            <input value={retAuditEventsMax} onChange={(e) => setRetAuditEventsMax(e.target.value)} />
-          </label>
-          <button type="submit">Apply Retention</button>
-        </form>
-        {retention ? (
-          <p>
-            current: runs={retention.run_records_max} jobs={retention.run_jobs_max} audit={retention.audit_events_max}
-          </p>
-        ) : null}
-      </section>
-
-      <section className="card">
-        <h2>Runtimes</h2>
-        <ul>
-          {runtimes.map((r) => (
-            <li key={r.name}>
-              <code>{r.name}</code> non-interactive={String(r.capabilities.supports_non_interactive_exec)}
-              {r.contract ? ` contract=${r.contract.version} prompt_required=${String(r.contract.prompt_required)}` : ""}
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="card">
-        <h2>Add Host</h2>
-        <form onSubmit={onAddHost} className="grid">
-          <input name="name" placeholder="name" required />
-          <label>
-            connection mode
-            <select name="connection_mode" defaultValue="ssh">
-              <option value="ssh">ssh</option>
-              <option value="local">local</option>
-            </select>
-          </label>
-          <input name="host" placeholder="hostname or ip (local mode allows empty)" />
-          <input name="user" placeholder="user" />
-          <input name="workspace" placeholder="/home/user/workspace" />
-          <input name="identity_file" placeholder="identity file (optional), e.g. ~/.ssh/id_ed25519" />
-          <input name="ssh_proxy_jump" placeholder="ssh proxy jump (optional), e.g. jump@bastion:22" />
-          <label>
-            host key policy
-            <select name="ssh_host_key_policy" defaultValue="accept-new">
-              <option value="accept-new">accept-new</option>
-              <option value="strict">strict</option>
-              <option value="insecure-ignore">insecure-ignore</option>
-            </select>
-          </label>
-          <input name="ssh_connect_timeout_sec" placeholder="ssh connect timeout sec (1-300)" />
-          <input name="ssh_server_alive_interval_sec" placeholder="ssh keepalive interval sec (1-300)" />
-          <input name="ssh_server_alive_count_max" placeholder="ssh keepalive count max (1-10)" />
-          <button type="submit">Save Host</button>
-        </form>
-      </section>
-
-      <section className="card">
-        <h2>Hosts</h2>
-        <ul>
-          {hosts.map((h) => (
-            <li key={h.id}>
-              <strong>{h.name}</strong> {h.user ? `${h.user}@` : ""}
-              {h.host}:{h.port}
-              {h.connection_mode ? ` mode=${h.connection_mode}` : " mode=ssh"}
-              {h.workspace ? ` (${h.workspace})` : ""}
-              {h.ssh_proxy_jump ? ` proxy_jump=${h.ssh_proxy_jump}` : ""}
-              {h.ssh_host_key_policy ? ` host_key=${h.ssh_host_key_policy}` : ""}
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="card">
-        <h2>Run Codex (Fanout)</h2>
-        <form onSubmit={onRunCodex} className="grid">
-          <label>
-            mode
-            <select value={runMode} onChange={(e) => setRunMode(e.target.value as "exec" | "resume" | "review")}>
-              <option value="exec">exec</option>
-              <option value="resume">resume</option>
-              <option value="review">review</option>
-            </select>
-          </label>
-          <label>
-            model
-            <input value={runModel} onChange={(e) => setRunModel(e.target.value)} placeholder="optional model" />
-          </label>
-          <label>
-            sandbox
-            <select
-              value={runSandbox}
-              onChange={(e) =>
-                setRunSandbox(e.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
-              }
-            >
-              <option value="">default</option>
-              <option value="read-only">read-only</option>
-              <option value="workspace-write">workspace-write</option>
-              <option value="danger-full-access">danger-full-access</option>
-            </select>
-          </label>
-          <label>
-            max output KB
-            <input value={runMaxOutputKB} onChange={(e) => setRunMaxOutputKB(e.target.value)} />
-          </label>
-          <textarea
-            value={runPrompt}
-            onChange={(e) => setRunPrompt(e.target.value)}
-            placeholder={runMode === "exec" ? "prompt (required for exec)" : "optional prompt"}
-            rows={4}
-            className="wide"
-          />
-          {runMode === "resume" ? (
-            <>
-              <label className="inline">
-                <input type="checkbox" checked={runResumeLast} onChange={(e) => setRunResumeLast(e.target.checked)} />
-                resume last session
-              </label>
-              {!runResumeLast ? (
-                <input
-                  value={runSessionID}
-                  onChange={(e) => setRunSessionID(e.target.value)}
-                  placeholder="session id"
-                  className="wide"
-                />
-              ) : null}
-              <button type="button" onClick={onUseLatestSession}>
-                Use Latest Session On Selected Host
+            <section className="thread-bar">
+              <div className="thread-list">
+                {threads.map((thread) => (
+                  <button
+                    key={thread.id}
+                    type="button"
+                    className={`thread-chip ${thread.id === activeThreadID ? "active" : ""}`}
+                    onClick={() => setActiveThreadID(thread.id)}
+                    title={`${thread.title} (${thread.timeline.length} messages)`}
+                  >
+                    <span>{thread.title}</span>
+                    <small>{thread.timeline.length}</small>
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="ghost new-thread" onClick={createThreadAndFocus}>
+                New Thread
               </button>
-            </>
-          ) : null}
-          <input
-            value={runWorkdir}
-            onChange={(e) => setRunWorkdir(e.target.value)}
-            placeholder="optional workdir override"
-            className="wide"
-          />
-          <label>
-            fanout
-            <input value={runFanoutValue} onChange={(e) => setRunFanoutValue(e.target.value)} />
-          </label>
-          <label>
-            retry count
-            <input value={runRetryCountValue} onChange={(e) => setRunRetryCountValue(e.target.value)} />
-          </label>
-          <label>
-            retry backoff ms
-            <input value={runRetryBackoffMSValue} onChange={(e) => setRunRetryBackoffMSValue(e.target.value)} />
-          </label>
-          <label className="inline">
-            <input type="checkbox" checked={runAllHosts} onChange={(e) => setRunAllHosts(e.target.checked)} />
-            all hosts
-          </label>
-          <label className="inline">
-            <input type="checkbox" checked={runAsyncMode} onChange={(e) => setRunAsyncMode(e.target.checked)} />
-            async job mode
-          </label>
-          <label className="inline">
-            <input type="checkbox" checked={runJSONOutput} onChange={(e) => setRunJSONOutput(e.target.checked)} />
-            codex --json
-          </label>
-          <label className="inline">
-            <input
-              type="checkbox"
-              checked={runSkipGitRepoCheck}
-              onChange={(e) => setRunSkipGitRepoCheck(e.target.checked)}
-            />
-            skip git repo check
-          </label>
-          <label className="inline">
-            <input type="checkbox" checked={runEphemeral} onChange={(e) => setRunEphemeral(e.target.checked)} />
-            ephemeral session
-          </label>
-          <button type="submit" disabled={runLoading}>
-            {runLoading ? (runAsyncMode ? "Queueing..." : "Running...") : runAsyncMode ? "Queue Codex Run" : "Run Codex"}
-          </button>
-        </form>
+            </section>
 
-        {!runAllHosts ? (
-          <div className="host-grid">
-            {hosts.map((h) => (
-              <label key={h.id} className="inline">
-                <input type="checkbox" checked={selectedHostIDs.includes(h.id)} onChange={() => toggleHost(h.id)} />
-                {h.name}
-              </label>
-            ))}
-          </div>
-        ) : null}
+            <section className="timeline" aria-live="polite">
+              {activeTimeline.length === 0 ? (
+                <article className="message message-system">
+                  <div className="message-title-row">
+                    <h4>{isRefreshing ? "Sync In Progress" : "Workspace Ready"}</h4>
+                  </div>
+                  <pre>
+                    {isRefreshing
+                      ? "Loading remote state and runtime capability snapshot..."
+                      : "Send your first instruction to start a distributed codex run."}
+                  </pre>
+                </article>
+              ) : (
+                activeTimeline.map((entry) => (
+                  <article key={entry.id} className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}>
+                    <div className="message-title-row">
+                      <h4>{entry.title}</h4>
+                      <time>{formatClock(entry.createdAt)}</time>
+                    </div>
+                    <pre>{entry.body}</pre>
+                  </article>
+                ))
+              )}
+              <div ref={timelineBottomRef} />
+            </section>
 
-        {runResult ? (
-          <div className="run-result">
-            <p>
-              status={runStatus} total={runResult.summary.total} ok={runResult.summary.succeeded} failed=
-              {runResult.summary.failed} fanout={runResult.summary.fanout} retry={runResult.summary.retry_count ?? 0}
-              /{runResult.summary.retry_backoff_ms ?? 0}ms duration={runResult.summary.duration_ms}ms
-            </p>
-            <ul>
-              {runResult.targets.map((t) => (
-                <li key={t.host.id}>
-                  <strong>{t.host.name}</strong> ok={String(t.ok)} exit={t.result.exit_code ?? "n/a"} dur=
-                  {t.result.duration_ms ?? 0}ms stdout={t.result.stdout_bytes ?? 0}B stderr={t.result.stderr_bytes ?? 0}
-                  B attempts={t.attempts ?? 1}
-                  {t.result.stdout_truncated ? " stdout_truncated=true" : ""}
-                  {t.result.stderr_truncated ? " stderr_truncated=true" : ""}
-                  {t.codex ? ` codex_events=${t.codex.event_count} invalid_json_lines=${t.codex.invalid_lines ?? 0}` : ""}
-                  {t.error_class ? ` error_class=${t.error_class}` : ""}
-                  {t.error_hint ? ` hint=${t.error_hint}` : ""}
-                  {t.error ? ` error=${t.error}` : ""}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </section>
+            <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
+              <div className="session-strip">
+                <span>runtime={activeRuntime?.name ?? selectedRuntime}</span>
+                <span>mode={runMode}</span>
+                <span>hosts={allHosts ? "all" : selectedHostIDs.length}</span>
+                <span>async={String(runAsyncMode)}</span>
+              </div>
 
-      <section className="card">
-        <h2>Run Jobs</h2>
-        <div className="grid">
-          <input
-            value={jobStatusFilter}
-            onChange={(e) => setJobStatusFilter(e.target.value)}
-            placeholder="status csv: pending,running,failed"
-          />
-          <input
-            value={jobRuntimeFilter}
-            onChange={(e) => setJobRuntimeFilter(e.target.value)}
-            placeholder="runtime csv: codex,sync"
-          />
-          <input value={jobHostFilter} onChange={(e) => setJobHostFilter(e.target.value)} placeholder="host id filter (optional)" />
+              <div className="quick-strip">
+                {QUICK_COMMANDS.map((command) => (
+                  <button key={command.label} type="button" className="quick-chip ghost" onClick={() => applyQuickCommand(command)}>
+                    {command.label}
+                  </button>
+                ))}
+                <span className="shortcut-hint">Ctrl/Cmd+K focus, Ctrl/Cmd+Shift+N new thread</span>
+              </div>
+
+              <textarea
+                ref={promptInputRef}
+                value={activeDraft}
+                onChange={(event) => {
+                  if (activeThread) {
+                    updateThreadDraft(activeThread.id, event.target.value);
+                  }
+                }}
+                rows={4}
+                placeholder="Tell codex what to execute on selected hosts..."
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    composerFormRef.current?.requestSubmit();
+                  }
+                }}
+              />
+
+              <div className="composer-controls">
+                <input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="workdir override" />
+                <input value={fanoutValue} onChange={(event) => setFanoutValue(event.target.value)} placeholder="fanout" />
+                <input value={maxOutputKB} onChange={(event) => setMaxOutputKB(event.target.value)} placeholder="max output KB" />
+                <button type="submit" disabled={isSubmitting}>
+                  {isSubmitting ? "Running..." : "Send"}
+                </button>
+              </div>
+            </form>
+          </main>
+
+          <aside className="session-side">
+            <section className="inspect-block focus-block">
+              <h3>Session Context</h3>
+              <ul className="metric-list metric-list-light">
+                <li>thread={activeThread?.title ?? "-"}</li>
+                <li>threads={threads.length}</li>
+                <li>targets={selectedHostCount}</li>
+                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
+              </ul>
+              <form className="thread-rename-form" onSubmit={onRenameActiveThread}>
+                <input
+                  value={threadRenameDraft}
+                  onChange={(event) => setThreadRenameDraft(event.target.value)}
+                  placeholder="thread name"
+                  maxLength={48}
+                />
+                <button type="submit">Rename</button>
+              </form>
+              <ul className="session-keymap">
+                <li>Ctrl/Cmd + K: focus prompt</li>
+                <li>Ctrl/Cmd + Shift + N: new thread</li>
+                <li>Ctrl/Cmd + Shift + [ or ArrowUp: previous thread</li>
+                <li>Ctrl/Cmd + Shift + ] or ArrowDown: next thread</li>
+              </ul>
+              <button type="button" className="ghost" onClick={() => switchMode("ops")}>
+                Open Remote Ops
+              </button>
+            </section>
+
+            <section className="inspect-block">
+              <h3>Active Job</h3>
+              {activeJob ? (
+                <div className="job-card">
+                  <div className="job-head">
+                    <strong>{activeJob.id}</strong>
+                    <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
+                  </div>
+                  <p>runtime={activeJob.runtime}</p>
+                  <p>thread={activeJobThreadID}</p>
+                  <p>queued={formatDateTime(activeJob.queued_at)}</p>
+                  <div className="progress-track" aria-label="job progress">
+                    <span style={{ width: `${activeProgress}%` }} />
+                  </div>
+                </div>
+              ) : (
+                <p className="pane-subtle-light">No active async job.</p>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>Recent Jobs</h3>
+              {jobs.length === 0 ? (
+                <p className="pane-subtle-light">No jobs yet.</p>
+              ) : (
+                <ul className="history-list">
+                  {jobs.slice(0, 6).map((job) => (
+                    <li key={job.id}>
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          setActiveJobID(job.id);
+                          setActiveJob(job);
+                        }}
+                      >
+                        {job.id}
+                      </button>
+                      <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </aside>
         </div>
-        {activeRunJob ? (
-          <p>
-            active={activeRunJob.id} status={activeRunJob.status} runtime={activeRunJob.runtime} total=
-            {activeRunJob.total_hosts ?? 0} ok={activeRunJob.succeeded_hosts ?? 0} failed={activeRunJob.failed_hosts ?? 0}
-            http={activeRunJob.result_status ?? "n/a"} {runJobPolling ? "polling=true" : "polling=false"}
-            {activeRunJob.error ? ` error=${activeRunJob.error}` : ""}
-          </p>
-        ) : (
-          <p>no active run job</p>
-        )}
-        {runJobs.length === 0 ? (
-          <p>no run jobs yet</p>
-        ) : (
-          <ul>
-            {runJobs.map((job) => (
-              <li key={job.id}>
+      ) : (
+        <div className="ops-stage">
+          <aside className="nav-pane">
+            <header className="pane-head">
+              <p className="pane-eyebrow">remote operations</p>
+              <h2>Hosts and Runtime Control</h2>
+              <p className="pane-subtle">health: {health}</p>
+            </header>
+
+            <section className="pane-block">
+              <div className="pane-title-line">
+                <h3>Targets</h3>
+                <label className="switch-inline">
+                  <input type="checkbox" checked={allHosts} onChange={(event) => setAllHosts(event.target.checked)} />
+                  all
+                </label>
+              </div>
+              <p className="pane-subtle">selected={selectedHostCount}</p>
+              <label>
+                filter
+                <input
+                  placeholder="name / host / user / workspace"
+                  value={hostFilter}
+                  onChange={(event) => setHostFilter(event.target.value)}
+                />
+              </label>
+              <div className="target-list">
+                {hosts.length === 0 ? (
+                  <p className="pane-subtle">No hosts configured.</p>
+                ) : filteredHosts.length === 0 ? (
+                  <p className="pane-subtle">No hosts match filter.</p>
+                ) : (
+                  filteredHosts.map((host) => (
+                    <div key={host.id} className="target-item">
+                      <label className="target-checkline">
+                        <input
+                          type="checkbox"
+                          disabled={allHosts}
+                          checked={allHosts || selectedHostIDs.includes(host.id)}
+                          onChange={() => toggleHostSelection(host.id)}
+                        />
+                        <span className="target-meta">
+                          <strong>{host.name}</strong>
+                          <small>
+                            {host.user ? `${host.user}@` : ""}
+                            {host.host}:{host.port}
+                            {` mode=${host.connection_mode ?? "ssh"}`}
+                          </small>
+                        </span>
+                      </label>
+                      <div className="target-actions">
+                        <button type="button" className="ghost" disabled={opsHostBusyID === host.id} onClick={() => void onProbeHost(host)}>
+                          {opsHostBusyID === host.id ? "..." : "Probe"}
+                        </button>
+                        <button type="button" className="ghost" disabled={opsHostBusyID === host.id} onClick={() => onStartEditHost(host)}>
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost danger-ghost"
+                          disabled={opsHostBusyID === host.id}
+                          onClick={() => void onDeleteHost(host)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="pane-block">
+              <h3>Runtime</h3>
+              <label>
+                runtime
+                <select value={selectedRuntime} onChange={(event) => setSelectedRuntime(event.target.value)}>
+                  {runtimes.map((runtime) => (
+                    <option key={runtime.name} value={runtime.name}>
+                      {runtime.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                mode
+                <select value={runMode} onChange={(event) => setRunMode(event.target.value as "exec" | "resume" | "review")}>
+                  <option value="exec">exec</option>
+                  <option value="resume">resume</option>
+                  <option value="review">review</option>
+                </select>
+              </label>
+              <label>
+                model
+                <input value={runModel} onChange={(event) => setRunModel(event.target.value)} placeholder="optional" />
+              </label>
+              <label>
+                sandbox
+                <select
+                  value={runSandbox}
+                  onChange={(event) =>
+                    setRunSandbox(event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                  }
+                >
+                  <option value="">default</option>
+                  <option value="read-only">read-only</option>
+                  <option value="workspace-write">workspace-write</option>
+                  <option value="danger-full-access">danger-full-access</option>
+                </select>
+              </label>
+              <label className="switch-inline">
+                <input type="checkbox" checked={runAsyncMode} onChange={(event) => setRunAsyncMode(event.target.checked)} />
+                async queue
+              </label>
+            </section>
+
+            <section className="pane-block">
+              <h3>Queue Control</h3>
+              <ul className="metric-list">
+                <li>pending={metrics?.jobs.pending ?? "-"}</li>
+                <li>running={metrics?.jobs.running ?? "-"}</li>
+                <li>depth={metrics?.queue.depth ?? "-"}</li>
+              </ul>
+              <div className="ops-actions-row">
+                <button type="button" className="ghost" onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+                  {isRefreshing ? "Refreshing..." : "Refresh Queue"}
+                </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setActiveRunJobID(job.id);
-                    setActiveRunJob(job);
-                    setRunJobPolling(isRunJobActive(job));
-                  }}
+                  className="ghost danger-ghost"
+                  disabled={!activeJob || !isJobActive(activeJob)}
+                  onClick={() => (activeJob ? void onCancelJob(activeJob) : undefined)}
                 >
-                  watch
-                </button>{" "}
-                {isRunJobCancelable(job) ? (
-                  <button type="button" onClick={() => onCancelJob(job.id)}>
-                    cancel
-                  </button>
-                ) : null}{" "}
-                <strong>{job.id}</strong> type={job.type} status={job.status} runtime={job.runtime} hosts={job.total_hosts ?? 0} ok=
-                {job.succeeded_hosts ?? 0} failed={job.failed_hosts ?? 0} http={job.result_status ?? "n/a"} dur=
-                {job.duration_ms ?? 0}ms
-                {job.error ? ` error=${job.error}` : ""}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+                  Cancel Active
+                </button>
+              </div>
+            </section>
 
-      <section className="card">
-        <h2>Sync Files (rsync)</h2>
-        <form onSubmit={onSyncHosts} className="grid">
-          <input value={syncSrc} onChange={(e) => setSyncSrc(e.target.value)} placeholder="local src path (controller)" className="wide" />
-          <input value={syncDst} onChange={(e) => setSyncDst(e.target.value)} placeholder="remote dst path" className="wide" />
-          <label>
-            fanout
-            <input value={syncFanoutValue} onChange={(e) => setSyncFanoutValue(e.target.value)} />
-          </label>
-          <label>
-            max output KB
-            <input value={syncMaxOutputKB} onChange={(e) => setSyncMaxOutputKB(e.target.value)} />
-          </label>
-          <label>
-            retry count
-            <input value={syncRetryCountValue} onChange={(e) => setSyncRetryCountValue(e.target.value)} />
-          </label>
-          <label>
-            retry backoff ms
-            <input value={syncRetryBackoffMSValue} onChange={(e) => setSyncRetryBackoffMSValue(e.target.value)} />
-          </label>
-          <input
-            value={syncExcludes}
-            onChange={(e) => setSyncExcludes(e.target.value)}
-            placeholder="excludes (comma separated), e.g. .git,node_modules"
-            className="wide"
-          />
-          <label className="inline">
-            <input type="checkbox" checked={syncAllHosts} onChange={(e) => setSyncAllHosts(e.target.checked)} />
-            all hosts
-          </label>
-          <label className="inline">
-            <input type="checkbox" checked={syncAsyncMode} onChange={(e) => setSyncAsyncMode(e.target.checked)} />
-            async job mode
-          </label>
-          <label className="inline">
-            <input type="checkbox" checked={syncDelete} onChange={(e) => setSyncDelete(e.target.checked)} />
-            delete extra remote files
-          </label>
-          <button type="submit" disabled={syncLoading}>
-            {syncLoading ? (syncAsyncMode ? "Queueing..." : "Syncing...") : syncAsyncMode ? "Queue Sync Job" : "Sync"}
-          </button>
-        </form>
+            <section className="pane-block">
+              <h3>Overview</h3>
+              <ul className="metric-list">
+                <li>hosts={hosts.length}</li>
+                <li>jobs={jobs.length}</li>
+                <li>runs={runs.length}</li>
+                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
+                <li>workers={metrics?.queue.workers_active ?? "-"}/{metrics?.queue.workers_total ?? "-"}</li>
+                <li>threads={threads.length}</li>
+              </ul>
+            </section>
 
-        {!syncAllHosts ? (
-          <div className="host-grid">
-            {hosts.map((h) => (
-              <label key={h.id} className="inline">
+            {opsNotice ? (
+              <section className={`pane-block ops-notice ${opsNoticeIsError ? "ops-notice-error" : ""}`}>
+                <h3>Ops Notice</h3>
+                <p>{opsNotice}</p>
+              </section>
+            ) : null}
+          </aside>
+
+          <aside className="inspect-pane">
+            {isRefreshing ? (
+              <section className="inspect-block">
+                <h3>Loading</h3>
+                <p className="pane-subtle-light">Refreshing hosts, queue, runs, and audit timeline...</p>
+              </section>
+            ) : null}
+
+            <section className="inspect-block">
+              <h3>Active Job</h3>
+              {activeJob ? (
+                <div className="job-card">
+                  <div className="job-head">
+                    <strong>{activeJob.id}</strong>
+                    <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
+                  </div>
+                  <p>runtime={activeJob.runtime}</p>
+                  <p>thread={activeJobThreadID}</p>
+                  <p>queued={formatDateTime(activeJob.queued_at)}</p>
+                  <p>
+                    hosts total={activeJob.total_hosts ?? 0} ok={activeJob.succeeded_hosts ?? 0} failed={activeJob.failed_hosts ?? 0}
+                  </p>
+                  <div className="progress-track" aria-label="job progress">
+                    <span style={{ width: `${activeProgress}%` }} />
+                  </div>
+                  <p>http={activeJob.result_status ?? "n/a"}</p>
+                  {activeJob.error ? <p className="tone-err">{activeJob.error}</p> : null}
+                </div>
+              ) : (
+                <p className="pane-subtle-light">No active async job.</p>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>Recent Jobs</h3>
+              <div className="ops-filter-row">
+                <label>
+                  status
+                  <select
+                    value={opsJobStatusFilter}
+                    onChange={(event) =>
+                      setOpsJobStatusFilter(
+                        event.target.value as "all" | "pending" | "running" | "succeeded" | "failed" | "canceled"
+                      )
+                    }
+                  >
+                    <option value="all">all</option>
+                    <option value="pending">pending</option>
+                    <option value="running">running</option>
+                    <option value="succeeded">succeeded</option>
+                    <option value="failed">failed</option>
+                    <option value="canceled">canceled</option>
+                  </select>
+                </label>
+                <label>
+                  type
+                  <select value={opsJobTypeFilter} onChange={(event) => setOpsJobTypeFilter(event.target.value as "all" | "run" | "sync")}>
+                    <option value="all">all</option>
+                    <option value="run">run</option>
+                    <option value="sync">sync</option>
+                  </select>
+                </label>
+              </div>
+              {filteredOpsJobs.length === 0 ? (
+                <p className="pane-subtle-light">No jobs yet.</p>
+              ) : (
+                <ul className="history-list">
+                  {filteredOpsJobs.slice(0, 8).map((job) => (
+                    <li key={job.id}>
+                      <div className="history-item-main">
+                        <button
+                          className="ghost"
+                          onClick={() => {
+                            setActiveJobID(job.id);
+                            setActiveJob(job);
+                          }}
+                        >
+                          {job.id}
+                        </button>
+                        <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                        <span>{job.type}</span>
+                      </div>
+                      <div className="history-item-actions">
+                        {isJobActive(job) ? (
+                          <button type="button" className="ghost danger-ghost" onClick={() => void onCancelJob(job)}>
+                            Cancel
+                          </button>
+                        ) : null}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>Recent Runs</h3>
+              <div className="ops-filter-row">
+                <label>
+                  status
+                  <select value={opsRunStatusFilter} onChange={(event) => setOpsRunStatusFilter(event.target.value as "all" | "ok" | "error")}>
+                    <option value="all">all</option>
+                    <option value="ok">ok</option>
+                    <option value="error">error</option>
+                  </select>
+                </label>
+              </div>
+              {filteredOpsRuns.length === 0 ? (
+                <p className="pane-subtle-light">No run results yet.</p>
+              ) : (
+                <ul className="history-list history-runs">
+                  {filteredOpsRuns.slice(0, 8).map((run) => (
+                    <li key={run.id}>
+                      <span>{run.id}</span>
+                      <span className={`tone-${run.status_code < 400 ? "ok" : "err"}`}>
+                        {run.status_code < 400 ? "ok" : `http_${run.status_code}`}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>Audit Timeline</h3>
+              <div className="ops-filter-row">
+                <label>
+                  method
+                  <select
+                    value={opsAuditMethodFilter}
+                    onChange={(event) => setOpsAuditMethodFilter(event.target.value as "all" | "GET" | "POST" | "DELETE")}
+                  >
+                    <option value="all">all</option>
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="DELETE">DELETE</option>
+                  </select>
+                </label>
+                <label>
+                  status
+                  <select
+                    value={opsAuditStatusFilter}
+                    onChange={(event) => setOpsAuditStatusFilter(event.target.value as "all" | "2xx" | "4xx" | "5xx")}
+                  >
+                    <option value="all">all</option>
+                    <option value="2xx">2xx</option>
+                    <option value="4xx">4xx</option>
+                    <option value="5xx">5xx</option>
+                  </select>
+                </label>
+              </div>
+              {filteredAuditEvents.length === 0 ? (
+                <p className="pane-subtle-light">No audit events with current filters.</p>
+              ) : (
+                <ul className="history-list">
+                  {filteredAuditEvents.slice(0, 12).map((evt) => (
+                    <li key={evt.id}>
+                      <div className="history-item-main">
+                        <span>{evt.action}</span>
+                        <span>
+                          {evt.method} {evt.path}
+                        </span>
+                      </div>
+                      <span className={`tone-${evt.status_code < 400 ? "ok" : "err"}`}>{evt.status_code}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="inspect-block">
+              <h3>{editingHostID ? "Edit Host" : "Add Host"}</h3>
+              <form className="host-form" onSubmit={onAddHost}>
                 <input
-                  type="checkbox"
-                  checked={syncSelectedHostIDs.includes(h.id)}
-                  onChange={() => toggleSyncHost(h.id)}
+                  placeholder="name"
+                  value={hostForm.name}
+                  onChange={(event) => setHostForm((prev) => ({ ...prev, name: event.target.value }))}
                 />
-                {h.name}
-              </label>
-            ))}
-          </div>
-        ) : null}
-
-        {syncResult ? (
-          <div className="run-result">
-            <p>
-              status={syncStatus} total={syncResult.summary.total} ok={syncResult.summary.succeeded} failed=
-              {syncResult.summary.failed} fanout={syncResult.summary.fanout} retry={syncResult.summary.retry_count ?? 0}
-              /{syncResult.summary.retry_backoff_ms ?? 0}ms duration={syncResult.summary.duration_ms}ms
-            </p>
-            <ul>
-              {syncResult.targets.map((t) => (
-                <li key={t.host.id}>
-                  <strong>{t.host.name}</strong> ok={String(t.ok)} exit={t.result.exit_code ?? "n/a"} dur=
-                  {t.result.duration_ms ?? 0}ms stdout={t.result.stdout_bytes ?? 0}B stderr={t.result.stderr_bytes ?? 0}
-                  B attempts={t.attempts ?? 1}
-                  {t.result.stdout_truncated ? " stdout_truncated=true" : ""}
-                  {t.result.stderr_truncated ? " stderr_truncated=true" : ""}
-                  {t.error_class ? ` error_class=${t.error_class}` : ""}
-                  {t.error_hint ? ` hint=${t.error_hint}` : ""}
-                  {t.error ? ` error=${t.error}` : ""}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="card">
-        <h2>Recent Runs</h2>
-        {runHistory.length === 0 ? (
-          <p>no runs yet</p>
-        ) : (
-          <ul>
-            {runHistory.map((r) => (
-              <li key={r.id}>
-                <strong>{r.runtime}</strong> http={r.status_code} hosts={r.total_hosts} ok={r.succeeded_hosts} failed=
-                {r.failed_hosts} fanout={r.fanout} dur={r.duration_ms}ms prompt="{r.prompt_preview}"
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="card">
-        <h2>Audit Events</h2>
-        <div className="grid">
-          <input
-            value={auditStatusFilter}
-            onChange={(e) => setAuditStatusFilter(e.target.value)}
-            placeholder="status code filter, e.g. 200"
-          />
-          <input
-            value={auditActionFilter}
-            onChange={(e) => setAuditActionFilter(e.target.value)}
-            placeholder="action filter, e.g. job.cancel"
-          />
+                <label>
+                  connection mode
+                  <select
+                    value={hostForm.connectionMode}
+                    onChange={(event) => setHostForm((prev) => ({ ...prev, connectionMode: event.target.value as "ssh" | "local" }))}
+                  >
+                    <option value="ssh">ssh</option>
+                    <option value="local">local</option>
+                  </select>
+                </label>
+                <input
+                  placeholder={hostForm.connectionMode === "local" ? "host (optional for local mode)" : "host"}
+                  value={hostForm.host}
+                  onChange={(event) => setHostForm((prev) => ({ ...prev, host: event.target.value }))}
+                />
+                <input
+                  placeholder="user"
+                  value={hostForm.user}
+                  onChange={(event) => setHostForm((prev) => ({ ...prev, user: event.target.value }))}
+                />
+                <input
+                  placeholder="workspace"
+                  value={hostForm.workspace}
+                  onChange={(event) => setHostForm((prev) => ({ ...prev, workspace: event.target.value }))}
+                />
+                <div className="ops-actions-row">
+                  <button type="submit" disabled={addingHost}>
+                    {addingHost ? "Saving..." : editingHostID ? "Update Host" : "Save Host"}
+                  </button>
+                  {editingHostID ? (
+                    <button type="button" className="ghost" onClick={onCancelHostEdit}>
+                      Cancel Edit
+                    </button>
+                  ) : null}
+                </div>
+              </form>
+            </section>
+          </aside>
         </div>
-        {auditEvents.length === 0 ? (
-          <p>no audit events yet</p>
-        ) : (
-          <ul>
-            {auditEvents.map((e) => (
-              <li key={e.id}>
-                <code>{e.timestamp}</code> {e.action} {e.method} {e.path} status={e.status_code} dur={e.duration_ms}ms
-                {e.created_by_key_id ? ` key=${e.created_by_key_id}` : ""}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <footer>{message}</footer>
+      )}
     </div>
   );
 }

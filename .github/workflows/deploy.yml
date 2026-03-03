@@ -1,0 +1,244 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deploy environment
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      ref:
+        description: Git ref to deploy (optional)
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-${{ github.event_name == 'workflow_dispatch' && inputs.environment || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    name: Build Release Artifact
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Build binaries
+        working-directory: server
+        run: |
+          mkdir -p ../dist/release/bin
+          go build -trimpath -o ../dist/release/bin/remote-llm-server ./cmd/remote-llm-server
+          go build -trimpath -o ../dist/release/bin/remote-llm-admin ./cmd/remote-llm-admin
+
+      - name: Package release
+        run: |
+          mkdir -p dist/release/examples
+          cp scripts/run-remote-llm-server.sh dist/release/bin/run-remote-llm-server.sh
+          chmod +x dist/release/bin/run-remote-llm-server.sh
+          cp examples/runtimes.example.json dist/release/examples/runtimes.example.json
+          tar -C dist/release -czf dist/remote-llm-release.tgz .
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-llm-release
+          path: dist/remote-llm-release.tgz
+          if-no-files-found: error
+
+  deploy-api:
+    name: Deploy API (SSH Targets)
+    runs-on: ubuntu-latest
+    needs:
+      - build-release
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: remote-llm-release
+          path: dist
+
+      - name: Prepare SSH material
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "${DEPLOY_SSH_PRIVATE_KEY}" ]; then
+            echo "::error::missing environment secret DEPLOY_SSH_PRIVATE_KEY"
+            exit 1
+          fi
+          key_path="${RUNNER_TEMP}/deploy_key"
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "${key_path}"
+          chmod 600 "${key_path}"
+          echo "DEPLOY_SSH_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
+
+      - name: Deploy API targets via SSH
+        env:
+          DEPLOY_TARGETS: ${{ secrets.DEPLOY_TARGETS }}
+          DEPLOY_RELEASE_TARBALL: ${{ github.workspace }}/dist/remote-llm-release.tgz
+          DEPLOY_RELEASE_ID: ${{ github.sha }}
+          DEPLOY_SSH_KEY_PATH: ${{ env.DEPLOY_SSH_KEY_PATH }}
+        run: |
+          if [ -z "${DEPLOY_TARGETS}" ]; then
+            echo "::error::missing environment secret DEPLOY_TARGETS"
+            exit 1
+          fi
+          echo "${DEPLOY_TARGETS}" | jq -e '. | type=="array" and length>0' >/dev/null
+          echo "${DEPLOY_TARGETS}" | jq -e '.[] | has("name") and has("host") and has("user")' >/dev/null
+
+          while IFS= read -r target; do
+            name="$(echo "${target}" | jq -r '.name')"
+            host="$(echo "${target}" | jq -r '.host')"
+            user="$(echo "${target}" | jq -r '.user')"
+
+            echo "::add-mask::${host}"
+            echo "::add-mask::${user}"
+            echo "deploying target: ${name}"
+
+            export DEPLOY_HOST="${host}"
+            export DEPLOY_USER="${user}"
+            export DEPLOY_PORT="$(echo "${target}" | jq -r '.port // empty')"
+            export DEPLOY_PATH="$(echo "${target}" | jq -r '.deploy_path // empty')"
+            export DEPLOY_SERVICE_NAME="$(echo "${target}" | jq -r '.service_name // empty')"
+            export DEPLOY_ADDR="$(echo "${target}" | jq -r '.addr // empty')"
+            export DEPLOY_DATA_PATH="$(echo "${target}" | jq -r '.data_path // empty')"
+            export DEPLOY_RUNTIME_CONFIG_PATH="$(echo "${target}" | jq -r '.runtime_config_path // empty')"
+            export DEPLOY_KEEP_RELEASES="$(echo "${target}" | jq -r '.keep_releases // empty')"
+            export DEPLOY_HEALTHCHECK_URL="$(echo "${target}" | jq -r '.healthcheck_url // empty')"
+
+            chmod +x scripts/deploy_release_via_ssh.sh
+            scripts/deploy_release_via_ssh.sh
+          done < <(echo "${DEPLOY_TARGETS}" | jq -c '.[]')
+
+          unset DEPLOY_HOST DEPLOY_USER DEPLOY_PORT DEPLOY_PATH DEPLOY_SERVICE_NAME
+          unset DEPLOY_ADDR DEPLOY_DATA_PATH DEPLOY_RUNTIME_CONFIG_PATH DEPLOY_KEEP_RELEASES DEPLOY_HEALTHCHECK_URL
+
+  deploy-web-pages:
+    name: Deploy Web (Cloudflare Pages)
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web
+        working-directory: web
+        env:
+          VITE_API_BASE: ${{ vars.VITE_API_BASE }}
+        run: |
+          if [ -z "${VITE_API_BASE}" ]; then
+            echo "::error::missing environment variable VITE_API_BASE"
+            exit 1
+          fi
+          npm ci
+          npm run build
+
+      - name: Validate Cloudflare config
+        env:
+          CF_PAGES_PROJECT: ${{ secrets.CF_PAGES_PROJECT }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "${CF_PAGES_PROJECT}" ]; then
+            echo "::error::missing environment secret CF_PAGES_PROJECT"
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "::error::missing environment secret CLOUDFLARE_ACCOUNT_ID"
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::error::missing environment secret CLOUDFLARE_API_TOKEN"
+            exit 1
+          fi
+
+      - name: Ensure Cloudflare Pages project exists
+        env:
+          CF_PAGES_PROJECT: ${{ secrets.CF_PAGES_PROJECT }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_PAGES_BRANCH: ${{ vars.CF_PAGES_BRANCH }}
+        run: |
+          set -euo pipefail
+          project_api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${CF_PAGES_PROJECT}"
+          create_api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects"
+          deploy_branch="${CF_PAGES_BRANCH:-${GITHUB_REF_NAME}}"
+
+          read_api_resp="$(mktemp)"
+          read_status="$(curl -sS -o "${read_api_resp}" -w "%{http_code}" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${project_api}")"
+
+          if [ "${read_status}" = "200" ] && jq -e '.success == true' "${read_api_resp}" >/dev/null; then
+            echo "Cloudflare Pages project exists: ${CF_PAGES_PROJECT}"
+            exit 0
+          fi
+
+          if [ "${read_status}" != "404" ]; then
+            echo "::error::unexpected response checking pages project (${read_status})"
+            cat "${read_api_resp}"
+            exit 1
+          fi
+
+          payload="$(jq -nc --arg name "${CF_PAGES_PROJECT}" --arg branch "${deploy_branch}" '{name: $name, production_branch: $branch}')"
+          create_resp="$(mktemp)"
+          create_status="$(curl -sS -o "${create_resp}" -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "${payload}" \
+            "${create_api}")"
+
+          if [ "${create_status}" != "200" ] && [ "${create_status}" != "201" ]; then
+            echo "::error::failed to create pages project (${create_status})"
+            cat "${create_resp}"
+            exit 1
+          fi
+          if ! jq -e '.success == true' "${create_resp}" >/dev/null; then
+            echo "::error::create pages project returned success=false"
+            cat "${create_resp}"
+            exit 1
+          fi
+          echo "Created Cloudflare Pages project: ${CF_PAGES_PROJECT} (production_branch=${deploy_branch})"
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy web/dist
+            --project-name=${{ secrets.CF_PAGES_PROJECT }}
+            --branch=${{ vars.CF_PAGES_BRANCH != '' && vars.CF_PAGES_BRANCH || github.ref_name }}

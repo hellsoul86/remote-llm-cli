@@ -248,7 +248,17 @@ export type CodexSessionTarget = {
   sessions?: CodexSessionInfo[];
 };
 
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8080";
+const ENV_API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
+const IS_DEV = import.meta.env.DEV;
+
+function defaultApiBase(): string {
+  if (ENV_API_BASE) return ENV_API_BASE;
+  if (IS_DEV) return "http://localhost:8080";
+  if (typeof window !== "undefined" && window.location?.origin) return window.location.origin;
+  return "";
+}
+
+export const API_BASE = defaultApiBase();
 
 function headers(token?: string): HeadersInit {
   const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -288,6 +298,44 @@ export async function upsertHost(token: string, host: Partial<Host>): Promise<Ho
   }
   const body = await res.json();
   return body.host;
+}
+
+export async function deleteHost(token: string, hostID: string): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/v1/hosts/${encodeURIComponent(hostID)}`, {
+    method: "DELETE",
+    headers: headers(token)
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(`delete host failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return Boolean(body?.deleted);
+}
+
+export async function probeHost(
+  token: string,
+  hostID: string,
+  request?: { preflight?: boolean }
+): Promise<{
+  host: Host;
+  ssh: { ok: boolean; error?: string; error_hint?: string };
+  codex: { ok: boolean; error?: string; error_hint?: string; result?: { stdout?: string } };
+  codex_login: { ok: boolean; error?: string; error_hint?: string; result?: { stdout?: string } };
+  preflight?: {
+    ok: boolean;
+    checks?: Array<{ name: string; ok: boolean; message?: string }>;
+  };
+}> {
+  const res = await fetch(`${API_BASE}/v1/hosts/${encodeURIComponent(hostID)}/probe`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request ?? {})
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(`probe host failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
 }
 
 export async function runFanout(token: string, request: RunRequest): Promise<{ status: number; body: RunResponse }> {

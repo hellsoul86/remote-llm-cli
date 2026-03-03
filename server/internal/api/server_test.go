@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/hellsoul86/remote-llm-cli/server/internal/accesskey"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/executor"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/runtime"
@@ -243,6 +245,79 @@ func TestJobMatchesHost(t *testing.T) {
 	if jobMatchesHost(job, "h_3") {
 		t.Fatalf("job should not match host h_3")
 	}
+}
+
+func TestCORSPreflightReturnsNoContent(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	s := New(st, runtime.NewRegistry(runtime.NewCodexAdapter()))
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/runtimes", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want=%d", rr.Code, http.StatusNoContent)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("allow-origin=%q want=*", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); got == "" {
+		t.Fatalf("allow-headers should not be empty")
+	}
+}
+
+func TestCORSHeadersPresentOnAuthenticatedResponse(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	token := addTestAccessKey(t, st)
+	s := New(st, runtime.NewRegistry(runtime.NewCodexAdapter()))
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/runtimes", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("allow-origin=%q want=*", got)
+	}
+}
+
+func addTestAccessKey(t *testing.T, st *store.Store) string {
+	t.Helper()
+	full, prefix, secret, err := accesskey.Generate()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	hash, err := accesskey.HashSecret(secret)
+	if err != nil {
+		t.Fatalf("hash key: %v", err)
+	}
+	if err := st.AddKey(model.AccessKey{
+		ID:        "k_test",
+		Name:      "test",
+		Prefix:    prefix,
+		Hash:      hash,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	return full
 }
 
 func makeTestServerWithHosts(t *testing.T) (*Server, []model.Host) {
