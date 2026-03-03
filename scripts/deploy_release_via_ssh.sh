@@ -33,6 +33,8 @@ deploy_healthcheck_url="${DEPLOY_HEALTHCHECK_URL:-http://127.0.0.1:8080/v1/healt
 deploy_data_path="${DEPLOY_DATA_PATH:-${deploy_path}/shared/state.json}"
 deploy_runtime_config_path="${DEPLOY_RUNTIME_CONFIG_PATH:-}"
 deploy_addr="${DEPLOY_ADDR:-:8080}"
+deploy_web_root="${DEPLOY_WEB_ROOT:-}"
+deploy_web_reload_cmd="${DEPLOY_WEB_RELOAD_CMD:-}"
 
 remote="${DEPLOY_USER}@${DEPLOY_HOST}"
 remote_tmp_tgz="/tmp/remote-llm-release-${DEPLOY_RELEASE_ID}.tgz"
@@ -60,7 +62,9 @@ ssh "${ssh_opts[@]}" "${remote}" "bash -s -- \
   \"${deploy_runtime_config_path}\" \
   \"${deploy_addr}\" \
   \"${deploy_keep_releases}\" \
-  \"${deploy_healthcheck_url}\"" <<'REMOTE_SCRIPT'
+  \"${deploy_healthcheck_url}\" \
+  \"${deploy_web_root}\" \
+  \"${deploy_web_reload_cmd}\"" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 deploy_path="$1"
@@ -72,6 +76,8 @@ runtime_config_path="$6"
 listen_addr="$7"
 keep_releases="$8"
 healthcheck_url="$9"
+web_root="${10}"
+web_reload_cmd="${11}"
 
 run_user="$(id -un)"
 run_group="$(id -gn)"
@@ -131,6 +137,25 @@ SERVICE_UNIT
 ${SUDO} systemctl daemon-reload
 ${SUDO} systemctl enable "${service_name}" >/dev/null 2>&1 || true
 ${SUDO} systemctl restart "${service_name}"
+
+if [ -n "${web_root}" ] && [ -d "${release_dir}/web" ]; then
+  case "${web_root}" in
+    /|/bin|/etc|/home|/root|/sbin|/usr|/var)
+      echo "unsafe web_root path: ${web_root}" >&2
+      exit 1
+      ;;
+  esac
+  ${SUDO} mkdir -p "${web_root}"
+  if command -v rsync >/dev/null 2>&1; then
+    ${SUDO} rsync -a --delete "${release_dir}/web/" "${web_root}/"
+  else
+    ${SUDO} find "${web_root}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    ${SUDO} cp -a "${release_dir}/web/." "${web_root}/"
+  fi
+  if [ -n "${web_reload_cmd}" ]; then
+    ${SUDO} bash -lc "${web_reload_cmd}"
+  fi
+fi
 
 health_check_cmd() {
   if command -v curl >/dev/null 2>&1; then

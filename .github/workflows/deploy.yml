@@ -41,6 +41,13 @@ jobs:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Build binaries
         working-directory: server
         run: |
@@ -48,12 +55,19 @@ jobs:
           go build -trimpath -o ../dist/release/bin/remote-llm-server ./cmd/remote-llm-server
           go build -trimpath -o ../dist/release/bin/remote-llm-admin ./cmd/remote-llm-admin
 
+      - name: Build web dist
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
       - name: Package release
         run: |
-          mkdir -p dist/release/examples
+          mkdir -p dist/release/examples dist/release/web
           cp scripts/run-remote-llm-server.sh dist/release/bin/run-remote-llm-server.sh
           chmod +x dist/release/bin/run-remote-llm-server.sh
           cp examples/runtimes.example.json dist/release/examples/runtimes.example.json
+          cp -R web/dist/. dist/release/web/
           tar -C dist/release -czf dist/remote-llm-release.tgz .
 
       - name: Upload release artifact
@@ -139,6 +153,8 @@ jobs:
           DEPLOY_RUNTIME_CONFIG_PATH: ${{ matrix.target.runtime_config_path }}
           DEPLOY_KEEP_RELEASES: ${{ matrix.target.keep_releases || 5 }}
           DEPLOY_HEALTHCHECK_URL: ${{ matrix.target.healthcheck_url || 'http://127.0.0.1:8080/v1/healthz' }}
+          DEPLOY_WEB_ROOT: ${{ matrix.target.web_root }}
+          DEPLOY_WEB_RELOAD_CMD: ${{ matrix.target.web_reload_cmd }}
         run: |
           chmod +x scripts/deploy_release_via_ssh.sh
           scripts/deploy_release_via_ssh.sh

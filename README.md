@@ -90,7 +90,7 @@ Default API URL is `http://localhost:8080`.
 - Go TUI CLI for terminal-first operations (`server/cmd/remote-llm-cli`)
 - Web console MVP (health, runtime list, host list/add)
 - Operational runbook: [`docs/operations-runbook.md`](docs/operations-runbook.md)
-- Merge-triggered deploy workflow: [`docs/deployment-github-actions.md`](docs/deployment-github-actions.md)
+- Merge-triggered deploy workflow (backend service + optional web static publish): [`docs/deployment-github-actions.md`](docs/deployment-github-actions.md)
 
 ## TUI controls
 

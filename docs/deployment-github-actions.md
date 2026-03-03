@@ -43,6 +43,8 @@ Set the following in each environment.
     "data_path": "/opt/remote-llm-cli/shared/state.json",
     "runtime_config_path": "/opt/remote-llm-cli/shared/runtimes.json",
     "healthcheck_url": "http://127.0.0.1:8080/v1/healthz",
+    "web_root": "/var/www/remote-llm",
+    "web_reload_cmd": "systemctl reload nginx",
     "keep_releases": 5
   }
 ]
@@ -64,6 +66,10 @@ Optional keys:
 - `runtime_config_path` (default empty)
 - `healthcheck_url` (default `http://127.0.0.1:8080/v1/healthz`)
 - `keep_releases` (default `5`)
+- `web_root` (optional static site publish directory, e.g. `/var/www/remote-llm`)
+- `web_reload_cmd` (optional command after web publish, e.g. `systemctl reload nginx`)
+
+`web_root` must be a dedicated static directory (the deploy script rejects unsafe system paths like `/`, `/var`, `/usr`).
 
 ### 2.2 Secret: `DEPLOY_SSH_PRIVATE_KEY`
 
@@ -73,15 +79,16 @@ SSH private key content used by workflow to connect target hosts.
 
 Per workflow run:
 
-1. Build release artifact once (`remote-llm-server`, `remote-llm-admin`, and startup wrapper script).
+1. Build release artifact once (`remote-llm-server`, `remote-llm-admin`, startup wrapper script, and `web/dist`).
 2. Fan out deploy over host matrix from `DEPLOY_TARGETS`.
 3. Upload artifact to target host via SSH/SCP.
 4. Extract to release directory: `${deploy_path}/releases/<git-sha>`.
 5. Atomically switch `${deploy_path}/current` symlink to new release.
 6. Write `${deploy_path}/shared/server.env`.
 7. Create/update `systemd` service unit and restart.
-8. Health-check with retries.
-9. Keep only latest `keep_releases` release directories.
+8. If `web_root` is configured, publish static files to `web_root` and optionally execute `web_reload_cmd`.
+9. Health-check with retries.
+10. Keep only latest `keep_releases` release directories.
 
 ## 4. Manual redeploy
 
