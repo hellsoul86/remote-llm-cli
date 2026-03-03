@@ -137,10 +137,43 @@ function gatherMessageText(value: unknown, depth = 0): string[] {
   return out;
 }
 
+function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
+  const eventType = typeof event.type === "string" ? event.type : "";
+  if (eventType === "item.completed") {
+    const item = asRecord(event.item);
+    if (!item) return "";
+    const itemType = typeof item.type === "string" ? item.type : "";
+    const itemRole = typeof item.role === "string" ? item.role : "";
+    if (
+      itemType !== "" &&
+      itemType !== "agent_message" &&
+      itemType !== "assistant_message" &&
+      itemType !== "message" &&
+      itemRole !== "assistant"
+    ) {
+      return "";
+    }
+    return gatherMessageText(item)
+      .join("\n")
+      .trim();
+  }
+
+  if (eventType === "response.completed") {
+    const response = asRecord(event.response);
+    if (!response) return "";
+    return gatherMessageText(response)
+      .join("\n")
+      .trim();
+  }
+
+  return "";
+}
+
 function parseCodexAssistantTextFromStdout(stdout: string): string {
   if (!stdout.trim()) return "";
   const lines = stdout.split(/\r?\n/);
   const messages: string[] = [];
+  const plainLines: string[] = [];
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -148,23 +181,24 @@ function parseCodexAssistantTextFromStdout(stdout: string): string {
     try {
       parsed = JSON.parse(line);
     } catch {
+      plainLines.push(line);
       continue;
     }
     const event = asRecord(parsed);
     if (!event) continue;
-    if (event.type !== "item.completed") continue;
-    const item = asRecord(event.item);
-    if (!item) continue;
-    if (item.type !== "agent_message") continue;
-    const text = gatherMessageText(item)
-      .join("\n")
-      .trim();
+    const text = pickAssistantTextFromEvent(event);
     if (!text) continue;
     if (!messages.includes(text)) {
       messages.push(text);
     }
   }
-  return messages[messages.length - 1] ?? "";
+  if (messages.length > 0) {
+    return messages[messages.length - 1] ?? "";
+  }
+  if (plainLines.length > 0) {
+    return plainLines.join("\n").trim();
+  }
+  return "";
 }
 
 function extractAssistantTextFromJob(job: RunJobRecord): string {
