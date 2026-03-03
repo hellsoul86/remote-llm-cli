@@ -261,12 +261,15 @@ test("queues async run job and observes terminal success", async ({ page }) => {
 
   await expect(page.getByRole("button", { name: "Session 1" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
-  await page.getByPlaceholder("Tell codex what to do in this workspace...").fill("smoke");
-  await page.getByRole("button", { name: "Send" }).click();
+  const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+  await composer.fill("smoke");
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
   expect(observedSkipGitRepoCheck).toBe(true);
 
   await expect(page.getByText(/stream-one/)).toBeVisible();
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
+  await expect(page.getByText(/^stream-one$/)).toHaveCount(1);
   await expect(
     page
       .locator("section")
