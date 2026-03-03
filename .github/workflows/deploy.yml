@@ -177,6 +177,56 @@ jobs:
             exit 1
           fi
 
+      - name: Ensure Cloudflare Pages project exists
+        env:
+          CF_PAGES_PROJECT: ${{ secrets.CF_PAGES_PROJECT }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_PAGES_BRANCH: ${{ vars.CF_PAGES_BRANCH }}
+        run: |
+          set -euo pipefail
+          project_api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${CF_PAGES_PROJECT}"
+          create_api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects"
+          deploy_branch="${CF_PAGES_BRANCH:-${GITHUB_REF_NAME}}"
+
+          read_api_resp="$(mktemp)"
+          read_status="$(curl -sS -o "${read_api_resp}" -w "%{http_code}" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${project_api}")"
+
+          if [ "${read_status}" = "200" ] && jq -e '.success == true' "${read_api_resp}" >/dev/null; then
+            echo "Cloudflare Pages project exists: ${CF_PAGES_PROJECT}"
+            exit 0
+          fi
+
+          if [ "${read_status}" != "404" ]; then
+            echo "::error::unexpected response checking pages project (${read_status})"
+            cat "${read_api_resp}"
+            exit 1
+          fi
+
+          payload="$(jq -nc --arg name "${CF_PAGES_PROJECT}" --arg branch "${deploy_branch}" '{name: $name, production_branch: $branch}')"
+          create_resp="$(mktemp)"
+          create_status="$(curl -sS -o "${create_resp}" -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "${payload}" \
+            "${create_api}")"
+
+          if [ "${create_status}" != "200" ] && [ "${create_status}" != "201" ]; then
+            echo "::error::failed to create pages project (${create_status})"
+            cat "${create_resp}"
+            exit 1
+          fi
+          if ! jq -e '.success == true' "${create_resp}" >/dev/null; then
+            echo "::error::create pages project returned success=false"
+            cat "${create_resp}"
+            exit 1
+          fi
+          echo "Created Cloudflare Pages project: ${CF_PAGES_PROJECT} (production_branch=${deploy_branch})"
+
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
