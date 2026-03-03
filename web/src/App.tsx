@@ -76,6 +76,8 @@ type SessionRunStreamState = {
   failureHints: string[];
 };
 
+const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
+
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
   if (!job) return false;
   return job.status === "pending" || job.status === "running";
@@ -421,6 +423,7 @@ export function App() {
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
+  const jobNoTextFinalizeRetriesRef = useRef<Map<string, number>>(new Map());
   const sessionEventCursorRef = useRef<Map<string, number>>(new Map());
   const sessionStreamStateRef = useRef<Map<string, { controller: AbortController; ready: boolean; lastEventAt: number }>>(new Map());
   const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(new Map());
@@ -837,6 +840,12 @@ export function App() {
     });
   }
 
+  function waitFor(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
   function sessionPayloadRecord(event: SessionEventRecord): Record<string, unknown> {
     return asRecord(event.payload) ?? {};
   }
@@ -875,12 +884,6 @@ export function App() {
     });
   }
 
-  function isSessionStreamHealthy(sessionID: string): boolean {
-    const state = sessionStreamStateRef.current.get(sessionID);
-    if (!state || !state.ready) return false;
-    return Date.now() - state.lastEventAt < 45000;
-  }
-
   function stopSessionStream(sessionID: string) {
     const state = sessionStreamStateRef.current.get(sessionID);
     if (!state) return;
@@ -898,6 +901,9 @@ export function App() {
   }
 
   async function finalizeStreamCompleted(sessionID: string, runID: string) {
+    if (runID && completedJobsRef.current.has(runID)) {
+      return;
+    }
     const state = sessionRunStateRef.current.get(sessionID);
     let assistantText = state ? parseCodexAssistantTextFromStdout(state.stdout, false) : "";
     let failureSummary = state?.failureHints.join("\n") ?? "";
@@ -905,19 +911,33 @@ export function App() {
 
     const authToken = tokenRef.current.trim();
     if (authToken && runID) {
-      try {
-        const job = await getRunJob(authToken, runID);
-        if (!assistantText) {
-          assistantText = extractAssistantTextFromJob(job);
+      const retryDelaysMS = assistantText ? [0] : [0, 200, 350, 550, 900, 1300];
+      for (let attempt = 0; attempt < retryDelaysMS.length; attempt += 1) {
+        const delay = retryDelaysMS[attempt] ?? 0;
+        if (delay > 0) {
+          await waitFor(delay);
         }
-        if (jobHasTargetFailures(job)) {
-          failed = true;
-          if (!failureSummary) {
-            failureSummary = summarizeTargetFailures(job) || (job.error ? String(job.error) : "");
+        try {
+          const job = await getRunJob(authToken, runID);
+          if (!assistantText) {
+            assistantText = extractAssistantTextFromJob(job);
+          }
+          if (jobHasTargetFailures(job)) {
+            failed = true;
+            if (!failureSummary) {
+              failureSummary = summarizeTargetFailures(job) || (job.error ? String(job.error) : "");
+            }
+          }
+          const hasResponseTargets = Boolean(job.response && "targets" in job.response && Array.isArray(job.response.targets));
+          const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
+          if (assistantText || failed || (terminal && hasResponseTargets)) {
+            break;
+          }
+        } catch {
+          if (attempt === retryDelaysMS.length - 1) {
+            break;
           }
         }
-      } catch {
-        // best-effort; session stream remains source of truth.
       }
     }
 
@@ -944,24 +964,22 @@ export function App() {
     }
 
     setThreadJobState(sessionID, "", "succeeded");
-    if (!state?.assistantFinalized) {
-      if (assistantText.trim()) {
-        if (state?.streamSeen) {
-          finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(assistantText));
-        } else {
-          addTimelineEntry(
-            {
-              kind: "assistant",
-              state: "success",
-              title: "Assistant",
-              body: assistantText
-            },
-            sessionID
-          );
-        }
-      } else if (state?.streamSeen) {
-        finalizeAssistantStreamEntry(sessionID, "success");
+    if (assistantText.trim()) {
+      if (state?.streamSeen) {
+        finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(assistantText));
+      } else if (!state?.assistantFinalized) {
+        addTimelineEntry(
+          {
+            kind: "assistant",
+            state: "success",
+            title: "Assistant",
+            body: assistantText
+          },
+          sessionID
+        );
       }
+    } else if (state?.streamSeen && !state?.assistantFinalized) {
+      finalizeAssistantStreamEntry(sessionID, "success", EMPTY_ASSISTANT_FALLBACK);
     }
     markSessionDone(sessionID, runID, "succeeded");
     if (sessionID !== activeThreadIDRef.current) {
@@ -1017,10 +1035,12 @@ export function App() {
         if (contentOnly.trim()) {
           state.streamSeen = true;
           finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(contentOnly));
-        } else if (state.streamSeen) {
-          finalizeAssistantStreamEntry(sessionID, "success");
+          state.assistantFinalized = true;
+          return;
         }
-        state.assistantFinalized = true;
+        // Keep stream entry in running state when content is unavailable here.
+        // run.completed/job.succeeded handler will perform job-response fallback.
+        state.assistantFinalized = false;
         return;
       }
       case "target.done": {
@@ -1036,7 +1056,8 @@ export function App() {
         }
         return;
       }
-      case "run.failed": {
+      case "run.failed":
+      case "job.failed": {
         const id = runID || `run_${Date.now()}`;
         const state = ensureSessionRunState(sessionID, id);
         const errText = typeof payload.error === "string" && payload.error.trim() ? payload.error.trim() : "Session failed.";
@@ -1060,7 +1081,8 @@ export function App() {
         sessionRunStateRef.current.delete(sessionID);
         return;
       }
-      case "run.canceled": {
+      case "run.canceled":
+      case "job.canceled": {
         const id = runID || `run_${Date.now()}`;
         const state = ensureSessionRunState(sessionID, id);
         if (state.streamSeen) {
@@ -1083,7 +1105,8 @@ export function App() {
         sessionRunStateRef.current.delete(sessionID);
         return;
       }
-      case "run.completed": {
+      case "run.completed":
+      case "job.succeeded": {
         if (!runID) return;
         await finalizeStreamCompleted(sessionID, runID);
         return;
@@ -1383,6 +1406,7 @@ export function App() {
     if (appMode !== "session") return;
     if (!runtimes.some((runtime) => runtime.name === "codex")) return;
     if (hosts.length === 0) return;
+    if (runningThreadJobs.length > 0 || submittingThreadID !== "") return;
 
     let canceled = false;
     const refresh = async () => {
@@ -1402,7 +1426,7 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, appMode, hosts, runtimes]);
+  }, [authPhase, token, appMode, hosts, runtimes, runningThreadJobs.length, submittingThreadID]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1491,11 +1515,11 @@ export function App() {
 
     let canceled = false;
     const poll = async () => {
-      const fallbackJobs = runningThreadJobs.filter((item) => !isSessionStreamHealthy(item.threadID));
-      if (fallbackJobs.length === 0) return;
+      const pollingJobs = runningThreadJobs;
+      if (pollingJobs.length === 0) return;
       try {
         const jobResults = await Promise.all(
-          fallbackJobs.map(async (item) => {
+          pollingJobs.map(async (item) => {
             try {
               const after = jobEventCursorRef.current.get(item.jobID) ?? 0;
               const [job, eventFeed] = await Promise.all([
@@ -1533,6 +1557,7 @@ export function App() {
             continue;
           }
           jobEventCursorRef.current.set(item.jobID, nextAfter);
+          const alreadyCompleted = completedJobsRef.current.has(item.jobID);
 
           let stdoutStream = "";
           const terminalHints: string[] = [];
@@ -1550,7 +1575,7 @@ export function App() {
               if (line) terminalHints.push(line);
             }
           }
-          if (showLiveStream && stdoutStream.trim()) {
+          if (!alreadyCompleted && showLiveStream && stdoutStream.trim()) {
             if (job.runtime === "codex") {
               const contentOnly = parseCodexAssistantTextFromStdout(stdoutStream, false);
               if (contentOnly.trim()) {
@@ -1587,10 +1612,22 @@ export function App() {
             continue;
           }
 
+          const responseFailed = jobHasTargetFailures(job);
+          const assistantText = job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
+          if (job.runtime === "codex" && job.status === "succeeded" && !responseFailed && !assistantText.trim()) {
+            const retries = jobNoTextFinalizeRetriesRef.current.get(job.id) ?? 0;
+            if (retries < 4) {
+              jobNoTextFinalizeRetriesRef.current.set(job.id, retries + 1);
+              setThreadJobState(item.threadID, job.id, "running");
+              continue;
+            }
+          } else {
+            jobNoTextFinalizeRetriesRef.current.delete(job.id);
+          }
+
           if (job.runtime === "codex") {
             needsProjectRefresh = true;
           }
-          const responseFailed = jobHasTargetFailures(job);
           const terminalStatus =
             job.status === "failed" || job.status === "canceled"
               ? job.status
@@ -1601,15 +1638,28 @@ export function App() {
                   : "failed";
           setThreadJobState(item.threadID, "", terminalStatus);
           jobEventCursorRef.current.delete(item.jobID);
+          jobNoTextFinalizeRetriesRef.current.delete(job.id);
           const sawStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
           jobStreamSeenRef.current.delete(item.jobID);
           if (item.threadID !== activeThreadID) {
             setThreadUnread(item.threadID, true);
           }
 
-          if (!completedJobsRef.current.has(job.id)) {
-            completedJobsRef.current.add(job.id);
-            const assistantText = job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
+          if (completedJobsRef.current.has(job.id)) {
+            if (job.status === "succeeded") {
+              if (assistantText) {
+                if (sawStream) {
+                  finalizeAssistantStreamEntry(item.threadID, "success", assistantText);
+                }
+              } else if (sawStream) {
+                finalizeAssistantStreamEntry(item.threadID, "success", EMPTY_ASSISTANT_FALLBACK);
+              }
+            }
+            continue;
+          }
+
+          completedJobsRef.current.add(job.id);
+          {
             const failedSummary = summarizeTargetFailures(job);
             if (job.status === "failed" || job.status === "canceled" || responseFailed) {
               if (sawStream) {
@@ -1639,7 +1689,7 @@ export function App() {
                 );
               }
             } else if (sawStream) {
-              finalizeAssistantStreamEntry(item.threadID, "success");
+              finalizeAssistantStreamEntry(item.threadID, "success", EMPTY_ASSISTANT_FALLBACK);
             }
             const sessionTitle = threadTitleMapRef.current.get(item.threadID) ?? "Session";
             notifySessionDone(`Codex ${job.status}`, `${sessionTitle}: ${job.id}`);
@@ -1741,6 +1791,7 @@ export function App() {
     resetSessionDomain();
     jobEventCursorRef.current.clear();
     jobStreamSeenRef.current.clear();
+    jobNoTextFinalizeRetriesRef.current.clear();
     sessionEventCursorRef.current.clear();
     sessionRunStateRef.current.clear();
     setSubmittingThreadID("");
@@ -2149,6 +2200,7 @@ export function App() {
                                     key={sessionNode.id}
                                     type="button"
                                     className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
+                                    data-session-id={sessionNode.id}
                                     onClick={() => activateThread(sessionNode.id)}
                                     title={sessionNode.title}
                                   >
