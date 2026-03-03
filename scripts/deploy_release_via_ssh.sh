@@ -108,6 +108,17 @@ ${SUDO} ln -sfn "${release_dir}" "${current_link}"
 
 ${SUDO} mkdir -p "$(dirname "${data_path}")"
 ${SUDO} touch "${data_path}"
+if [ -n "${runtime_config_path}" ]; then
+  ${SUDO} mkdir -p "$(dirname "${runtime_config_path}")"
+  if [ ! -f "${runtime_config_path}" ]; then
+    if [ -f "${current_link}/examples/runtimes.example.json" ]; then
+      ${SUDO} cp "${current_link}/examples/runtimes.example.json" "${runtime_config_path}"
+    else
+      echo "runtime config missing and no example file found in release package" >&2
+      exit 1
+    fi
+  fi
+fi
 ${SUDO} tee "${env_file}" >/dev/null <<ENV_FILE
 REMOTE_LLM_ADDR=${listen_addr}
 REMOTE_LLM_DATA_PATH=${data_path}
