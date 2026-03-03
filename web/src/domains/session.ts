@@ -531,6 +531,16 @@ export function useSessionDomain() {
     }));
   }
 
+  function setThreadTitle(threadID: string, title: string) {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      title: trimmed,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
   function syncProjectsFromDiscovery(projects: DiscoveredProject[]) {
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
@@ -687,6 +697,7 @@ export function useSessionDomain() {
     removeThreadImagePath,
     setThreadJobState,
     setThreadUnread,
+    setThreadTitle,
     syncProjectsFromDiscovery,
     resetSessionDomain
   };
