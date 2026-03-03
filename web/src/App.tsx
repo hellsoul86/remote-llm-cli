@@ -223,6 +223,33 @@ function extractAssistantTextFromJob(job: RunJobRecord): string {
   return targetMessages.join("\n\n").trim();
 }
 
+function jobHasTargetFailures(job: RunJobRecord): boolean {
+  const response = job.response;
+  if (!response || !("summary" in response) || !("targets" in response)) return false;
+  const failedCount = typeof response.summary?.failed === "number" ? response.summary.failed : 0;
+  if (failedCount > 0) return true;
+  if (!Array.isArray(response.targets)) return false;
+  return response.targets.some((target) => target?.ok === false);
+}
+
+function summarizeTargetFailures(job: RunJobRecord): string {
+  const response = job.response;
+  if (!response || !("targets" in response) || !Array.isArray(response.targets)) return "";
+  const lines: string[] = [];
+  for (const target of response.targets) {
+    if (target?.ok !== false) continue;
+    const hostName = target.host?.name?.trim() || target.host?.id || "target";
+    const parts = [`${hostName} failed`];
+    if (target.error) parts.push(`error=${target.error}`);
+    if (target.error_hint) parts.push(`hint=${target.error_hint}`);
+    if (typeof target.result?.stderr === "string" && target.result.stderr.trim()) {
+      parts.push(`stderr=${clipStreamText(target.result.stderr.trim(), 1000)}`);
+    }
+    lines.push(parts.join(" "));
+  }
+  return lines.join("\n");
+}
+
 function formatClock(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
@@ -898,6 +925,10 @@ export function App() {
             if (event.type === "target.stdout" && typeof event.chunk === "string") {
               stdoutStream += event.chunk;
             }
+            if (event.type === "target.done" && event.status && event.status !== "ok") {
+              const line = summarizeJobEventLine(event);
+              if (line) terminalHints.push(line);
+            }
             if (event.type === "job.failed" || event.type === "job.canceled" || event.type === "job.cancel_requested") {
               const line = summarizeJobEventLine(event);
               if (line) terminalHints.push(line);
@@ -937,8 +968,15 @@ export function App() {
             continue;
           }
 
+          const responseFailed = jobHasTargetFailures(job);
           const terminalStatus =
-            job.status === "succeeded" || job.status === "failed" || job.status === "canceled" ? job.status : "failed";
+            job.status === "failed" || job.status === "canceled"
+              ? job.status
+              : responseFailed
+                ? "failed"
+                : job.status === "succeeded"
+                  ? "succeeded"
+                  : "failed";
           setThreadJobState(item.threadID, "", terminalStatus);
           jobEventCursorRef.current.delete(item.jobID);
           const sawStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
@@ -950,13 +988,14 @@ export function App() {
           if (!completedJobsRef.current.has(job.id)) {
             completedJobsRef.current.add(job.id);
             const assistantText = job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
-            if (job.status === "failed" || job.status === "canceled") {
+            const failedSummary = summarizeTargetFailures(job);
+            if (job.status === "failed" || job.status === "canceled" || responseFailed) {
               addTimelineEntry(
                 {
                   kind: "system",
                   state: "error",
                   title: "System",
-                  body: job.error ? String(job.error) : "Session failed."
+                  body: failedSummary || (job.error ? String(job.error) : "Session failed.")
                 },
                 item.threadID
               );
