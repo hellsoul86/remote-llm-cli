@@ -931,9 +931,7 @@ test("command palette executes session and model actions", async ({ page }) => {
   await paletteInput.press("ArrowDown");
   await paletteInput.press("Enter");
   await expect(page.locator(".command-palette-backdrop")).toHaveCount(0);
-  await expect(page.locator(".session-inline-settings select").first()).toHaveValue(
-    "gpt-5",
-  );
+  await expect(page.getByTestId("session-model-select")).toHaveValue("gpt-5");
 
   await page.keyboard.press("Control+k");
   await expect(paletteInput).toBeVisible();
@@ -989,6 +987,89 @@ test("advanced codex controls map into run payload", async ({ page }) => {
     const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
     return Boolean(req?.codex?.json_output);
   }).toBe(true);
+});
+
+test("resume mode maps resume selector into run payload", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `RESUME_${Date.now()}`;
+  const harness = await mockSessionApi(page, `resume ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByTestId("lifecycle-mode-select").selectOption("resume");
+  const resumeLastToggle = page.getByTestId("resume-last-toggle");
+  await resumeLastToggle.uncheck();
+  await page
+    .getByTestId("resume-session-id-input")
+    .fill("019cb3d9-002a-7b22-969e-ef24dcad7b7c");
+  const composer = page.getByPlaceholder("Optional follow-up prompt for resume...");
+  await composer.fill("");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return String(req?.codex?.mode ?? "");
+  }).toBe("resume");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return Boolean(req?.codex?.resume_last);
+  }).toBe(false);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return String(req?.codex?.session_id ?? "");
+  }).toBe("019cb3d9-002a-7b22-969e-ef24dcad7b7c");
+});
+
+test("review mode maps review options into run payload", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_${Date.now()}`;
+  const harness = await mockSessionApi(page, `review ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByTestId("lifecycle-mode-select").selectOption("review");
+  await page.getByTestId("review-uncommitted-toggle").check();
+  await page.getByTestId("review-base-input").fill("main");
+  await page.getByTestId("review-commit-input").fill("abc1234");
+  await page.getByTestId("review-title-input").fill("Release review");
+
+  const composer = page.getByPlaceholder("Optional review prompt...");
+  await composer.fill("focus on risky migrations");
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return String(req?.codex?.mode ?? "");
+  }).toBe("review");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return Boolean(req?.codex?.review_uncommitted);
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return String(req?.codex?.review_base ?? "");
+  }).toBe("main");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return String(req?.codex?.review_commit ?? "");
+  }).toBe("abc1234");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return String(req?.codex?.review_title ?? "");
+  }).toBe("Release review");
+});
+
+test("fork session creates a branch session in project list", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `FORK_${Date.now()}`;
+  await mockSessionApi(page, `fork ${marker}`, marker);
+  await unlock(page);
+
+  const sessionChips = page.locator(".project-session-list .session-chip-tree");
+  const initialCount = await sessionChips.count();
+  await page.getByTestId("fork-session-btn").click();
+  await expect.poll(async () => sessionChips.count()).toBe(initialCount + 1);
+  await expect(page.getByRole("heading", { name: /Fork · Session 1/ })).toBeVisible();
 });
 
 test("session stream completion keeps a single assistant reply", async ({
@@ -1314,8 +1395,8 @@ test("running state locks session controls then unlocks on completion", async ({
     "Tell codex what to do in this workspace...",
   );
   const runningButton = page.getByRole("button", { name: "Running..." });
-  const modelSelect = page.locator(".session-inline-settings select").first();
-  const sandboxSelect = page.locator(".session-inline-settings select").nth(1);
+  const modelSelect = page.getByTestId("session-model-select");
+  const sandboxSelect = page.getByTestId("session-sandbox-select");
   const attachInput = page.locator('.file-chip input[type="file"]');
 
   await composer.fill(`reply once with marker: ${marker}`);

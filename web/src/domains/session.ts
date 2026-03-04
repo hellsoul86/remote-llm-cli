@@ -19,6 +19,8 @@ export type CodexApprovalPolicy =
   | "on-request"
   | "never";
 
+export type CodexSessionMode = "exec" | "resume" | "review";
+
 export type ConversationThread = {
   id: string;
   title: string;
@@ -27,6 +29,13 @@ export type ConversationThread = {
   createdAt: string;
   updatedAt: string;
   model: string;
+  codexMode: CodexSessionMode;
+  resumeLast: boolean;
+  resumeSessionID: string;
+  reviewUncommitted: boolean;
+  reviewBase: string;
+  reviewCommit: string;
+  reviewTitle: string;
   sandbox: "" | "read-only" | "workspace-write" | "danger-full-access";
   approvalPolicy: CodexApprovalPolicy;
   webSearch: boolean;
@@ -100,6 +109,20 @@ function normalizeApprovalPolicy(raw: unknown): CodexApprovalPolicy {
   return "";
 }
 
+function normalizeSessionMode(raw: unknown): CodexSessionMode {
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (value === "resume" || value === "review") {
+    return value;
+  }
+  return "exec";
+}
+
+function forkTitleFromSource(sourceTitle: string, fallbackIndex: number): string {
+  const trimmed = sourceTitle.trim();
+  if (!trimmed) return `Fork ${fallbackIndex}`;
+  return `Fork · ${trimmed}`;
+}
+
 function createSession(index: number, title?: string): ConversationThread {
   const now = new Date().toISOString();
   return {
@@ -110,6 +133,13 @@ function createSession(index: number, title?: string): ConversationThread {
     createdAt: now,
     updatedAt: now,
     model: "",
+    codexMode: "exec",
+    resumeLast: true,
+    resumeSessionID: "",
+    reviewUncommitted: false,
+    reviewBase: "",
+    reviewCommit: "",
+    reviewTitle: "",
     sandbox: "workspace-write",
     approvalPolicy: "",
     webSearch: false,
@@ -118,6 +148,27 @@ function createSession(index: number, title?: string): ConversationThread {
     ephemeral: false,
     jsonOutput: true,
     imagePaths: [],
+    activeJobID: "",
+    lastJobStatus: "idle",
+    unreadDone: false,
+    pinned: false
+  };
+}
+
+function createForkSession(
+  source: ConversationThread,
+  index: number,
+): ConversationThread {
+  const now = new Date().toISOString();
+  return {
+    ...source,
+    id: `session_${Date.now()}_${index}`,
+    title: forkTitleFromSource(source.title, index),
+    timeline: source.timeline.map((entry) => ({ ...entry })),
+    addDirs: [...source.addDirs],
+    imagePaths: [...source.imagePaths],
+    createdAt: now,
+    updatedAt: now,
     activeJobID: "",
     lastJobStatus: "idle",
     unreadDone: false,
@@ -194,6 +245,18 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : now,
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : now,
     model: typeof candidate.model === "string" ? candidate.model : "",
+    codexMode: normalizeSessionMode(candidate.codexMode),
+    resumeLast:
+      typeof candidate.resumeLast === "boolean" ? candidate.resumeLast : true,
+    resumeSessionID:
+      typeof candidate.resumeSessionID === "string"
+        ? candidate.resumeSessionID
+        : "",
+    reviewUncommitted: Boolean(candidate.reviewUncommitted),
+    reviewBase: typeof candidate.reviewBase === "string" ? candidate.reviewBase : "",
+    reviewCommit:
+      typeof candidate.reviewCommit === "string" ? candidate.reviewCommit : "",
+    reviewTitle: typeof candidate.reviewTitle === "string" ? candidate.reviewTitle : "",
     sandbox: safeSandbox,
     approvalPolicy: normalizeApprovalPolicy(candidate.approvalPolicy),
     webSearch: Boolean(candidate.webSearch),
@@ -533,6 +596,35 @@ export function useSessionDomain() {
     setThreadRenameDraft(next.title);
   }
 
+  function forkThread(threadID: string) {
+    const sourceID = threadID.trim();
+    if (!sourceID) return;
+    const workspace = workspaces.find((item) =>
+      item.sessions.some((thread) => thread.id === sourceID),
+    );
+    if (!workspace) return;
+    const source = workspace.sessions.find((thread) => thread.id === sourceID);
+    if (!source) return;
+
+    sessionCounterRef.current += 1;
+    const idx = sessionCounterRef.current;
+    const forked = createForkSession(source, idx);
+
+    setWorkspaces((prev) =>
+      prev.map((item) => {
+        if (item.id !== workspace.id) return item;
+        return {
+          ...item,
+          sessions: [...item.sessions, forked],
+          activeSessionID: forked.id,
+          updatedAt: new Date().toISOString()
+        };
+      })
+    );
+    setActiveWorkspaceID(workspace.id);
+    setThreadRenameDraft(forked.title);
+  }
+
   function removeThread(threadID: string) {
     const targetID = threadID.trim();
     if (!targetID) return;
@@ -635,6 +727,63 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       model,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadCodexMode(threadID: string, mode: CodexSessionMode) {
+    const safeMode = normalizeSessionMode(mode);
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      codexMode: safeMode,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadResumeLast(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      resumeLast: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadResumeSessionID(threadID: string, sessionID: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      resumeSessionID: sessionID,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadReviewUncommitted(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      reviewUncommitted: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadReviewBase(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      reviewBase: value,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadReviewCommit(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      reviewCommit: value,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadReviewTitle(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      reviewTitle: value,
       updatedAt: new Date().toISOString()
     }));
   }
@@ -816,6 +965,13 @@ export function useSessionDomain() {
           createdAt,
           updatedAt,
           model: prior?.model ?? "",
+          codexMode: prior?.codexMode ?? "exec",
+          resumeLast: prior?.resumeLast ?? true,
+          resumeSessionID: prior?.resumeSessionID ?? "",
+          reviewUncommitted: prior?.reviewUncommitted ?? false,
+          reviewBase: prior?.reviewBase ?? "",
+          reviewCommit: prior?.reviewCommit ?? "",
+          reviewTitle: prior?.reviewTitle ?? "",
           sandbox: prior?.sandbox ?? "workspace-write",
           approvalPolicy: prior?.approvalPolicy ?? "",
           webSearch: prior?.webSearch ?? false,
@@ -932,10 +1088,18 @@ export function useSessionDomain() {
     upsertAssistantStreamEntry,
     finalizeAssistantStreamEntry,
     createThread,
+    forkThread,
     removeThread,
     renameThread,
     switchThreadByOffset,
     setThreadModel,
+    setThreadCodexMode,
+    setThreadResumeLast,
+    setThreadResumeSessionID,
+    setThreadReviewUncommitted,
+    setThreadReviewBase,
+    setThreadReviewCommit,
+    setThreadReviewTitle,
     setThreadSandbox,
     setThreadApprovalPolicy,
     setThreadWebSearch,
