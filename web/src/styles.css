@@ -67,7 +67,9 @@ button {
   color: #f4fffd;
   background: var(--brand);
   cursor: pointer;
-  transition: background-color 140ms ease, transform 140ms ease;
+  transition:
+    background-color 140ms ease,
+    transform 140ms ease;
 }
 
 button:hover {
@@ -110,7 +112,13 @@ pre {
   position: absolute;
   inset: -30% -20%;
   background:
-    repeating-linear-gradient(125deg, rgba(255, 255, 255, 0.18) 0, rgba(255, 255, 255, 0.18) 4px, transparent 4px, transparent 11px),
+    repeating-linear-gradient(
+      125deg,
+      rgba(255, 255, 255, 0.18) 0,
+      rgba(255, 255, 255, 0.18) 4px,
+      transparent 4px,
+      transparent 11px
+    ),
     radial-gradient(closest-side, rgba(23, 66, 115, 0.15), transparent 70%);
   filter: blur(2px);
   animation: drift 14s linear infinite;
@@ -601,6 +609,12 @@ button.ghost.danger-ghost:hover {
   overflow: auto;
 }
 
+.tree-filter input {
+  border-radius: 9px;
+  padding: 8px 10px;
+  font-size: 0.76rem;
+}
+
 .project-host-group {
   border: 1px solid #e2e8f0;
   border-radius: 10px;
@@ -613,6 +627,19 @@ button.ghost.danger-ghost:hover {
 .project-host-head {
   display: grid;
   gap: 2px;
+}
+
+.project-host-headline {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.host-toggle {
+  justify-self: start;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
 }
 
 .project-host-head strong {
@@ -810,6 +837,12 @@ button.ghost.danger-ghost:hover {
   gap: 10px;
 }
 
+.message-running .message-title-row h4::after {
+  content: " ...";
+  color: #6b7280;
+  animation: typingPulse 1.2s ease-in-out infinite;
+}
+
 .message h4 {
   font-size: 0.84rem;
   font-weight: 600;
@@ -827,6 +860,11 @@ button.ghost.danger-ghost:hover {
   line-height: 1.58;
 }
 
+.message-body {
+  display: grid;
+  gap: 8px;
+}
+
 .message-user pre,
 .message-assistant pre {
   font-family: "Sora", "Segoe UI", sans-serif;
@@ -835,6 +873,33 @@ button.ghost.danger-ghost:hover {
 .message-system pre {
   font-size: 0.78rem;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.message-code-block {
+  border: 1px solid #dbe4f0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #f8fbff;
+}
+
+.message-code-head {
+  padding: 6px 9px;
+  font-size: 0.66rem;
+  color: #506581;
+  border-bottom: 1px solid #dbe4f0;
+  background: #eef4fc;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.message-code-pre {
+  margin: 0;
+  padding: 10px 11px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.77rem;
+  line-height: 1.5;
+  overflow-x: auto;
 }
 
 .composer {
@@ -1111,6 +1176,16 @@ button.ghost.danger-ghost:hover {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes typingPulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.9;
   }
 }
 

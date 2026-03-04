@@ -30,7 +30,7 @@ import {
   type RunJobEvent,
   type RunJobRecord,
   type RunRequest,
-  type RunResponse
+  type RunResponse,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
 import { useSessionDomain } from "./domains/session";
@@ -86,7 +86,7 @@ function summarizeRunResponse(response: RunResponse): string {
   const lines = [
     `runtime=${response.runtime}`,
     `total=${response.summary.total} succeeded=${response.summary.succeeded} failed=${response.summary.failed}`,
-    `fanout=${response.summary.fanout} duration=${response.summary.duration_ms}ms`
+    `fanout=${response.summary.fanout} duration=${response.summary.duration_ms}ms`,
   ];
   for (const target of response.targets) {
     const status = target.ok ? "ok" : "failed";
@@ -107,7 +107,12 @@ function summarizeJobEventLine(event: RunJobEvent): string {
       if ((event.status ?? "").toLowerCase() === "ok") {
         return `${host} completed.`;
       }
-      return [host, "failed", typeof event.exit_code === "number" ? `exit ${event.exit_code}` : "", event.error || ""]
+      return [
+        host,
+        "failed",
+        typeof event.exit_code === "number" ? `exit ${event.exit_code}` : "",
+        event.error || "",
+      ]
         .filter((part) => part.trim() !== "")
         .join(" · ");
     case "job.cancel_requested":
@@ -123,12 +128,18 @@ function summarizeJobEventLine(event: RunJobEvent): string {
   }
 }
 
-function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): { suffix: string; body: string } {
+function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): {
+  suffix: string;
+  body: string;
+} {
   switch (status) {
     case "succeeded":
       return { suffix: "completed", body: "New response is ready." };
     case "failed":
-      return { suffix: "failed", body: "Response failed. Open this session for details." };
+      return {
+        suffix: "failed",
+        body: "Response failed. Open this session for details.",
+      };
     case "canceled":
       return { suffix: "canceled", body: "Response was canceled." };
     default:
@@ -187,17 +198,13 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
     ) {
       return "";
     }
-    return gatherMessageText(item)
-      .join("\n")
-      .trim();
+    return gatherMessageText(item).join("\n").trim();
   }
 
   if (eventType === "response.completed") {
     const response = asRecord(event.response);
     if (!response) return "";
-    return gatherMessageText(response)
-      .join("\n")
-      .trim();
+    return gatherMessageText(response).join("\n").trim();
   }
 
   return "";
@@ -214,7 +221,10 @@ function isProtocolNoiseLine(line: string): boolean {
   return false;
 }
 
-function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallback = true): string {
+function parseCodexAssistantTextFromStdout(
+  stdout: string,
+  allowPlainTextFallback = true,
+): string {
   if (!stdout.trim()) return "";
   const lines = stdout.split(/\r?\n/);
   const messages: string[] = [];
@@ -261,7 +271,12 @@ function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallbac
 
 function extractAssistantTextFromJob(job: RunJobRecord): string {
   const response = job.response;
-  if (!response || !("targets" in response) || !Array.isArray(response.targets) || response.targets.length === 0) {
+  if (
+    !response ||
+    !("targets" in response) ||
+    !Array.isArray(response.targets) ||
+    response.targets.length === 0
+  ) {
     return "";
   }
   const targetMessages: string[] = [];
@@ -269,7 +284,9 @@ function extractAssistantTextFromJob(job: RunJobRecord): string {
   for (const target of response.targets) {
     const stdout = target?.result?.stdout;
     if (typeof stdout !== "string" || !stdout.trim()) continue;
-    const assistantText = parseCodexAssistantTextFromStdout(stdout, false) || parseCodexAssistantTextFromStdout(stdout, true);
+    const assistantText =
+      parseCodexAssistantTextFromStdout(stdout, false) ||
+      parseCodexAssistantTextFromStdout(stdout, true);
     if (!assistantText) continue;
     if (multiTarget) {
       const hostName = target.host?.name?.trim() || target.host?.id || "target";
@@ -283,8 +300,10 @@ function extractAssistantTextFromJob(job: RunJobRecord): string {
 
 function jobHasTargetFailures(job: RunJobRecord): boolean {
   const response = job.response;
-  if (!response || !("summary" in response) || !("targets" in response)) return false;
-  const failedCount = typeof response.summary?.failed === "number" ? response.summary.failed : 0;
+  if (!response || !("summary" in response) || !("targets" in response))
+    return false;
+  const failedCount =
+    typeof response.summary?.failed === "number" ? response.summary.failed : 0;
   if (failedCount > 0) return true;
   if (!Array.isArray(response.targets)) return false;
   return response.targets.some((target) => target?.ok === false);
@@ -292,7 +311,8 @@ function jobHasTargetFailures(job: RunJobRecord): boolean {
 
 function summarizeTargetFailures(job: RunJobRecord): string {
   const response = job.response;
-  if (!response || !("targets" in response) || !Array.isArray(response.targets)) return "";
+  if (!response || !("targets" in response) || !Array.isArray(response.targets))
+    return "";
   const lines: string[] = [];
   for (const target of response.targets) {
     if (target?.ok !== false) continue;
@@ -300,7 +320,10 @@ function summarizeTargetFailures(job: RunJobRecord): string {
     const parts = [`${hostName} failed`];
     if (target.error) parts.push(`error=${target.error}`);
     if (target.error_hint) parts.push(`hint=${target.error_hint}`);
-    if (typeof target.result?.stderr === "string" && target.result.stderr.trim()) {
+    if (
+      typeof target.result?.stderr === "string" &&
+      target.result.stderr.trim()
+    ) {
       parts.push(`stderr=${clipStreamText(target.result.stderr.trim(), 1000)}`);
     }
     lines.push(parts.join(" "));
@@ -332,6 +355,73 @@ function compactPath(path: string, keepSegments = 2): string {
   return `.../${tail}`;
 }
 
+type MessageSegment =
+  | {
+      kind: "text";
+      content: string;
+    }
+  | {
+      kind: "code";
+      lang: string;
+      content: string;
+    };
+
+function parseMessageSegments(raw: string): MessageSegment[] {
+  const body = raw ?? "";
+  if (!body.trim()) {
+    return [{ kind: "text", content: "" }];
+  }
+  const fencePattern = /```([^\n`]*)\n([\s\S]*?)```/g;
+  const segments: MessageSegment[] = [];
+  let cursor = 0;
+  for (const match of body.matchAll(fencePattern)) {
+    const start = match.index ?? 0;
+    if (start > cursor) {
+      const text = body.slice(cursor, start);
+      if (text.length > 0) {
+        segments.push({ kind: "text", content: text });
+      }
+    }
+    const lang = (match[1] ?? "").trim();
+    const code = (match[2] ?? "").replace(/\n$/, "");
+    segments.push({ kind: "code", lang, content: code });
+    cursor = start + match[0].length;
+  }
+  if (cursor < body.length) {
+    const tail = body.slice(cursor);
+    if (tail.length > 0) {
+      segments.push({ kind: "text", content: tail });
+    }
+  }
+  if (segments.length === 0) {
+    segments.push({ kind: "text", content: body });
+  }
+  return segments;
+}
+
+function renderMessageBody(body: string) {
+  const segments = parseMessageSegments(body);
+  if (segments.length === 1 && segments[0].kind === "text") {
+    return <pre>{segments[0].content}</pre>;
+  }
+  return (
+    <div className="message-body">
+      {segments.map((segment, index) =>
+        segment.kind === "text" ? (
+          <pre key={`text_${index}`}>{segment.content}</pre>
+        ) : (
+          <section key={`code_${index}`} className="message-code-block">
+            <header className="message-code-head">
+              {segment.lang || "code"}
+            </header>
+            <pre className="message-code-pre">{segment.content}</pre>
+          </section>
+        ),
+      )}
+    </div>
+  );
+}
+
 function statusTone(status: string): "ok" | "warn" | "err" {
   if (status === "succeeded") return "ok";
   if (status === "failed" || status === "canceled") return "err";
@@ -349,10 +439,14 @@ function modeToHash(mode: AppMode): string {
 export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
-  const [tokenInput, setTokenInput] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? "");
+  const [tokenInput, setTokenInput] = useState<string>(
+    () => localStorage.getItem(TOKEN_KEY) ?? "",
+  );
   const [authError, setAuthError] = useState("");
   const [appMode, setAppMode] = useState<AppMode>(() =>
-    typeof window === "undefined" ? "session" : modeFromHash(window.location.hash)
+    typeof window === "undefined"
+      ? "session"
+      : modeFromHash(window.location.hash),
   );
 
   const ops = useOpsDomain();
@@ -413,7 +507,7 @@ export function App() {
     setOpsAuditMethodFilter,
     opsAuditStatusFilter,
     setOpsAuditStatusFilter,
-    resetOpsDomain
+    resetOpsDomain,
   } = ops;
 
   const {
@@ -445,18 +539,21 @@ export function App() {
     setThreadTitle,
     runningThreadJobs,
     syncProjectsFromDiscovery,
-    resetSessionDomain
+    resetSessionDomain,
   } = session;
 
-  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
-    typeof Notification === "undefined" ? "denied" : Notification.permission
-  );
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermission>(
+      typeof Notification === "undefined" ? "denied" : Notification.permission,
+    );
   const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
   const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [sessionModelDefault, setSessionModelDefault] = useState("");
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
+  const [projectFilter, setProjectFilter] = useState("");
+  const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>([]);
 
   const timelineViewportRef = useRef<HTMLElement | null>(null);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
@@ -469,8 +566,15 @@ export function App() {
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
   const jobNoTextFinalizeRetriesRef = useRef<Map<string, number>>(new Map());
   const sessionEventCursorRef = useRef<Map<string, number>>(new Map());
-  const sessionStreamStateRef = useRef<Map<string, { controller: AbortController; ready: boolean; lastEventAt: number }>>(new Map());
-  const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(new Map());
+  const sessionStreamStateRef = useRef<
+    Map<
+      string,
+      { controller: AbortController; ready: boolean; lastEventAt: number }
+    >
+  >(new Map());
+  const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(
+    new Map(),
+  );
   const streamAuthTokenRef = useRef("");
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
@@ -478,8 +582,11 @@ export function App() {
   const tokenRef = useRef(token);
 
   const activeRuntime = useMemo(
-    () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
-    [runtimes, selectedRuntime]
+    () =>
+      runtimes.find((runtime) => runtime.name === selectedRuntime) ??
+      runtimes[0] ??
+      null,
+    [runtimes, selectedRuntime],
   );
   const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
   const threadWorkspaceMap = useMemo(() => {
@@ -521,14 +628,14 @@ export function App() {
     for (const workspace of workspaces) {
       const hostID = workspace.hostID?.trim() || "unknown";
       const host = hostLookup.get(hostID);
-      const group =
-        groups.get(hostID) ??
-        {
-          hostID,
-          hostName: workspace.hostName || host?.name || hostID,
-          hostAddress: host ? `${host.user ? `${host.user}@` : ""}${host.host}:${host.port}` : "",
-          projects: []
-        };
+      const group = groups.get(hostID) ?? {
+        hostID,
+        hostName: workspace.hostName || host?.name || hostID,
+        hostAddress: host
+          ? `${host.user ? `${host.user}@` : ""}${host.host}:${host.port}`
+          : "",
+        projects: [],
+      };
 
       const project: SessionTreeProject = {
         id: workspace.id,
@@ -539,8 +646,8 @@ export function App() {
           title: sessionItem.title,
           activeJobID: sessionItem.activeJobID,
           unreadDone: sessionItem.unreadDone,
-          lastJobStatus: sessionItem.lastJobStatus
-        }))
+          lastJobStatus: sessionItem.lastJobStatus,
+        })),
       };
 
       group.projects.push(project);
@@ -549,10 +656,47 @@ export function App() {
 
     return Array.from(groups.values()).map((group) => ({
       ...group,
-      projects: group.projects.sort((a, b) => a.path.localeCompare(b.path))
+      projects: group.projects.sort((a, b) => a.path.localeCompare(b.path)),
     }));
   }, [hosts, workspaces]);
-  const activeThreadBusy = Boolean(activeThread?.activeJobID) || (activeThread ? submittingThreadID === activeThread.id : false);
+  const filteredSessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
+    const query = projectFilter.trim().toLowerCase();
+    if (!query) return sessionTreeHosts;
+    const nextHosts: SessionTreeHost[] = [];
+    for (const host of sessionTreeHosts) {
+      const hostText = `${host.hostName} ${host.hostAddress}`.toLowerCase();
+      if (hostText.includes(query)) {
+        nextHosts.push(host);
+        continue;
+      }
+      const projects: SessionTreeProject[] = [];
+      for (const project of host.projects) {
+        const projectText = project.path.toLowerCase();
+        if (projectText.includes(query)) {
+          projects.push(project);
+          continue;
+        }
+        const sessions = project.sessions.filter((sessionItem) => {
+          const text = `${sessionItem.title} ${sessionItem.id}`.toLowerCase();
+          return text.includes(query);
+        });
+        if (sessions.length === 0) continue;
+        projects.push({
+          ...project,
+          sessions,
+        });
+      }
+      if (projects.length === 0) continue;
+      nextHosts.push({
+        ...host,
+        projects,
+      });
+    }
+    return nextHosts;
+  }, [projectFilter, sessionTreeHosts]);
+  const activeThreadBusy =
+    Boolean(activeThread?.activeJobID) ||
+    (activeThread ? submittingThreadID === activeThread.id : false);
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
@@ -580,13 +724,17 @@ export function App() {
     if (!activeJob) return 0;
     const total = activeJob.total_hosts ?? 0;
     if (total <= 0) return isJobActive(activeJob) ? 0 : 100;
-    const done = (activeJob.succeeded_hosts ?? 0) + (activeJob.failed_hosts ?? 0);
+    const done =
+      (activeJob.succeeded_hosts ?? 0) + (activeJob.failed_hosts ?? 0);
     if (!isJobActive(activeJob)) return 100;
     return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
   }, [activeJob]);
 
   const filteredOpsJobs = useMemo(() => {
-    const byStatus = opsJobStatusFilter === "all" ? jobs : jobs.filter((job) => job.status === opsJobStatusFilter);
+    const byStatus =
+      opsJobStatusFilter === "all"
+        ? jobs
+        : jobs.filter((job) => job.status === opsJobStatusFilter);
     if (opsJobTypeFilter === "all") return byStatus;
     return byStatus.filter((job) => job.type === opsJobTypeFilter);
   }, [jobs, opsJobStatusFilter, opsJobTypeFilter]);
@@ -595,23 +743,38 @@ export function App() {
     const query = hostFilter.trim().toLowerCase();
     if (!query) return hosts;
     return hosts.filter((host) => {
-      const text = `${host.name} ${host.host} ${host.user} ${host.workspace ?? ""} ${host.connection_mode ?? "ssh"}`.toLowerCase();
+      const text =
+        `${host.name} ${host.host} ${host.user} ${host.workspace ?? ""} ${host.connection_mode ?? "ssh"}`.toLowerCase();
       return text.includes(query);
     });
   }, [hosts, hostFilter]);
 
   const filteredOpsRuns = useMemo(() => {
     if (opsRunStatusFilter === "all") return runs;
-    if (opsRunStatusFilter === "ok") return runs.filter((run) => run.status_code < 400);
+    if (opsRunStatusFilter === "ok")
+      return runs.filter((run) => run.status_code < 400);
     return runs.filter((run) => run.status_code >= 400);
   }, [runs, opsRunStatusFilter]);
 
   const filteredAuditEvents = useMemo(() => {
     return auditEvents.filter((evt) => {
-      if (opsAuditMethodFilter !== "all" && evt.method !== opsAuditMethodFilter) return false;
-      if (opsAuditStatusFilter === "2xx" && (evt.status_code < 200 || evt.status_code >= 300)) return false;
-      if (opsAuditStatusFilter === "4xx" && (evt.status_code < 400 || evt.status_code >= 500)) return false;
-      if (opsAuditStatusFilter === "5xx" && (evt.status_code < 500 || evt.status_code >= 600)) return false;
+      if (opsAuditMethodFilter !== "all" && evt.method !== opsAuditMethodFilter)
+        return false;
+      if (
+        opsAuditStatusFilter === "2xx" &&
+        (evt.status_code < 200 || evt.status_code >= 300)
+      )
+        return false;
+      if (
+        opsAuditStatusFilter === "4xx" &&
+        (evt.status_code < 400 || evt.status_code >= 500)
+      )
+        return false;
+      if (
+        opsAuditStatusFilter === "5xx" &&
+        (evt.status_code < 500 || evt.status_code >= 600)
+      )
+        return false;
       return true;
     });
   }, [auditEvents, opsAuditMethodFilter, opsAuditStatusFilter]);
@@ -638,6 +801,14 @@ export function App() {
   function createThreadAndFocus() {
     createThread();
     promptInputRef.current?.focus();
+  }
+
+  function toggleHostCollapsed(hostID: string) {
+    setCollapsedHostIDs((prev) =>
+      prev.includes(hostID)
+        ? prev.filter((id) => id !== hostID)
+        : [...prev, hostID],
+    );
   }
 
   function notifySessionDone(title: string, body: string) {
@@ -677,7 +848,10 @@ export function App() {
     setNotificationPermission(result);
   }
 
-  async function ensureLocalCodexHost(authToken: string, currentHosts: Host[]): Promise<Host[]> {
+  async function ensureLocalCodexHost(
+    authToken: string,
+    currentHosts: Host[],
+  ): Promise<Host[]> {
     if (currentHosts.some((host) => host.connection_mode === "local")) {
       return currentHosts;
     }
@@ -685,19 +859,31 @@ export function App() {
       name: "local-default",
       connection_mode: "local",
       host: "localhost",
-      workspace: activeWorkspace?.path?.trim() || "/home/ecs-user"
+      workspace: activeWorkspace?.path?.trim() || "/home/ecs-user",
     });
     return listHosts(authToken);
   }
 
   function buildDiscoveredProjects(
     sourceHosts: Host[],
-    targets: Array<{ host: Host; ok: boolean; sessions?: Array<{ session_id: string; cwd?: string; thread_name?: string; updated_at: string }> }>
+    targets: Array<{
+      host: Host;
+      ok: boolean;
+      sessions?: Array<{
+        session_id: string;
+        cwd?: string;
+        thread_name?: string;
+        updated_at: string;
+      }>;
+    }>,
   ) {
     const hostMap = new Map<string, Host>();
     for (const host of sourceHosts) hostMap.set(host.id, host);
 
-    const grouped = new Map<string, Map<string, Array<{ id: string; title: string; updatedAt?: string }>>>();
+    const grouped = new Map<
+      string,
+      Map<string, Array<{ id: string; title: string; updatedAt?: string }>>
+    >();
     for (const target of targets) {
       const hostID = target.host?.id?.trim();
       if (!hostID) continue;
@@ -705,23 +891,34 @@ export function App() {
       const pathMap = grouped.get(hostID)!;
       const sessions = Array.isArray(target.sessions) ? target.sessions : [];
       for (const sessionItem of sessions) {
-        const projectPath = sessionItem.cwd?.trim() || target.host.workspace?.trim() || hostMap.get(hostID)?.workspace?.trim() || "/home/ecs-user";
+        const projectPath =
+          sessionItem.cwd?.trim() ||
+          target.host.workspace?.trim() ||
+          hostMap.get(hostID)?.workspace?.trim() ||
+          "/home/ecs-user";
         if (!pathMap.has(projectPath)) pathMap.set(projectPath, []);
         pathMap.get(projectPath)!.push({
           id: sessionItem.session_id,
           title: sessionItem.thread_name?.trim() || sessionItem.session_id,
-          updatedAt: sessionItem.updated_at
+          updatedAt: sessionItem.updated_at,
         });
       }
       if (sessions.length === 0) {
-        const fallbackPath = target.host.workspace?.trim() || hostMap.get(hostID)?.workspace?.trim();
+        const fallbackPath =
+          target.host.workspace?.trim() ||
+          hostMap.get(hostID)?.workspace?.trim();
         if (fallbackPath && !pathMap.has(fallbackPath)) {
           pathMap.set(fallbackPath, []);
         }
       }
     }
 
-    const projects: Array<{ hostID: string; hostName: string; path: string; sessions: Array<{ id: string; title: string; updatedAt?: string }> }> = [];
+    const projects: Array<{
+      hostID: string;
+      hostName: string;
+      path: string;
+      sessions: Array<{ id: string; title: string; updatedAt?: string }>;
+    }> = [];
     for (const [hostID, pathMap] of grouped.entries()) {
       const host = hostMap.get(hostID);
       const hostName = host?.name ?? hostID;
@@ -736,7 +933,7 @@ export function App() {
           hostID,
           hostName,
           path: projectPath,
-          sessions: orderedSessions
+          sessions: orderedSessions,
         });
       }
     }
@@ -748,21 +945,37 @@ export function App() {
       hostID: host.id,
       hostName: host.name,
       path: host.workspace?.trim() || "/home/ecs-user",
-      sessions: []
+      sessions: [],
     }));
   }
 
-  function buildProjectsFromRecords(sourceHosts: Host[], projects: ProjectRecord[], sessions: SessionRecord[]) {
+  function buildProjectsFromRecords(
+    sourceHosts: Host[],
+    projects: ProjectRecord[],
+    sessions: SessionRecord[],
+  ) {
     const hostMap = new Map<string, Host>();
     for (const host of sourceHosts) {
       hostMap.set(host.id, host);
     }
 
     const projectKeyByID = new Map<string, string>();
-    const grouped = new Map<string, { hostID: string; hostName: string; path: string; sessions: Array<{ id: string; title: string; updatedAt?: string }> }>();
+    const grouped = new Map<
+      string,
+      {
+        hostID: string;
+        hostName: string;
+        path: string;
+        sessions: Array<{ id: string; title: string; updatedAt?: string }>;
+      }
+    >();
     const sessionSeenByProjectKey = new Map<string, Set<string>>();
 
-    const ensureProjectBucket = (hostIDRaw: string, hostNameRaw: string, pathRaw: string) => {
+    const ensureProjectBucket = (
+      hostIDRaw: string,
+      hostNameRaw: string,
+      pathRaw: string,
+    ) => {
       const hostID = hostIDRaw.trim();
       const path = pathRaw.trim();
       if (!hostID || !path) return "";
@@ -773,7 +986,7 @@ export function App() {
           hostID,
           hostName: hostNameRaw.trim() || host?.name || hostID,
           path,
-          sessions: []
+          sessions: [],
         });
       }
       if (!sessionSeenByProjectKey.has(key)) {
@@ -783,7 +996,11 @@ export function App() {
     };
 
     for (const project of projects) {
-      const key = ensureProjectBucket(project.host_id, project.host_name ?? "", project.path);
+      const key = ensureProjectBucket(
+        project.host_id,
+        project.host_name ?? "",
+        project.path,
+      );
       if (!key) continue;
       projectKeyByID.set(project.id, key);
     }
@@ -791,11 +1008,15 @@ export function App() {
     for (const sessionRecord of sessions) {
       const sessionID = sessionRecord.id.trim();
       if (!sessionID) continue;
-      const fromProjectID = projectKeyByID.get(sessionRecord.project_id.trim()) ?? "";
+      const fromProjectID =
+        projectKeyByID.get(sessionRecord.project_id.trim()) ?? "";
       const fallbackHostID = sessionRecord.host_id.trim();
       const fallbackPath = sessionRecord.path.trim();
-      const fallbackHostName = hostMap.get(fallbackHostID)?.name ?? fallbackHostID;
-      const key = fromProjectID || ensureProjectBucket(fallbackHostID, fallbackHostName, fallbackPath);
+      const fallbackHostName =
+        hostMap.get(fallbackHostID)?.name ?? fallbackHostID;
+      const key =
+        fromProjectID ||
+        ensureProjectBucket(fallbackHostID, fallbackHostName, fallbackPath);
       if (!key) continue;
       const bucket = grouped.get(key);
       const seen = sessionSeenByProjectKey.get(key);
@@ -804,7 +1025,7 @@ export function App() {
       bucket.sessions.push({
         id: sessionID,
         title: sessionRecord.title?.trim() || sessionID,
-        updatedAt: sessionRecord.updated_at
+        updatedAt: sessionRecord.updated_at,
       });
     }
 
@@ -823,7 +1044,11 @@ export function App() {
     }
     for (const host of sourceHosts) {
       if (byHost.has(host.id)) continue;
-      ensureProjectBucket(host.id, host.name, host.workspace?.trim() || "/home/ecs-user");
+      ensureProjectBucket(
+        host.id,
+        host.name,
+        host.workspace?.trim() || "/home/ecs-user",
+      );
     }
 
     return Array.from(grouped.values());
@@ -833,7 +1058,7 @@ export function App() {
     authToken: string,
     sourceHosts: Host[],
     discoverEnabled: boolean,
-    preserveOnError = true
+    preserveOnError = true,
   ) {
     if (!discoverEnabled) {
       syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
@@ -843,9 +1068,11 @@ export function App() {
       const discovered = await discoverCodexSessions(authToken, {
         all_hosts: true,
         fanout: Math.max(1, Math.min(8, sourceHosts.length || 1)),
-        limit_per_host: 120
+        limit_per_host: 120,
       });
-      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []));
+      syncProjectsFromDiscovery(
+        buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []),
+      );
     } catch {
       if (!preserveOnError) {
         syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
@@ -853,9 +1080,17 @@ export function App() {
     }
   }
 
-  async function refreshProjectsFromSource(authToken: string, sourceHosts: Host[], discoverEnabled: boolean, preserveOnError = true) {
+  async function refreshProjectsFromSource(
+    authToken: string,
+    sourceHosts: Host[],
+    discoverEnabled: boolean,
+    preserveOnError = true,
+  ) {
     try {
-      const [projects, sessions] = await Promise.all([listProjects(authToken, 600), listSessions(authToken, 1200)]);
+      const [projects, sessions] = await Promise.all([
+        listProjects(authToken, 600),
+        listSessions(authToken, 1200),
+      ]);
       const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
       if (built.length > 0) {
         syncProjectsFromDiscovery(built);
@@ -864,7 +1099,12 @@ export function App() {
     } catch {
       // fall through to discovery fallback
     }
-    await refreshProjectsFromDiscovery(authToken, sourceHosts, discoverEnabled, preserveOnError);
+    await refreshProjectsFromDiscovery(
+      authToken,
+      sourceHosts,
+      discoverEnabled,
+      preserveOnError,
+    );
   }
 
   function waitWithAbort(ms: number, signal: AbortSignal): Promise<void> {
@@ -889,7 +1129,9 @@ export function App() {
     });
   }
 
-  function sessionPayloadRecord(event: SessionEventRecord): Record<string, unknown> {
+  function sessionPayloadRecord(
+    event: SessionEventRecord,
+  ): Record<string, unknown> {
     return asRecord(event.payload) ?? {};
   }
 
@@ -897,11 +1139,15 @@ export function App() {
     const direct = event.run_id?.trim() ?? "";
     if (direct) return direct;
     const payload = sessionPayloadRecord(event);
-    const fromPayload = typeof payload.job_id === "string" ? payload.job_id.trim() : "";
+    const fromPayload =
+      typeof payload.job_id === "string" ? payload.job_id.trim() : "";
     return fromPayload;
   }
 
-  function ensureSessionRunState(sessionID: string, runID: string): SessionRunStreamState {
+  function ensureSessionRunState(
+    sessionID: string,
+    runID: string,
+  ): SessionRunStreamState {
     const existing = sessionRunStateRef.current.get(sessionID);
     if (existing && existing.runID === runID) return existing;
     const next: SessionRunStreamState = {
@@ -909,13 +1155,17 @@ export function App() {
       stdout: "",
       streamSeen: false,
       assistantFinalized: false,
-      failureHints: []
+      failureHints: [],
     };
     sessionRunStateRef.current.set(sessionID, next);
     return next;
   }
 
-  function markSessionDone(sessionID: string, runID: string, status: "succeeded" | "failed" | "canceled") {
+  function markSessionDone(
+    sessionID: string,
+    runID: string,
+    status: "succeeded" | "failed" | "canceled",
+  ) {
     if (!runID || completedJobsRef.current.has(runID)) return;
     completedJobsRef.current.add(runID);
     const sessionTitle = threadTitleMapRef.current.get(sessionID) ?? "Session";
@@ -924,7 +1174,7 @@ export function App() {
     pushSessionAlert({
       threadID: sessionID,
       title: `${sessionTitle} ${completion.suffix}`,
-      body: completion.body
+      body: completion.body,
     });
   }
 
@@ -949,7 +1199,9 @@ export function App() {
       return;
     }
     const state = sessionRunStateRef.current.get(sessionID);
-    let assistantText = state ? parseCodexAssistantTextFromStdout(state.stdout, false) : "";
+    let assistantText = state
+      ? parseCodexAssistantTextFromStdout(state.stdout, false)
+      : "";
     let failureSummary = state?.failureHints.join("\n") ?? "";
     let failed = failureSummary.trim() !== "";
 
@@ -969,11 +1221,20 @@ export function App() {
           if (jobHasTargetFailures(job)) {
             failed = true;
             if (!failureSummary) {
-              failureSummary = summarizeTargetFailures(job) || (job.error ? String(job.error) : "");
+              failureSummary =
+                summarizeTargetFailures(job) ||
+                (job.error ? String(job.error) : "");
             }
           }
-          const hasResponseTargets = Boolean(job.response && "targets" in job.response && Array.isArray(job.response.targets));
-          const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
+          const hasResponseTargets = Boolean(
+            job.response &&
+            "targets" in job.response &&
+            Array.isArray(job.response.targets),
+          );
+          const terminal =
+            job.status === "succeeded" ||
+            job.status === "failed" ||
+            job.status === "canceled";
           if (assistantText || failed || (terminal && hasResponseTargets)) {
             break;
           }
@@ -994,9 +1255,9 @@ export function App() {
           kind: "system",
           state: "error",
           title: "System",
-          body: failureSummary || "Session failed."
+          body: failureSummary || "Session failed.",
         },
-        sessionID
+        sessionID,
       );
       setThreadJobState(sessionID, "", "failed");
       markSessionDone(sessionID, runID, "failed");
@@ -1010,20 +1271,28 @@ export function App() {
     setThreadJobState(sessionID, "", "succeeded");
     if (assistantText.trim()) {
       if (state?.streamSeen && !state.assistantFinalized) {
-        finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(assistantText));
+        finalizeAssistantStreamEntry(
+          sessionID,
+          "success",
+          clipStreamText(assistantText),
+        );
       } else if (!state?.assistantFinalized) {
         addTimelineEntry(
           {
             kind: "assistant",
             state: "success",
             title: "Assistant",
-            body: assistantText
+            body: assistantText,
           },
-          sessionID
+          sessionID,
         );
       }
     } else if (state?.streamSeen && !state?.assistantFinalized) {
-      finalizeAssistantStreamEntry(sessionID, "success", EMPTY_ASSISTANT_FALLBACK);
+      finalizeAssistantStreamEntry(
+        sessionID,
+        "success",
+        EMPTY_ASSISTANT_FALLBACK,
+      );
     }
     markSessionDone(sessionID, runID, "succeeded");
     if (sessionID !== activeThreadIDRef.current) {
@@ -1032,13 +1301,17 @@ export function App() {
     sessionRunStateRef.current.delete(sessionID);
   }
 
-  async function handleSessionEventRecord(sessionID: string, event: SessionEventRecord) {
+  async function handleSessionEventRecord(
+    sessionID: string,
+    event: SessionEventRecord,
+  ) {
     const payload = sessionPayloadRecord(event);
     const runID = sessionEventRunID(event);
 
     switch (event.type) {
       case "session.title.updated": {
-        const title = typeof payload.title === "string" ? payload.title.trim() : "";
+        const title =
+          typeof payload.title === "string" ? payload.title.trim() : "";
         if (title) {
           setThreadTitle(sessionID, title);
         }
@@ -1062,11 +1335,17 @@ export function App() {
         if (state.stdout.length > 220000) {
           state.stdout = state.stdout.slice(state.stdout.length - 220000);
         }
-        const contentOnly = parseCodexAssistantTextFromStdout(state.stdout, false);
+        const contentOnly = parseCodexAssistantTextFromStdout(
+          state.stdout,
+          false,
+        );
         if (contentOnly.trim()) {
           state.streamSeen = true;
           upsertAssistantStreamEntry(sessionID, clipStreamText(contentOnly));
-        } else if (state.stdout.includes('"type":"turn.started"') || state.stdout.includes('"type":"thread.started"')) {
+        } else if (
+          state.stdout.includes('"type":"turn.started"') ||
+          state.stdout.includes('"type":"thread.started"')
+        ) {
           state.streamSeen = true;
           upsertAssistantStreamEntry(sessionID, "Thinking...");
         }
@@ -1075,10 +1354,17 @@ export function App() {
       case "assistant.completed": {
         if (!runID) return;
         const state = ensureSessionRunState(sessionID, runID);
-        const contentOnly = parseCodexAssistantTextFromStdout(state.stdout, false);
+        const contentOnly = parseCodexAssistantTextFromStdout(
+          state.stdout,
+          false,
+        );
         if (contentOnly.trim()) {
           state.streamSeen = true;
-          finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(contentOnly));
+          finalizeAssistantStreamEntry(
+            sessionID,
+            "success",
+            clipStreamText(contentOnly),
+          );
           state.assistantFinalized = true;
           return;
         }
@@ -1090,12 +1376,21 @@ export function App() {
       case "target.done": {
         if (!runID) return;
         const state = ensureSessionRunState(sessionID, runID);
-        const status = typeof payload.status === "string" ? payload.status.trim() : "";
+        const status =
+          typeof payload.status === "string" ? payload.status.trim() : "";
         if (status && status !== "ok") {
-          const host = (typeof payload.host_name === "string" && payload.host_name.trim()) || (typeof payload.host_id === "string" && payload.host_id.trim()) || "target";
+          const host =
+            (typeof payload.host_name === "string" &&
+              payload.host_name.trim()) ||
+            (typeof payload.host_id === "string" && payload.host_id.trim()) ||
+            "target";
           const exitCode = payload.exit_code;
-          const codeText = typeof exitCode === "number" ? ` exit=${exitCode}` : "";
-          const errorText = typeof payload.error === "string" && payload.error.trim() ? ` error=${payload.error.trim()}` : "";
+          const codeText =
+            typeof exitCode === "number" ? ` exit=${exitCode}` : "";
+          const errorText =
+            typeof payload.error === "string" && payload.error.trim()
+              ? ` error=${payload.error.trim()}`
+              : "";
           state.failureHints.push(`${host} failed${codeText}${errorText}`);
         }
         return;
@@ -1104,7 +1399,10 @@ export function App() {
       case "job.failed": {
         const id = runID || `run_${Date.now()}`;
         const state = ensureSessionRunState(sessionID, id);
-        const errText = typeof payload.error === "string" && payload.error.trim() ? payload.error.trim() : "Session failed.";
+        const errText =
+          typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : "Session failed.";
         if (state.streamSeen) {
           finalizeAssistantStreamEntry(sessionID, "error");
         }
@@ -1113,9 +1411,9 @@ export function App() {
             kind: "system",
             state: "error",
             title: "System",
-            body: errText
+            body: errText,
           },
-          sessionID
+          sessionID,
         );
         setThreadJobState(sessionID, "", "failed");
         markSessionDone(sessionID, id, "failed");
@@ -1137,9 +1435,9 @@ export function App() {
             kind: "system",
             state: "error",
             title: "System",
-            body: "Session canceled."
+            body: "Session canceled.",
           },
-          sessionID
+          sessionID,
         );
         setThreadJobState(sessionID, "", "canceled");
         markSessionDone(sessionID, id, "canceled");
@@ -1163,24 +1461,34 @@ export function App() {
   function decodeSessionEventRecord(input: unknown): SessionEventRecord | null {
     const payload = asRecord(input);
     if (!payload) return null;
-    const seq = typeof payload.seq === "number" ? payload.seq : Number(payload.seq);
+    const seq =
+      typeof payload.seq === "number" ? payload.seq : Number(payload.seq);
     if (!Number.isFinite(seq) || seq <= 0) return null;
-    const sessionID = typeof payload.session_id === "string" ? payload.session_id.trim() : "";
-    const eventType = typeof payload.type === "string" ? payload.type.trim() : "";
+    const sessionID =
+      typeof payload.session_id === "string" ? payload.session_id.trim() : "";
+    const eventType =
+      typeof payload.type === "string" ? payload.type.trim() : "";
     if (!sessionID || !eventType) return null;
-    const createdAt = typeof payload.created_at === "string" && payload.created_at.trim() ? payload.created_at : new Date().toISOString();
-    const runID = typeof payload.run_id === "string" ? payload.run_id : undefined;
+    const createdAt =
+      typeof payload.created_at === "string" && payload.created_at.trim()
+        ? payload.created_at
+        : new Date().toISOString();
+    const runID =
+      typeof payload.run_id === "string" ? payload.run_id : undefined;
     return {
       seq,
       session_id: sessionID,
       run_id: runID,
       type: eventType,
       payload: payload.payload,
-      created_at: createdAt
+      created_at: createdAt,
     };
   }
 
-  function handleSessionStreamFrame(sessionID: string, frame: SessionStreamFrame) {
+  function handleSessionStreamFrame(
+    sessionID: string,
+    frame: SessionStreamFrame,
+  ) {
     const state = sessionStreamStateRef.current.get(sessionID);
     if (!state) return;
     state.lastEventAt = Date.now();
@@ -1189,7 +1497,10 @@ export function App() {
       state.ready = true;
       const data = asRecord(frame.data);
       const cursor = data ? Number(data.cursor) : NaN;
-      if (Number.isFinite(cursor) && cursor > (sessionEventCursorRef.current.get(sessionID) ?? 0)) {
+      if (
+        Number.isFinite(cursor) &&
+        cursor > (sessionEventCursorRef.current.get(sessionID) ?? 0)
+      ) {
         sessionEventCursorRef.current.set(sessionID, cursor);
       }
       return;
@@ -1199,7 +1510,10 @@ export function App() {
       state.ready = false;
       const data = asRecord(frame.data);
       const nextAfter = data ? Number(data.next_after) : NaN;
-      if (Number.isFinite(nextAfter) && nextAfter > (sessionEventCursorRef.current.get(sessionID) ?? 0)) {
+      if (
+        Number.isFinite(nextAfter) &&
+        nextAfter > (sessionEventCursorRef.current.get(sessionID) ?? 0)
+      ) {
         sessionEventCursorRef.current.set(sessionID, nextAfter);
       }
       return;
@@ -1231,7 +1545,7 @@ export function App() {
     sessionStreamStateRef.current.set(trimmedSessionID, {
       controller,
       ready: false,
-      lastEventAt: 0
+      lastEventAt: 0,
     });
 
     const run = async () => {
@@ -1242,13 +1556,19 @@ export function App() {
           await streamSessionEvents(authToken, trimmedSessionID, {
             after,
             signal: controller.signal,
-            onFrame: (frame) => handleSessionStreamFrame(trimmedSessionID, frame)
+            onFrame: (frame) =>
+              handleSessionStreamFrame(trimmedSessionID, frame),
           });
         } catch {
           if (controller.signal.aborted) break;
         }
         const active = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (!active || active.controller !== controller || controller.signal.aborted) break;
+        if (
+          !active ||
+          active.controller !== controller ||
+          controller.signal.aborted
+        )
+          break;
         active.ready = false;
         await waitWithAbort(backoff, controller.signal);
         backoff = Math.min(6000, Math.round(backoff * 1.7));
@@ -1264,14 +1584,22 @@ export function App() {
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
     setIsRefreshing(true);
     try {
-      const [healthBody, fetchedHosts, nextRuntimes, nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
+      const [
+        healthBody,
+        fetchedHosts,
+        nextRuntimes,
+        nextJobs,
+        nextRuns,
+        nextAudit,
+        nextMetrics,
+      ] = await Promise.all([
         healthz(),
         listHosts(authToken),
         listRuntimes(authToken),
         listRunJobs(authToken, 20),
         listRuns(authToken, 20),
         listAudit(authToken, 80),
-        getMetrics(authToken)
+        getMetrics(authToken),
       ]);
       const nextHosts = await ensureLocalCodexHost(authToken, fetchedHosts);
 
@@ -1283,29 +1611,37 @@ export function App() {
       setAuditEvents(nextAudit);
       setMetrics(nextMetrics);
 
-      const localHost = nextHosts.find((host) => host.connection_mode === "local");
+      const localHost = nextHosts.find(
+        (host) => host.connection_mode === "local",
+      );
       if (localHost) {
         setAllHosts(false);
         setSelectedHostIDs([localHost.id]);
       } else {
         setSelectedHostIDs((prev) => {
-          const nextSelected = prev.filter((id) => nextHosts.some((host) => host.id === id));
+          const nextSelected = prev.filter((id) =>
+            nextHosts.some((host) => host.id === id),
+          );
           if (nextSelected.length > 0) return nextSelected;
           if (nextHosts.length > 0) return [nextHosts[0].id];
           return [];
         });
       }
-      const codexRuntime = nextRuntimes.find((runtime) => runtime.name === "codex");
+      const codexRuntime = nextRuntimes.find(
+        (runtime) => runtime.name === "codex",
+      );
       if (codexRuntime) {
         setSelectedRuntime("codex");
-      } else if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
+      } else if (
+        !nextRuntimes.some((runtime) => runtime.name === selectedRuntime)
+      ) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
       await refreshProjectsFromSource(
         authToken,
         nextHosts,
         nextRuntimes.some((runtime) => runtime.name === "codex"),
-        workspaces.length > 0
+        workspaces.length > 0,
       );
 
       const running = nextJobs.find((job) => isJobActive(job));
@@ -1332,9 +1668,9 @@ export function App() {
             kind: "system",
             state: "success",
             title: "Connected",
-            body: `Connected. hosts=${nextHosts.length} runtimes=${nextRuntimes.length} queue_depth=${nextMetrics.queue.depth}`
+            body: `Connected. hosts=${nextHosts.length} runtimes=${nextRuntimes.length} queue_depth=${nextMetrics.queue.depth}`,
           },
-          activeThreadID
+          activeThreadID,
         );
       }
     } catch (error) {
@@ -1345,9 +1681,9 @@ export function App() {
             kind: "system",
             state: "error",
             title: "Connection Failed",
-            body: String(error)
+            body: String(error),
           },
-          activeThreadID
+          activeThreadID,
         );
       }
       throw error;
@@ -1430,7 +1766,9 @@ export function App() {
       .then((catalog) => {
         if (canceled) return;
         const nextDefault = catalog.default_model?.trim() || "";
-        const nextModels = Array.isArray(catalog.models) ? catalog.models.filter((name) => name.trim() !== "") : [];
+        const nextModels = Array.isArray(catalog.models)
+          ? catalog.models.filter((name) => name.trim() !== "")
+          : [];
         setSessionModelDefault(nextDefault);
         setSessionModelOptions(nextModels);
       })
@@ -1469,7 +1807,15 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, appMode, hosts, runtimes, runningThreadJobs.length, submittingThreadID]);
+  }, [
+    authPhase,
+    token,
+    appMode,
+    hosts,
+    runtimes,
+    runningThreadJobs.length,
+    submittingThreadID,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1491,7 +1837,10 @@ export function App() {
       lastTimelineThreadIDRef.current = activeThreadID;
       timelineForceStickRef.current = true;
     }
-    const shouldStick = timelineForceStickRef.current || timelineStickToBottomRef.current || threadChanged;
+    const shouldStick =
+      timelineForceStickRef.current ||
+      timelineStickToBottomRef.current ||
+      threadChanged;
     if (!shouldStick) return;
     const frame = window.requestAnimationFrame(() => {
       if (timelineBottomRef.current) {
@@ -1504,12 +1853,19 @@ export function App() {
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [activeThreadID, activeTimeline.length, activeTimelineTail?.body, activeTimelineTail?.state]);
+  }, [
+    activeThreadID,
+    activeTimeline.length,
+    activeTimelineTail?.body,
+    activeTimelineTail?.state,
+  ]);
 
   function onTimelineScroll() {
     const node = timelineViewportRef.current;
     if (!node) return;
-    const gap = Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop);
+    const gap = Math.abs(
+      node.scrollHeight - node.clientHeight - node.scrollTop,
+    );
     timelineStickToBottomRef.current = gap <= 72;
   }
 
@@ -1551,19 +1907,31 @@ export function App() {
 
       if (appMode !== "session") return;
 
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "n"
+      ) {
         event.preventDefault();
         createThreadAndFocus();
         return;
       }
 
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "ArrowUp" || event.key === "[")) {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        (event.key === "ArrowUp" || event.key === "[")
+      ) {
         event.preventDefault();
         switchThreadByOffset(-1);
         return;
       }
 
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "ArrowDown" || event.key === "]")) {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        (event.key === "ArrowDown" || event.key === "]")
+      ) {
         event.preventDefault();
         switchThreadByOffset(1);
       }
@@ -1590,19 +1958,28 @@ export function App() {
               const after = jobEventCursorRef.current.get(item.jobID) ?? 0;
               const [job, eventFeed] = await Promise.all([
                 getRunJob(token, item.jobID),
-                listRunJobEvents(token, item.jobID, after, 240).catch(() => ({ events: [] as RunJobEvent[], next_after: after }))
+                listRunJobEvents(token, item.jobID, after, 240).catch(() => ({
+                  events: [] as RunJobEvent[],
+                  next_after: after,
+                })),
               ]);
-              return { item, job, error: "", events: eventFeed.events, nextAfter: eventFeed.next_after };
+              return {
+                item,
+                job,
+                error: "",
+                events: eventFeed.events,
+                nextAfter: eventFeed.next_after,
+              };
             } catch (error) {
               return {
                 item,
                 job: null as RunJobRecord | null,
                 error: String(error),
                 events: [] as RunJobEvent[],
-                nextAfter: jobEventCursorRef.current.get(item.jobID) ?? 0
+                nextAfter: jobEventCursorRef.current.get(item.jobID) ?? 0,
               };
             }
-          })
+          }),
         );
         if (canceled) return;
 
@@ -1615,9 +1992,9 @@ export function App() {
                 kind: "system",
                 state: "error",
                 title: "Session Sync Failed",
-                body: error
+                body: error,
               },
-              item.threadID
+              item.threadID,
             );
             setThreadJobState(item.threadID, "", "failed");
             continue;
@@ -1627,33 +2004,57 @@ export function App() {
 
           let stdoutStream = "";
           const terminalHints: string[] = [];
-          const showLiveStream = appMode === "session" && item.threadID === activeThreadID;
+          const showLiveStream =
+            appMode === "session" && item.threadID === activeThreadID;
           for (const event of events) {
-            if (event.type === "target.stdout" && typeof event.chunk === "string") {
+            if (
+              event.type === "target.stdout" &&
+              typeof event.chunk === "string"
+            ) {
               stdoutStream += event.chunk;
             }
-            if (event.type === "target.done" && event.status && event.status !== "ok") {
+            if (
+              event.type === "target.done" &&
+              event.status &&
+              event.status !== "ok"
+            ) {
               const line = summarizeJobEventLine(event);
               if (line) terminalHints.push(line);
             }
-            if (event.type === "job.failed" || event.type === "job.canceled" || event.type === "job.cancel_requested") {
+            if (
+              event.type === "job.failed" ||
+              event.type === "job.canceled" ||
+              event.type === "job.cancel_requested"
+            ) {
               const line = summarizeJobEventLine(event);
               if (line) terminalHints.push(line);
             }
           }
           if (!alreadyCompleted && showLiveStream && stdoutStream.trim()) {
             if (job.runtime === "codex") {
-              const contentOnly = parseCodexAssistantTextFromStdout(stdoutStream, false);
+              const contentOnly = parseCodexAssistantTextFromStdout(
+                stdoutStream,
+                false,
+              );
               if (contentOnly.trim()) {
                 jobStreamSeenRef.current.set(item.jobID, true);
-                upsertAssistantStreamEntry(item.threadID, clipStreamText(contentOnly));
-              } else if (stdoutStream.includes('"type":"turn.started"') || stdoutStream.includes('"type":"thread.started"')) {
+                upsertAssistantStreamEntry(
+                  item.threadID,
+                  clipStreamText(contentOnly),
+                );
+              } else if (
+                stdoutStream.includes('"type":"turn.started"') ||
+                stdoutStream.includes('"type":"thread.started"')
+              ) {
                 jobStreamSeenRef.current.set(item.jobID, true);
                 upsertAssistantStreamEntry(item.threadID, "Thinking...");
               }
             } else {
               jobStreamSeenRef.current.set(item.jobID, true);
-              upsertAssistantStreamEntry(item.threadID, clipStreamText(stdoutStream));
+              upsertAssistantStreamEntry(
+                item.threadID,
+                clipStreamText(stdoutStream),
+              );
             }
           }
           if (terminalHints.length > 0) {
@@ -1662,9 +2063,9 @@ export function App() {
                 kind: "system",
                 state: "error",
                 title: "System",
-                body: terminalHints.join("\n")
+                body: terminalHints.join("\n"),
               },
-              item.threadID
+              item.threadID,
             );
           }
 
@@ -1679,9 +2080,16 @@ export function App() {
           }
 
           const responseFailed = jobHasTargetFailures(job);
-          const assistantText = job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
-          if (job.runtime === "codex" && job.status === "succeeded" && !responseFailed && !assistantText.trim()) {
-            const retries = jobNoTextFinalizeRetriesRef.current.get(job.id) ?? 0;
+          const assistantText =
+            job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
+          if (
+            job.runtime === "codex" &&
+            job.status === "succeeded" &&
+            !responseFailed &&
+            !assistantText.trim()
+          ) {
+            const retries =
+              jobNoTextFinalizeRetriesRef.current.get(job.id) ?? 0;
             if (retries < 4) {
               jobNoTextFinalizeRetriesRef.current.set(job.id, retries + 1);
               setThreadJobState(item.threadID, job.id, "running");
@@ -1715,10 +2123,18 @@ export function App() {
             if (job.status === "succeeded") {
               if (assistantText) {
                 if (sawStream) {
-                  finalizeAssistantStreamEntry(item.threadID, "success", assistantText);
+                  finalizeAssistantStreamEntry(
+                    item.threadID,
+                    "success",
+                    assistantText,
+                  );
                 }
               } else if (sawStream) {
-                finalizeAssistantStreamEntry(item.threadID, "success", EMPTY_ASSISTANT_FALLBACK);
+                finalizeAssistantStreamEntry(
+                  item.threadID,
+                  "success",
+                  EMPTY_ASSISTANT_FALLBACK,
+                );
               }
             }
             continue;
@@ -1727,7 +2143,11 @@ export function App() {
           completedJobsRef.current.add(job.id);
           {
             const failedSummary = summarizeTargetFailures(job);
-            if (job.status === "failed" || job.status === "canceled" || responseFailed) {
+            if (
+              job.status === "failed" ||
+              job.status === "canceled" ||
+              responseFailed
+            ) {
               if (sawStream) {
                 finalizeAssistantStreamEntry(item.threadID, "error");
               }
@@ -1736,53 +2156,77 @@ export function App() {
                   kind: "system",
                   state: "error",
                   title: "System",
-                  body: failedSummary || (job.error ? String(job.error) : "Session failed.")
+                  body:
+                    failedSummary ||
+                    (job.error ? String(job.error) : "Session failed."),
                 },
-                item.threadID
+                item.threadID,
               );
             } else if (assistantText) {
               if (sawStream) {
-                finalizeAssistantStreamEntry(item.threadID, "success", assistantText);
+                finalizeAssistantStreamEntry(
+                  item.threadID,
+                  "success",
+                  assistantText,
+                );
               } else {
                 addTimelineEntry(
                   {
                     kind: "assistant",
                     state: "success",
                     title: "Assistant",
-                    body: assistantText
+                    body: assistantText,
                   },
-                  item.threadID
+                  item.threadID,
                 );
               }
             } else if (sawStream) {
-              finalizeAssistantStreamEntry(item.threadID, "success", EMPTY_ASSISTANT_FALLBACK);
+              finalizeAssistantStreamEntry(
+                item.threadID,
+                "success",
+                EMPTY_ASSISTANT_FALLBACK,
+              );
             }
-            const sessionTitle = threadTitleMapRef.current.get(item.threadID) ?? "Session";
+            const sessionTitle =
+              threadTitleMapRef.current.get(item.threadID) ?? "Session";
             const completionStatus: "succeeded" | "failed" | "canceled" =
-              job.status === "canceled" ? "canceled" : job.status === "succeeded" && !responseFailed ? "succeeded" : "failed";
+              job.status === "canceled"
+                ? "canceled"
+                : job.status === "succeeded" && !responseFailed
+                  ? "succeeded"
+                  : "failed";
             const completion = sessionCompletionCopy(completionStatus);
-            notifySessionDone(`${sessionTitle} ${completion.suffix}`, completion.body);
+            notifySessionDone(
+              `${sessionTitle} ${completion.suffix}`,
+              completion.body,
+            );
             pushSessionAlert({
               threadID: item.threadID,
               title: `${sessionTitle} ${completion.suffix}`,
-              body: completion.body
+              body: completion.body,
             });
           }
         }
 
-        const [nextJobs, nextRuns, nextAudit, refreshedMetrics] = await Promise.all([
-          listRunJobs(token, 20),
-          listRuns(token, 20),
-          listAudit(token, 80),
-          getMetrics(token)
-        ]);
+        const [nextJobs, nextRuns, nextAudit, refreshedMetrics] =
+          await Promise.all([
+            listRunJobs(token, 20),
+            listRuns(token, 20),
+            listAudit(token, 80),
+            getMetrics(token),
+          ]);
         if (canceled) return;
         setJobs(nextJobs);
         setRuns(nextRuns);
         setAuditEvents(nextAudit);
         setMetrics(refreshedMetrics);
         if (needsProjectRefresh) {
-          await refreshProjectsFromSource(token, hosts, runtimes.some((runtime) => runtime.name === "codex"), true);
+          await refreshProjectsFromSource(
+            token,
+            hosts,
+            runtimes.some((runtime) => runtime.name === "codex"),
+            true,
+          );
           if (canceled) return;
         }
       } catch {
@@ -1799,7 +2243,15 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, appMode, runningThreadJobs, activeThreadID, hosts, runtimes]);
+  }, [
+    authPhase,
+    token,
+    appMode,
+    runningThreadJobs,
+    activeThreadID,
+    hosts,
+    runtimes,
+  ]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
@@ -1811,7 +2263,7 @@ export function App() {
           listRunJobs(token, 20),
           listRuns(token, 20),
           listAudit(token, 80),
-          getMetrics(token)
+          getMetrics(token),
         ]);
         if (canceled) return;
         setJobs(nextJobs);
@@ -1895,9 +2347,9 @@ export function App() {
           kind: "system",
           state: "running",
           title: "Session Busy",
-          body: "This session is already running. Wait for completion or switch to another session."
+          body: "This session is already running. Wait for completion or switch to another session.",
         },
-        activeThread.id
+        activeThread.id,
       );
       return;
     }
@@ -1905,12 +2357,22 @@ export function App() {
     const editorValue = promptInputRef.current?.value ?? "";
     const trimmedPrompt = activeThread.draft.trim() || editorValue.trim();
     if (!trimmedPrompt) {
-      addTimelineEntry({ kind: "system", state: "error", title: "Prompt Missing", body: "Prompt is required." }, activeThread.id);
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Prompt Missing",
+          body: "Prompt is required.",
+        },
+        activeThread.id,
+      );
       return;
     }
 
     const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
-    const localHostIDs = hosts.filter((host) => host.connection_mode === "local").map((host) => host.id);
+    const localHostIDs = hosts
+      .filter((host) => host.connection_mode === "local")
+      .map((host) => host.id);
     const targetHostIDs =
       workspaceHostID !== ""
         ? [workspaceHostID]
@@ -1927,15 +2389,19 @@ export function App() {
           kind: "system",
           state: "error",
           title: "No Target Host",
-          body: "No target server available for this session."
+          body: "No target server available for this session.",
         },
-        activeThread.id
+        activeThread.id,
       );
       return;
     }
 
-    const selectedHosts = hosts.filter((host) => targetHostIDs.includes(host.id));
-    const hasNonLocalTarget = selectedHosts.some((host) => host.connection_mode !== "local");
+    const selectedHosts = hosts.filter((host) =>
+      targetHostIDs.includes(host.id),
+    );
+    const hasNonLocalTarget = selectedHosts.some(
+      (host) => host.connection_mode !== "local",
+    );
     const safeImagePaths = hasNonLocalTarget ? [] : activeThread.imagePaths;
     if (hasNonLocalTarget && activeThread.imagePaths.length > 0) {
       addTimelineEntry(
@@ -1943,16 +2409,21 @@ export function App() {
           kind: "system",
           state: "running",
           title: "Image Attachment Skipped",
-          body: "Image attachments are only applied to local-mode targets."
+          body: "Image attachments are only applied to local-mode targets.",
         },
-        activeThread.id
+        activeThread.id,
       );
     }
 
     const fanout = Math.max(1, Number.parseInt(fanoutValue, 10) || 1);
     const outputCap = Math.max(32, Number.parseInt(maxOutputKB, 10) || 256);
-    const effectiveModel = activeThread.model.trim() || sessionModelDefault.trim() || sessionModelChoices[0]?.trim() || undefined;
-    const effectiveSandbox = activeThread.sandbox || runSandbox || "workspace-write";
+    const effectiveModel =
+      activeThread.model.trim() ||
+      sessionModelDefault.trim() ||
+      sessionModelChoices[0]?.trim() ||
+      undefined;
+    const effectiveSandbox =
+      activeThread.sandbox || runSandbox || "workspace-write";
     const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
 
     const request: RunRequest = {
@@ -1973,18 +2444,18 @@ export function App() {
               images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
               json_output: true,
               skip_git_repo_check: true,
-              ephemeral: false
+              ephemeral: false,
             }
-          : undefined
+          : undefined,
     };
 
     addTimelineEntry(
       {
         kind: "user",
         title: "You",
-        body: trimmedPrompt
+        body: trimmedPrompt,
       },
-      activeThread.id
+      activeThread.id,
     );
     if (runAsyncMode) {
       upsertAssistantStreamEntry(activeThread.id, "Thinking...");
@@ -2004,7 +2475,10 @@ export function App() {
         setActiveJobThreadID(activeThread.id);
         setActiveJob(body.job);
         setThreadJobState(activeThread.id, body.job.id, "running");
-        setJobs((prev) => [body.job, ...prev.filter((job) => job.id !== body.job.id)]);
+        setJobs((prev) => [
+          body.job,
+          ...prev.filter((job) => job.id !== body.job.id),
+        ]);
         setSubmittingThreadID("");
       } else {
         const { status, body } = await runFanout(token, request);
@@ -2013,27 +2487,39 @@ export function App() {
             kind: "assistant",
             state: status >= 400 ? "error" : "success",
             title: `Run Finished (HTTP ${status})`,
-            body: summarizeRunResponse(body)
+            body: summarizeRunResponse(body),
           },
-          activeThread.id
+          activeThread.id,
         );
 
         const [nextRuns, nextJobs, nextAudit, nextMetrics] = await Promise.all([
           listRuns(token, 20),
           listRunJobs(token, 20),
           listAudit(token, 80),
-          getMetrics(token)
+          getMetrics(token),
         ]);
         setRuns(nextRuns);
         setJobs(nextJobs);
         setAuditEvents(nextAudit);
         setMetrics(nextMetrics);
-        setThreadJobState(activeThread.id, "", status >= 400 ? "failed" : "succeeded");
+        setThreadJobState(
+          activeThread.id,
+          "",
+          status >= 400 ? "failed" : "succeeded",
+        );
         setSubmittingThreadID("");
       }
     } catch (error) {
       finalizeAssistantStreamEntry(activeThread.id, "error");
-      addTimelineEntry({ kind: "system", state: "error", title: "Run Failed", body: String(error) }, activeThread.id);
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Run Failed",
+          body: String(error),
+        },
+        activeThread.id,
+      );
       setThreadJobState(activeThread.id, "", "failed");
       setSubmittingThreadID("");
     }
@@ -2045,8 +2531,16 @@ export function App() {
 
     const mode = hostForm.connectionMode ?? "ssh";
     if (!hostForm.name.trim() || (mode === "ssh" && !hostForm.host.trim())) {
-      const validationMessage = mode === "ssh" ? "name and host are required for ssh mode." : "name is required.";
-      addTimelineEntry({ kind: "system", state: "error", title: "Host Validation", body: validationMessage });
+      const validationMessage =
+        mode === "ssh"
+          ? "name and host are required for ssh mode."
+          : "name is required.";
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Host Validation",
+        body: validationMessage,
+      });
       return;
     }
 
@@ -2061,20 +2555,31 @@ export function App() {
         connection_mode: mode,
         host: hostForm.host.trim() || undefined,
         user: hostForm.user.trim() || undefined,
-        workspace: hostForm.workspace.trim() || undefined
+        workspace: hostForm.workspace.trim() || undefined,
       });
-      setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
+      setHostForm({
+        name: "",
+        connectionMode: "ssh",
+        host: "",
+        user: "",
+        workspace: "",
+      });
       setEditingHostID("");
       await loadWorkspace(token, false);
       addTimelineEntry({
         kind: "system",
         state: "success",
         title: editing ? "Host Updated" : "Host Saved",
-        body: `${editing ? "Updated" : "Saved"} host ${hostName}.`
+        body: `${editing ? "Updated" : "Saved"} host ${hostName}.`,
       });
       setOpsNotice(`${editing ? "Updated" : "Saved"} host ${hostName}.`);
     } catch (error) {
-      addTimelineEntry({ kind: "system", state: "error", title: "Host Save Failed", body: String(error) });
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Host Save Failed",
+        body: String(error),
+      });
     } finally {
       setAddingHost(false);
     }
@@ -2087,14 +2592,20 @@ export function App() {
       connectionMode: host.connection_mode === "local" ? "local" : "ssh",
       host: host.host,
       user: host.user ?? "",
-      workspace: host.workspace ?? ""
+      workspace: host.workspace ?? "",
     });
     setOpsNotice(`Editing host ${host.name}.`);
   }
 
   function onCancelHostEdit() {
     setEditingHostID("");
-    setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
+    setHostForm({
+      name: "",
+      connectionMode: "ssh",
+      host: "",
+      user: "",
+      workspace: "",
+    });
     setOpsNotice("Canceled host edit.");
   }
 
@@ -2108,9 +2619,15 @@ export function App() {
       const codex = result.codex?.ok ? "ok" : "fail";
       const login = result.codex_login?.ok ? "ok" : "fail";
       const sshErr = result.ssh?.error ? ` ssh_error=${result.ssh.error}` : "";
-      const codexErr = result.codex?.error ? ` codex_error=${result.codex.error}` : "";
-      const loginErr = result.codex_login?.error ? ` login_error=${result.codex_login.error}` : "";
-      setOpsNotice(`Probe ${host.name}: ssh=${ssh} codex=${codex} login=${login}${sshErr}${codexErr}${loginErr}`);
+      const codexErr = result.codex?.error
+        ? ` codex_error=${result.codex.error}`
+        : "";
+      const loginErr = result.codex_login?.error
+        ? ` login_error=${result.codex_login.error}`
+        : "";
+      setOpsNotice(
+        `Probe ${host.name}: ssh=${ssh} codex=${codex} login=${login}${sshErr}${codexErr}${loginErr}`,
+      );
     } catch (error) {
       setOpsNotice(`Probe failed for ${host.name}: ${String(error)}`);
     } finally {
@@ -2182,7 +2699,10 @@ export function App() {
         <section className="gate-card">
           <p className="gate-eyebrow">remote-llm workspace</p>
           <h1>Token Required</h1>
-          <p className="gate-copy">Use your access token to unlock the operator console. No token means no workspace access.</p>
+          <p className="gate-copy">
+            Use your access token to unlock the operator console. No token means
+            no workspace access.
+          </p>
           <form onSubmit={onSubmitToken} className="gate-form">
             <label>
               Access Token
@@ -2213,15 +2733,30 @@ export function App() {
         </div>
         <div className="topbar-controls">
           <div className="mode-switch">
-            <button type="button" className={appMode === "session" ? "mode-btn active" : "mode-btn"} onClick={() => switchMode("session")}>
+            <button
+              type="button"
+              className={appMode === "session" ? "mode-btn active" : "mode-btn"}
+              onClick={() => switchMode("session")}
+            >
               Session
             </button>
-            <button type="button" className={appMode === "ops" ? "mode-btn active" : "mode-btn"} onClick={() => switchMode("ops")}>
+            <button
+              type="button"
+              className={appMode === "ops" ? "mode-btn active" : "mode-btn"}
+              onClick={() => switchMode("ops")}
+            >
               Ops
             </button>
           </div>
-          <span className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}>{syncLabel}</span>
-          <button onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+          <span
+            className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}
+          >
+            {syncLabel}
+          </span>
+          <button
+            onClick={() => void onRefreshWorkspace()}
+            disabled={isRefreshing}
+          >
             {isRefreshing ? "Syncing..." : "Sync"}
           </button>
           <button className="ghost" onClick={onLogout}>
@@ -2230,7 +2765,11 @@ export function App() {
         </div>
       </header>
 
-      {healthIsError ? <section className="workspace-alert">Controller state degraded: {health}</section> : null}
+      {healthIsError ? (
+        <section className="workspace-alert">
+          Controller state degraded: {health}
+        </section>
+      ) : null}
 
       {appMode === "session" ? (
         <div className="session-stage">
@@ -2238,96 +2777,170 @@ export function App() {
             <section className="inspect-block focus-block">
               <div className="pane-title-line">
                 <h3>Projects</h3>
-                <button type="button" className="ghost new-thread" onClick={createThreadAndFocus}>
+                <button
+                  type="button"
+                  className="ghost new-thread"
+                  onClick={createThreadAndFocus}
+                >
                   New
                 </button>
               </div>
+              <label className="tree-filter">
+                <input
+                  value={projectFilter}
+                  onChange={(event) => setProjectFilter(event.target.value)}
+                  placeholder="Filter projects or sessions"
+                />
+              </label>
               <div className="project-tree">
                 {sessionTreeHosts.length === 0 ? (
-                  <p className="pane-subtle-light">No servers/projects discovered yet.</p>
+                  <p className="pane-subtle-light">
+                    No servers/projects discovered yet.
+                  </p>
+                ) : filteredSessionTreeHosts.length === 0 ? (
+                  <p className="pane-subtle-light">
+                    No matching projects or sessions.
+                  </p>
                 ) : (
-                  sessionTreeHosts.map((hostNode) => (
-                    <article key={hostNode.hostID} className="project-host-group">
-	                      <header className="project-host-head">
-	                        <strong>{hostNode.hostName}</strong>
-	                        {hostNode.hostAddress ? <small>{hostNode.hostAddress}</small> : null}
-	                      </header>
-	                      {hostNode.projects.length === 0 ? (
-	                        <p className="pane-subtle-light compact-empty">No projects available.</p>
-	                      ) : (
-	                        hostNode.projects.map((projectNode) => (
-	                          <div key={projectNode.id} className="project-node">
-	                            <button
-	                              type="button"
-	                              className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
-	                              onClick={() => setActiveWorkspaceID(projectNode.id)}
-	                              title={projectNode.path}
-	                            >
-	                              <span className="project-chip-main">
-	                                <strong>{compactPath(projectNode.path)}</strong>
-	                                <em>{projectNode.path}</em>
-	                              </span>
-	                              <small>{projectNode.sessions.length === 0 ? "empty" : `${projectNode.sessions.length}`}</small>
-	                            </button>
-	                            <div className="project-session-list">
-	                              {projectNode.sessions.length === 0 ? (
-	                                <p className="pane-subtle-light compact-empty">No sessions in this project.</p>
-	                              ) : (
-	                                projectNode.sessions.map((sessionNode) => (
-	                                  <button
-	                                    key={sessionNode.id}
-	                                    type="button"
-	                                    className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
-	                                    data-session-id={sessionNode.id}
-	                                    onClick={() => activateThread(sessionNode.id)}
-	                                    title={sessionNode.title}
-	                                  >
-	                                    <span className="session-chip-label">{sessionNode.title}</span>
-	                                    <span className="session-chip-state">
-	                                      {sessionNode.activeJobID ? <small className="session-chip-badge running">running</small> : null}
-	                                      {sessionNode.unreadDone ? <small className="session-chip-badge unread">new</small> : null}
-	                                      {!sessionNode.activeJobID &&
-	                                      !sessionNode.unreadDone &&
-	                                      sessionNode.lastJobStatus !== "idle" ? (
-	                                        <small className="session-chip-badge status">{sessionNode.lastJobStatus}</small>
-	                                      ) : null}
-	                                    </span>
-	                                  </button>
-	                                ))
-	                              )}
-	                            </div>
-	                          </div>
-	                        ))
-	                      )}
-	                    </article>
-	                  ))
-	                )}
+                  filteredSessionTreeHosts.map((hostNode) => {
+                    const isCollapsed = collapsedHostIDs.includes(
+                      hostNode.hostID,
+                    );
+                    return (
+                      <article
+                        key={hostNode.hostID}
+                        className="project-host-group"
+                      >
+                        <header className="project-host-head">
+                          <div className="project-host-headline">
+                            <strong>{hostNode.hostName}</strong>
+                            {hostNode.hostAddress ? (
+                              <small>{hostNode.hostAddress}</small>
+                            ) : null}
+                          </div>
+                          <button
+                            type="button"
+                            className="ghost host-toggle"
+                            onClick={() => toggleHostCollapsed(hostNode.hostID)}
+                          >
+                            {isCollapsed ? "Expand" : "Collapse"}
+                          </button>
+                        </header>
+                        {isCollapsed ? null : hostNode.projects.length === 0 ? (
+                          <p className="pane-subtle-light compact-empty">
+                            No projects available.
+                          </p>
+                        ) : (
+                          hostNode.projects.map((projectNode) => (
+                            <div key={projectNode.id} className="project-node">
+                              <button
+                                type="button"
+                                className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
+                                onClick={() =>
+                                  setActiveWorkspaceID(projectNode.id)
+                                }
+                                title={projectNode.path}
+                              >
+                                <span className="project-chip-main">
+                                  <strong>
+                                    {compactPath(projectNode.path)}
+                                  </strong>
+                                  <em>{projectNode.path}</em>
+                                </span>
+                                <small>
+                                  {projectNode.sessions.length === 0
+                                    ? "empty"
+                                    : `${projectNode.sessions.length}`}
+                                </small>
+                              </button>
+                              <div className="project-session-list">
+                                {projectNode.sessions.length === 0 ? (
+                                  <p className="pane-subtle-light compact-empty">
+                                    No sessions in this project.
+                                  </p>
+                                ) : (
+                                  projectNode.sessions.map((sessionNode) => (
+                                    <button
+                                      key={sessionNode.id}
+                                      type="button"
+                                      className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
+                                      data-session-id={sessionNode.id}
+                                      onClick={() =>
+                                        activateThread(sessionNode.id)
+                                      }
+                                      title={sessionNode.title}
+                                    >
+                                      <span className="session-chip-label">
+                                        {sessionNode.title}
+                                      </span>
+                                      <span className="session-chip-state">
+                                        {sessionNode.activeJobID ? (
+                                          <small className="session-chip-badge running">
+                                            running
+                                          </small>
+                                        ) : null}
+                                        {sessionNode.unreadDone ? (
+                                          <small className="session-chip-badge unread">
+                                            new
+                                          </small>
+                                        ) : null}
+                                        {!sessionNode.activeJobID &&
+                                        !sessionNode.unreadDone &&
+                                        sessionNode.lastJobStatus !== "idle" ? (
+                                          <small className="session-chip-badge status">
+                                            {sessionNode.lastJobStatus}
+                                          </small>
+                                        ) : null}
+                                      </span>
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </article>
+                    );
+                  })
+                )}
               </div>
             </section>
 
             <section className="inspect-block compact-session-meta">
-              <p className="pane-subtle-light">Ctrl/Cmd+K focus · Enter send · Shift+Enter newline · Ctrl/Cmd+Shift+N new session</p>
+              <p className="pane-subtle-light">
+                Ctrl/Cmd+K focus · Enter send · Shift+Enter newline ·
+                Ctrl/Cmd+Shift+N new session
+              </p>
               <div className="ops-actions-row">
-                <button type="button" className="ghost" onClick={() => void onEnableNotifications()}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void onEnableNotifications()}
+                >
                   Alerts: {notificationPermission}
                 </button>
               </div>
             </section>
           </aside>
 
-	          <main className="chat-pane">
-	            <header className="chat-head">
-	              <div>
-	                <h1>{activeThread?.title ?? "Session"}</h1>
-	                <p className="chat-context">
-	                  {(activeWorkspace?.hostName?.trim() || "local-default") +
-	                    " · " +
-	                    (activeWorkspace?.path?.trim() || "/home/ecs-user")}
-	                </p>
-	              </div>
-	            </header>
+          <main className="chat-pane">
+            <header className="chat-head">
+              <div>
+                <h1>{activeThread?.title ?? "Session"}</h1>
+                <p className="chat-context">
+                  {(activeWorkspace?.hostName?.trim() || "local-default") +
+                    " · " +
+                    (activeWorkspace?.path?.trim() || "/home/ecs-user")}
+                </p>
+              </div>
+            </header>
 
-            <section className="timeline" aria-live="polite" ref={timelineViewportRef} onScroll={onTimelineScroll}>
+            <section
+              className="timeline"
+              aria-live="polite"
+              ref={timelineViewportRef}
+              onScroll={onTimelineScroll}
+            >
               {activeTimeline.length === 0 ? (
                 <article className="message message-system">
                   <div className="message-title-row">
@@ -2341,19 +2954,26 @@ export function App() {
                 </article>
               ) : (
                 activeTimeline.map((entry) => (
-                  <article key={entry.id} className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}>
+                  <article
+                    key={entry.id}
+                    className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}
+                  >
                     <div className="message-title-row">
                       <h4>{entry.title}</h4>
                       <time>{formatClock(entry.createdAt)}</time>
                     </div>
-                    <pre>{entry.body}</pre>
+                    {renderMessageBody(entry.body)}
                   </article>
                 ))
               )}
               <div ref={timelineBottomRef} />
             </section>
 
-            <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
+            <form
+              ref={composerFormRef}
+              className="composer"
+              onSubmit={onSendPrompt}
+            >
               <div className="session-inline-settings">
                 <label className="session-setting-row">
                   model
@@ -2368,14 +2988,20 @@ export function App() {
                     {hasSessionModelChoices ? (
                       sessionModelChoices.map((modelName) => (
                         <option key={modelName} value={modelName}>
-                          {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
+                          {modelName === sessionModelDefault
+                            ? `${modelName} (default)`
+                            : modelName}
                         </option>
                       ))
                     ) : (
                       <option value="">model unavailable</option>
                     )}
                   </select>
-                  {!hasSessionModelChoices ? <small className="pane-subtle-light">No models discovered on this server.</small> : null}
+                  {!hasSessionModelChoices ? (
+                    <small className="pane-subtle-light">
+                      No models discovered on this server.
+                    </small>
+                  ) : null}
                 </label>
                 <label className="session-setting-row">
                   sandbox
@@ -2384,12 +3010,21 @@ export function App() {
                     disabled={!activeThread}
                     onChange={(event) =>
                       activeThread &&
-                      setThreadSandbox(activeThread.id, event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                      setThreadSandbox(
+                        activeThread.id,
+                        event.target.value as
+                          | ""
+                          | "read-only"
+                          | "workspace-write"
+                          | "danger-full-access",
+                      )
                     }
                   >
                     <option value="read-only">read-only</option>
                     <option value="workspace-write">workspace-write</option>
-                    <option value="danger-full-access">danger-full-access</option>
+                    <option value="danger-full-access">
+                      danger-full-access
+                    </option>
                   </select>
                 </label>
               </div>
@@ -2409,32 +3044,47 @@ export function App() {
                   />
                   {uploadingImage ? "uploading..." : "Attach Image"}
                 </label>
-	                {(activeThread?.imagePaths ?? []).map((imagePath) => (
-	                  <button
-	                    key={imagePath}
-	                    type="button"
+                {(activeThread?.imagePaths ?? []).map((imagePath) => (
+                  <button
+                    key={imagePath}
+                    type="button"
                     className="quick-chip ghost"
-                    onClick={() => activeThread && removeThreadImagePath(activeThread.id, imagePath)}
-	                  >
-	                    {imagePath.split("/").pop() ?? imagePath} ×
-	                  </button>
-	                ))}
-	                {imageUploadError ? <span className="shortcut-hint">{imageUploadError}</span> : null}
-	              </div>
+                    onClick={() =>
+                      activeThread &&
+                      removeThreadImagePath(activeThread.id, imagePath)
+                    }
+                  >
+                    {imagePath.split("/").pop() ?? imagePath} ×
+                  </button>
+                ))}
+                {imageUploadError ? (
+                  <span className="shortcut-hint">{imageUploadError}</span>
+                ) : null}
+              </div>
 
-	              <textarea
-	                ref={promptInputRef}
+              <textarea
+                ref={promptInputRef}
                 value={activeDraft}
                 onChange={(event) => {
                   if (activeThread) {
                     updateThreadDraft(activeThread.id, event.target.value);
                   }
                 }}
-	                rows={1}
-	                placeholder={activeThread ? "Tell codex what to do in this workspace..." : "Select a session to start"}
-	                disabled={!activeThread}
+                rows={1}
+                placeholder={
+                  activeThread
+                    ? "Tell codex what to do in this workspace..."
+                    : "Select a session to start"
+                }
+                disabled={!activeThread}
                 onKeyDown={(event) => {
-                  const composing = "isComposing" in event.nativeEvent ? Boolean((event.nativeEvent as { isComposing?: boolean }).isComposing) : false;
+                  const composing =
+                    "isComposing" in event.nativeEvent
+                      ? Boolean(
+                          (event.nativeEvent as { isComposing?: boolean })
+                            .isComposing,
+                        )
+                      : false;
                   if (event.key === "Enter" && !event.shiftKey && !composing) {
                     event.preventDefault();
                     composerFormRef.current?.requestSubmit();
@@ -2443,7 +3093,10 @@ export function App() {
               />
 
               <div className="composer-actions">
-                <button type="submit" disabled={activeThreadBusy || !activeThread}>
+                <button
+                  type="submit"
+                  disabled={activeThreadBusy || !activeThread}
+                >
                   {activeThreadBusy ? "Running..." : "Send"}
                 </button>
               </div>
@@ -2463,7 +3116,11 @@ export function App() {
               <div className="pane-title-line">
                 <h3>Targets</h3>
                 <label className="switch-inline">
-                  <input type="checkbox" checked={allHosts} onChange={(event) => setAllHosts(event.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={allHosts}
+                    onChange={(event) => setAllHosts(event.target.checked)}
+                  />
                   all
                 </label>
               </div>
@@ -2488,7 +3145,9 @@ export function App() {
                         <input
                           type="checkbox"
                           disabled={allHosts}
-                          checked={allHosts || selectedHostIDs.includes(host.id)}
+                          checked={
+                            allHosts || selectedHostIDs.includes(host.id)
+                          }
                           onChange={() => toggleHostSelection(host.id)}
                         />
                         <span className="target-meta">
@@ -2501,10 +3160,20 @@ export function App() {
                         </span>
                       </label>
                       <div className="target-actions">
-                        <button type="button" className="ghost" disabled={opsHostBusyID === host.id} onClick={() => void onProbeHost(host)}>
+                        <button
+                          type="button"
+                          className="ghost"
+                          disabled={opsHostBusyID === host.id}
+                          onClick={() => void onProbeHost(host)}
+                        >
                           {opsHostBusyID === host.id ? "..." : "Probe"}
                         </button>
-                        <button type="button" className="ghost" disabled={opsHostBusyID === host.id} onClick={() => onStartEditHost(host)}>
+                        <button
+                          type="button"
+                          className="ghost"
+                          disabled={opsHostBusyID === host.id}
+                          onClick={() => onStartEditHost(host)}
+                        >
                           Edit
                         </button>
                         <button
@@ -2526,7 +3195,10 @@ export function App() {
               <h3>Runtime</h3>
               <label>
                 runtime
-                <select value={selectedRuntime} onChange={(event) => setSelectedRuntime(event.target.value)}>
+                <select
+                  value={selectedRuntime}
+                  onChange={(event) => setSelectedRuntime(event.target.value)}
+                >
                   {runtimes.map((runtime) => (
                     <option key={runtime.name} value={runtime.name}>
                       {runtime.name}
@@ -2539,7 +3211,13 @@ export function App() {
                 <select
                   value={runSandbox}
                   onChange={(event) =>
-                    setRunSandbox(event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                    setRunSandbox(
+                      event.target.value as
+                        | ""
+                        | "read-only"
+                        | "workspace-write"
+                        | "danger-full-access",
+                    )
                   }
                 >
                   <option value="">default</option>
@@ -2549,7 +3227,11 @@ export function App() {
                 </select>
               </label>
               <label className="switch-inline">
-                <input type="checkbox" checked={runAsyncMode} onChange={(event) => setRunAsyncMode(event.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={runAsyncMode}
+                  onChange={(event) => setRunAsyncMode(event.target.checked)}
+                />
                 async queue
               </label>
             </section>
@@ -2562,14 +3244,21 @@ export function App() {
                 <li>depth={metrics?.queue.depth ?? "-"}</li>
               </ul>
               <div className="ops-actions-row">
-                <button type="button" className="ghost" onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void onRefreshWorkspace()}
+                  disabled={isRefreshing}
+                >
                   {isRefreshing ? "Refreshing..." : "Refresh Queue"}
                 </button>
                 <button
                   type="button"
                   className="ghost danger-ghost"
                   disabled={!activeJob || !isJobActive(activeJob)}
-                  onClick={() => (activeJob ? void onCancelJob(activeJob) : undefined)}
+                  onClick={() =>
+                    activeJob ? void onCancelJob(activeJob) : undefined
+                  }
                 >
                   Cancel Active
                 </button>
@@ -2583,13 +3272,18 @@ export function App() {
                 <li>jobs={jobs.length}</li>
                 <li>runs={runs.length}</li>
                 <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
-                <li>workers={metrics?.queue.workers_active ?? "-"}/{metrics?.queue.workers_total ?? "-"}</li>
+                <li>
+                  workers={metrics?.queue.workers_active ?? "-"}/
+                  {metrics?.queue.workers_total ?? "-"}
+                </li>
                 <li>threads={threads.length}</li>
               </ul>
             </section>
 
             {opsNotice ? (
-              <section className={`pane-block ops-notice ${opsNoticeIsError ? "ops-notice-error" : ""}`}>
+              <section
+                className={`pane-block ops-notice ${opsNoticeIsError ? "ops-notice-error" : ""}`}
+              >
                 <h3>Ops Notice</h3>
                 <p>{opsNotice}</p>
               </section>
@@ -2600,7 +3294,9 @@ export function App() {
             {isRefreshing ? (
               <section className="inspect-block">
                 <h3>Loading</h3>
-                <p className="pane-subtle-light">Refreshing hosts, queue, runs, and audit timeline...</p>
+                <p className="pane-subtle-light">
+                  Refreshing hosts, queue, runs, and audit timeline...
+                </p>
               </section>
             ) : null}
 
@@ -2610,19 +3306,25 @@ export function App() {
                 <div className="job-card">
                   <div className="job-head">
                     <strong>{activeJob.id}</strong>
-                    <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
+                    <span className={`tone-${statusTone(activeJob.status)}`}>
+                      {activeJob.status}
+                    </span>
                   </div>
                   <p>runtime={activeJob.runtime}</p>
                   <p>thread={activeJobThreadID}</p>
                   <p>queued={formatDateTime(activeJob.queued_at)}</p>
                   <p>
-                    hosts total={activeJob.total_hosts ?? 0} ok={activeJob.succeeded_hosts ?? 0} failed={activeJob.failed_hosts ?? 0}
+                    hosts total={activeJob.total_hosts ?? 0} ok=
+                    {activeJob.succeeded_hosts ?? 0} failed=
+                    {activeJob.failed_hosts ?? 0}
                   </p>
                   <div className="progress-track" aria-label="job progress">
                     <span style={{ width: `${activeProgress}%` }} />
                   </div>
                   <p>http={activeJob.result_status ?? "n/a"}</p>
-                  {activeJob.error ? <p className="tone-err">{activeJob.error}</p> : null}
+                  {activeJob.error ? (
+                    <p className="tone-err">{activeJob.error}</p>
+                  ) : null}
                 </div>
               ) : (
                 <p className="pane-subtle-light">No active async job.</p>
@@ -2638,7 +3340,13 @@ export function App() {
                     value={opsJobStatusFilter}
                     onChange={(event) =>
                       setOpsJobStatusFilter(
-                        event.target.value as "all" | "pending" | "running" | "succeeded" | "failed" | "canceled"
+                        event.target.value as
+                          | "all"
+                          | "pending"
+                          | "running"
+                          | "succeeded"
+                          | "failed"
+                          | "canceled",
                       )
                     }
                   >
@@ -2652,7 +3360,14 @@ export function App() {
                 </label>
                 <label>
                   type
-                  <select value={opsJobTypeFilter} onChange={(event) => setOpsJobTypeFilter(event.target.value as "all" | "run" | "sync")}>
+                  <select
+                    value={opsJobTypeFilter}
+                    onChange={(event) =>
+                      setOpsJobTypeFilter(
+                        event.target.value as "all" | "run" | "sync",
+                      )
+                    }
+                  >
                     <option value="all">all</option>
                     <option value="run">run</option>
                     <option value="sync">sync</option>
@@ -2675,12 +3390,18 @@ export function App() {
                         >
                           {job.id}
                         </button>
-                        <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                        <span className={`tone-${statusTone(job.status)}`}>
+                          {job.status}
+                        </span>
                         <span>{job.type}</span>
                       </div>
                       <div className="history-item-actions">
                         {isJobActive(job) ? (
-                          <button type="button" className="ghost danger-ghost" onClick={() => void onCancelJob(job)}>
+                          <button
+                            type="button"
+                            className="ghost danger-ghost"
+                            onClick={() => void onCancelJob(job)}
+                          >
                             Cancel
                           </button>
                         ) : null}
@@ -2696,7 +3417,14 @@ export function App() {
               <div className="ops-filter-row">
                 <label>
                   status
-                  <select value={opsRunStatusFilter} onChange={(event) => setOpsRunStatusFilter(event.target.value as "all" | "ok" | "error")}>
+                  <select
+                    value={opsRunStatusFilter}
+                    onChange={(event) =>
+                      setOpsRunStatusFilter(
+                        event.target.value as "all" | "ok" | "error",
+                      )
+                    }
+                  >
                     <option value="all">all</option>
                     <option value="ok">ok</option>
                     <option value="error">error</option>
@@ -2710,8 +3438,12 @@ export function App() {
                   {filteredOpsRuns.slice(0, 8).map((run) => (
                     <li key={run.id}>
                       <span>{run.id}</span>
-                      <span className={`tone-${run.status_code < 400 ? "ok" : "err"}`}>
-                        {run.status_code < 400 ? "ok" : `http_${run.status_code}`}
+                      <span
+                        className={`tone-${run.status_code < 400 ? "ok" : "err"}`}
+                      >
+                        {run.status_code < 400
+                          ? "ok"
+                          : `http_${run.status_code}`}
                       </span>
                     </li>
                   ))}
@@ -2726,7 +3458,11 @@ export function App() {
                   method
                   <select
                     value={opsAuditMethodFilter}
-                    onChange={(event) => setOpsAuditMethodFilter(event.target.value as "all" | "GET" | "POST" | "DELETE")}
+                    onChange={(event) =>
+                      setOpsAuditMethodFilter(
+                        event.target.value as "all" | "GET" | "POST" | "DELETE",
+                      )
+                    }
                   >
                     <option value="all">all</option>
                     <option value="GET">GET</option>
@@ -2738,7 +3474,11 @@ export function App() {
                   status
                   <select
                     value={opsAuditStatusFilter}
-                    onChange={(event) => setOpsAuditStatusFilter(event.target.value as "all" | "2xx" | "4xx" | "5xx")}
+                    onChange={(event) =>
+                      setOpsAuditStatusFilter(
+                        event.target.value as "all" | "2xx" | "4xx" | "5xx",
+                      )
+                    }
                   >
                     <option value="all">all</option>
                     <option value="2xx">2xx</option>
@@ -2748,7 +3488,9 @@ export function App() {
                 </label>
               </div>
               {filteredAuditEvents.length === 0 ? (
-                <p className="pane-subtle-light">No audit events with current filters.</p>
+                <p className="pane-subtle-light">
+                  No audit events with current filters.
+                </p>
               ) : (
                 <ul className="history-list">
                   {filteredAuditEvents.slice(0, 12).map((evt) => (
@@ -2759,7 +3501,11 @@ export function App() {
                           {evt.method} {evt.path}
                         </span>
                       </div>
-                      <span className={`tone-${evt.status_code < 400 ? "ok" : "err"}`}>{evt.status_code}</span>
+                      <span
+                        className={`tone-${evt.status_code < 400 ? "ok" : "err"}`}
+                      >
+                        {evt.status_code}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -2772,39 +3518,76 @@ export function App() {
                 <input
                   placeholder="name"
                   value={hostForm.name}
-                  onChange={(event) => setHostForm((prev) => ({ ...prev, name: event.target.value }))}
+                  onChange={(event) =>
+                    setHostForm((prev) => ({
+                      ...prev,
+                      name: event.target.value,
+                    }))
+                  }
                 />
                 <label>
                   connection mode
                   <select
                     value={hostForm.connectionMode}
-                    onChange={(event) => setHostForm((prev) => ({ ...prev, connectionMode: event.target.value as "ssh" | "local" }))}
+                    onChange={(event) =>
+                      setHostForm((prev) => ({
+                        ...prev,
+                        connectionMode: event.target.value as "ssh" | "local",
+                      }))
+                    }
                   >
                     <option value="ssh">ssh</option>
                     <option value="local">local</option>
                   </select>
                 </label>
                 <input
-                  placeholder={hostForm.connectionMode === "local" ? "host (optional for local mode)" : "host"}
+                  placeholder={
+                    hostForm.connectionMode === "local"
+                      ? "host (optional for local mode)"
+                      : "host"
+                  }
                   value={hostForm.host}
-                  onChange={(event) => setHostForm((prev) => ({ ...prev, host: event.target.value }))}
+                  onChange={(event) =>
+                    setHostForm((prev) => ({
+                      ...prev,
+                      host: event.target.value,
+                    }))
+                  }
                 />
                 <input
                   placeholder="user"
                   value={hostForm.user}
-                  onChange={(event) => setHostForm((prev) => ({ ...prev, user: event.target.value }))}
+                  onChange={(event) =>
+                    setHostForm((prev) => ({
+                      ...prev,
+                      user: event.target.value,
+                    }))
+                  }
                 />
                 <input
                   placeholder="workspace"
                   value={hostForm.workspace}
-                  onChange={(event) => setHostForm((prev) => ({ ...prev, workspace: event.target.value }))}
+                  onChange={(event) =>
+                    setHostForm((prev) => ({
+                      ...prev,
+                      workspace: event.target.value,
+                    }))
+                  }
                 />
                 <div className="ops-actions-row">
                   <button type="submit" disabled={addingHost}>
-                    {addingHost ? "Saving..." : editingHostID ? "Update Host" : "Save Host"}
+                    {addingHost
+                      ? "Saving..."
+                      : editingHostID
+                        ? "Update Host"
+                        : "Save Host"}
                   </button>
                   {editingHostID ? (
-                    <button type="button" className="ghost" onClick={onCancelHostEdit}>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={onCancelHostEdit}
+                    >
                       Cancel Edit
                     </button>
                   ) : null}
@@ -2818,7 +3601,12 @@ export function App() {
       {sessionAlerts.length > 0 ? (
         <div className="session-alert-stack" role="status" aria-live="polite">
           {sessionAlerts.map((alert) => (
-            <button key={alert.id} type="button" className="session-alert" onClick={() => openSessionFromAlert(alert)}>
+            <button
+              key={alert.id}
+              type="button"
+              className="session-alert"
+              onClick={() => openSessionFromAlert(alert)}
+            >
               <strong>{alert.title}</strong>
               <span>{alert.body}</span>
             </button>

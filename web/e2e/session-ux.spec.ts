@@ -16,14 +16,22 @@ function buildLongAssistantReply(marker: string): string {
   return lines.join("\n");
 }
 
-async function mockSessionApi(page: Page, assistantReply: string, marker: string, options?: MockOptions): Promise<MockHarness> {
+async function mockSessionApi(
+  page: Page,
+  assistantReply: string,
+  marker: string,
+  options?: MockOptions,
+): Promise<MockHarness> {
   let jobPollCount = 0;
   let eventPollCount = 0;
   let runReqCount = 0;
   const streamPattern = options?.streamPattern ?? "ready-only";
 
   await page.route("**/v1/healthz", async (route) => {
-    await route.fulfill({ status: 200, json: { ok: true, timestamp: "2026-03-03T00:00:00Z" } });
+    await route.fulfill({
+      status: 200,
+      json: { ok: true, timestamp: "2026-03-03T00:00:00Z" },
+    });
   });
   await page.route("**/v1/hosts", async (route, request) => {
     if (request.method() !== "GET") {
@@ -33,8 +41,18 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
     await route.fulfill({
       status: 200,
       json: {
-        hosts: [{ id: "local_1", name: "local-default", connection_mode: "local", host: "localhost", user: "", port: 22, workspace: "/srv/work" }]
-      }
+        hosts: [
+          {
+            id: "local_1",
+            name: "local-default",
+            connection_mode: "local",
+            host: "localhost",
+            user: "",
+            port: 22,
+            workspace: "/srv/work",
+          },
+        ],
+      },
     });
   });
   await page.route("**/v1/runtimes", async (route) => {
@@ -49,11 +67,11 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
               supports_interactive_session: false,
               supports_structured_output: true,
               supports_file_patch_mode: false,
-              supports_cost_metrics: false
-            }
-          }
-        ]
-      }
+              supports_cost_metrics: false,
+            },
+          },
+        ],
+      },
     });
   });
   await page.route("**/v1/runs**", async (route) => {
@@ -66,10 +84,23 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
     await route.fulfill({
       status: 200,
       json: {
-        jobs: { total: 1, pending: 0, running: 0, succeeded: 1, failed: 0, canceled: 0, retry_attempts: 0 },
-        queue: { depth: 0, workers_total: 2, workers_active: 0, worker_utilization: 0 },
-        success_rate: 1
-      }
+        jobs: {
+          total: 1,
+          pending: 0,
+          running: 0,
+          succeeded: 1,
+          failed: 0,
+          canceled: 0,
+          retry_attempts: 0,
+        },
+        queue: {
+          depth: 0,
+          workers_total: 2,
+          workers_active: 0,
+          worker_utilization: 0,
+        },
+        success_rate: 1,
+      },
     });
   });
   await page.route("**/v1/admin/retention", async (route, request) => {
@@ -79,7 +110,13 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
     }
     await route.fulfill({
       status: 200,
-      json: { retention: { run_records_max: 500, run_jobs_max: 1000, audit_events_max: 5000 } }
+      json: {
+        retention: {
+          run_records_max: 500,
+          run_jobs_max: 1000,
+          audit_events_max: 5000,
+        },
+      },
     });
   });
   await page.route("**/v1/codex/models**", async (route) => {
@@ -88,8 +125,8 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
       json: {
         runtime: "codex",
         default_model: "gpt-5-codex",
-        models: ["gpt-5-codex", "gpt-5"]
-      }
+        models: ["gpt-5-codex", "gpt-5"],
+      },
     });
   });
   await page.route("**/v1/projects**", async (route) => {
@@ -104,10 +141,10 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
             path: "/srv/work",
             runtime: "codex",
             created_at: "2026-03-03T00:00:00Z",
-            updated_at: "2026-03-03T00:00:00Z"
-          }
-        ]
-      }
+            updated_at: "2026-03-03T00:00:00Z",
+          },
+        ],
+      },
     });
   });
   await page.route("**/v1/sessions?**", async (route) => {
@@ -123,10 +160,10 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
             runtime: "codex",
             title: "Session 1",
             created_at: "2026-03-03T00:00:00Z",
-            updated_at: "2026-03-03T00:00:00Z"
-          }
-        ]
-      }
+            updated_at: "2026-03-03T00:00:00Z",
+          },
+        ],
+      },
     });
   });
   await page.route("**/v1/sessions/session_cli_1/stream**", async (route) => {
@@ -151,19 +188,19 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
         `event: session.event`,
         `data: {"seq":4,"session_id":"session_cli_1","run_id":"job_ux_1","type":"run.completed","payload":{"job_id":"job_ux_1"},"created_at":"2026-03-03T00:00:01Z"}`,
         ``,
-        ``
+        ``,
       ].join("\n");
       await route.fulfill({
         status: 200,
         headers: { "content-type": "text/event-stream" },
-        body: streamBody
+        body: streamBody,
       });
       return;
     }
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
-      body: `event: session.ready\ndata: {"session_id":"session_cli_1","cursor":0}\n\n`
+      body: `event: session.ready\ndata: {"session_id":"session_cli_1","cursor":0}\n\n`,
     });
   });
   await page.route("**/v1/codex/sessions/discover", async (route) => {
@@ -171,10 +208,26 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
       status: 200,
       json: {
         operation: "codex_sessions_discover",
-        summary: { total: 1, succeeded: 1, failed: 0, fanout: 1, duration_ms: 5, started_at: "2026-03-03T00:00:00Z", finished_at: "2026-03-03T00:00:00Z" },
+        summary: {
+          total: 1,
+          succeeded: 1,
+          failed: 0,
+          fanout: 1,
+          duration_ms: 5,
+          started_at: "2026-03-03T00:00:00Z",
+          finished_at: "2026-03-03T00:00:00Z",
+        },
         targets: [
           {
-            host: { id: "local_1", name: "local-default", connection_mode: "local", host: "localhost", user: "", port: 22, workspace: "/srv/work" },
+            host: {
+              id: "local_1",
+              name: "local-default",
+              connection_mode: "local",
+              host: "localhost",
+              user: "",
+              port: 22,
+              workspace: "/srv/work",
+            },
             ok: true,
             sessions: [
               {
@@ -183,12 +236,12 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
                 cwd: "/srv/work",
                 path: "/home/ecs-user/.codex/sessions/session_cli_1.jsonl",
                 updated_at: "2026-03-03T00:00:00Z",
-                size_bytes: 128
-              }
-            ]
-          }
-        ]
-      }
+                size_bytes: 128,
+              },
+            ],
+          },
+        ],
+      },
     });
   });
 
@@ -205,9 +258,9 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
           prompt_preview: `prompt-${marker}`,
           queued_at: "2026-03-03T00:00:00Z",
           total_hosts: 1,
-          fanout: 1
-        }
-      }
+          fanout: 1,
+        },
+      },
     });
   });
   await page.route("**/v1/jobs/job_ux_1", async (route) => {
@@ -223,9 +276,9 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
             runtime: "codex",
             prompt_preview: "prompt",
             queued_at: "2026-03-03T00:00:00Z",
-            started_at: "2026-03-03T00:00:01Z"
-          }
-        }
+            started_at: "2026-03-03T00:00:01Z",
+          },
+        },
       });
       return;
     }
@@ -258,22 +311,33 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
               retry_backoff_ms: 1000,
               duration_ms: 1000,
               started_at: "2026-03-03T00:00:01Z",
-              finished_at: "2026-03-03T00:00:02Z"
+              finished_at: "2026-03-03T00:00:02Z",
             },
-            targets: []
-          }
-        }
-      }
+            targets: [],
+          },
+        },
+      },
     });
   });
   await page.route("**/v1/jobs/job_ux_1/events**", async (route) => {
     if (streamPattern === "completion-once") {
-      await route.fulfill({ status: 200, json: { job_id: "job_ux_1", after: eventPollCount, next_after: eventPollCount, events: [] } });
+      await route.fulfill({
+        status: 200,
+        json: {
+          job_id: "job_ux_1",
+          after: eventPollCount,
+          next_after: eventPollCount,
+          events: [],
+        },
+      });
       return;
     }
     eventPollCount += 1;
     if (eventPollCount > 1) {
-      await route.fulfill({ status: 200, json: { job_id: "job_ux_1", after: 4, next_after: 4, events: [] } });
+      await route.fulfill({
+        status: 200,
+        json: { job_id: "job_ux_1", after: 4, next_after: 4, events: [] },
+      });
       return;
     }
     await route.fulfill({
@@ -283,7 +347,12 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
         after: 0,
         next_after: 4,
         events: [
-          { seq: 1, job_id: "job_ux_1", type: "job.running", created_at: "2026-03-03T00:00:00Z" },
+          {
+            seq: 1,
+            job_id: "job_ux_1",
+            type: "job.running",
+            created_at: "2026-03-03T00:00:00Z",
+          },
           {
             seq: 2,
             job_id: "job_ux_1",
@@ -293,12 +362,25 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
               `{"type":"thread.started","thread_id":"t_ux"}\n` +
               `{"type":"turn.started"}\n` +
               `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: assistantReply } })}\n`,
-            created_at: "2026-03-03T00:00:00Z"
+            created_at: "2026-03-03T00:00:00Z",
           },
-          { seq: 3, job_id: "job_ux_1", type: "target.done", host_name: "local-default", status: "ok", exit_code: 0, created_at: "2026-03-03T00:00:00Z" },
-          { seq: 4, job_id: "job_ux_1", type: "job.succeeded", created_at: "2026-03-03T00:00:01Z" }
-        ]
-      }
+          {
+            seq: 3,
+            job_id: "job_ux_1",
+            type: "target.done",
+            host_name: "local-default",
+            status: "ok",
+            exit_code: 0,
+            created_at: "2026-03-03T00:00:00Z",
+          },
+          {
+            seq: 4,
+            job_id: "job_ux_1",
+            type: "job.succeeded",
+            created_at: "2026-03-03T00:00:01Z",
+          },
+        ],
+      },
     });
   });
   await page.route("**/v1/jobs**", async (route) => {
@@ -328,15 +410,15 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
             succeeded_hosts: status === "succeeded" ? 1 : 0,
             failed_hosts: 0,
             fanout: 1,
-            duration_ms: status === "succeeded" ? 1000 : 0
-          }
-        ]
-      }
+            duration_ms: status === "succeeded" ? 1000 : 0,
+          },
+        ],
+      },
     });
   });
 
   return {
-    runRequests: () => runReqCount
+    runRequests: () => runReqCount,
   };
 }
 
@@ -348,7 +430,9 @@ async function unlock(page: Page): Promise<void> {
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 }
 
-test("desktop session UX baseline (layout + interaction + scroll)", async ({ page }) => {
+test("desktop session UX baseline (layout + interaction + scroll)", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `UX_MARKER_${Date.now()}`;
   const assistantReply = buildLongAssistantReply(marker);
@@ -359,7 +443,9 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({ pag
   const chatPane = page.locator(".chat-pane");
   await expect(sidebar).toBeVisible();
   await expect(chatPane).toBeVisible();
-  await expect(page.locator(".chat-context")).toContainText("local-default · /srv/work");
+  await expect(page.locator(".chat-context")).toContainText(
+    "local-default · /srv/work",
+  );
   const sideBox = await sidebar.boundingBox();
   const chatBox = await chatPane.boundingBox();
   expect(sideBox).not.toBeNull();
@@ -367,14 +453,37 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({ pag
   expect(Math.abs((chatBox?.y ?? 0) - (sideBox?.y ?? 0)) <= 40).toBeTruthy();
   expect((chatBox?.width ?? 0) >= 600).toBeTruthy();
 
-  const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+  const projectFilter = page.getByPlaceholder("Filter projects or sessions");
+  await expect(projectFilter).toBeVisible();
+  await projectFilter.fill("session 1");
+  await expect(page.locator(".session-chip-tree")).toHaveCount(1);
+  await projectFilter.fill("not-found-session");
+  await expect(
+    page.getByText("No matching projects or sessions."),
+  ).toBeVisible();
+  await projectFilter.fill("");
+  await page.getByRole("button", { name: "Collapse" }).first().click();
+  await expect(
+    page.getByRole("button", { name: "Expand" }).first(),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Expand" }).first().click();
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
   await composer.fill("line-a");
   await composer.press("Shift+Enter");
   await composer.type("line-b");
   await expect(composer).toHaveValue("line-a\nline-b");
-  const initialHeight = await composer.evaluate((el) => Number.parseFloat(getComputedStyle(el).height));
-  await composer.fill(Array.from({ length: 12 }, (_, index) => `line-${index + 1}`).join("\n"));
-  const expandedHeight = await composer.evaluate((el) => Number.parseFloat(getComputedStyle(el).height));
+  const initialHeight = await composer.evaluate((el) =>
+    Number.parseFloat(getComputedStyle(el).height),
+  );
+  await composer.fill(
+    Array.from({ length: 12 }, (_, index) => `line-${index + 1}`).join("\n"),
+  );
+  const expandedHeight = await composer.evaluate((el) =>
+    Number.parseFloat(getComputedStyle(el).height),
+  );
   expect(expandedHeight > initialHeight).toBeTruthy();
 
   await composer.fill(`reply once with marker: ${marker}`);
@@ -382,29 +491,41 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({ pag
   await expect(composer).toHaveValue("");
   await expect.poll(() => harness.runRequests()).toBe(1);
 
-  const assistantWithMarker = page.locator(".message.message-assistant pre", { hasText: marker });
+  const assistantWithMarker = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
   await expect(assistantWithMarker).toHaveCount(1);
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 
   const timeline = page.locator(".timeline");
-  const scrollGap = await timeline.evaluate((el) => Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop));
+  const scrollGap = await timeline.evaluate((el) =>
+    Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop),
+  );
   expect(scrollGap <= 48).toBeTruthy();
 });
 
-test("session stream completion keeps a single assistant reply", async ({ page }) => {
+test("session stream completion keeps a single assistant reply", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `STREAM_ONCE_${Date.now()}`;
-  const harness = await mockSessionApi(page, `single reply ${marker}`, marker, { streamPattern: "completion-once" });
+  const harness = await mockSessionApi(page, `single reply ${marker}`, marker, {
+    streamPattern: "completion-once",
+  });
   await unlock(page);
 
-  const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
   await composer.fill(`reply once with marker: ${marker}`);
   await composer.press("Enter");
   await expect(composer).toHaveValue("");
   await expect.poll(() => harness.runRequests()).toBe(1);
 
-  const assistantWithMarker = page.locator(".message.message-assistant pre", { hasText: marker });
+  const assistantWithMarker = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
   await expect(assistantWithMarker).toHaveCount(1);
   await page.waitForTimeout(1800);
   await expect(assistantWithMarker).toHaveCount(1);
@@ -413,7 +534,9 @@ test("session stream completion keeps a single assistant reply", async ({ page }
 });
 
 test.use({ viewport: { width: 390, height: 844 } });
-test("mobile session UX baseline (stacked layout + no horizontal overflow)", async ({ page }) => {
+test("mobile session UX baseline (stacked layout + no horizontal overflow)", async ({
+  page,
+}) => {
   const marker = `MOBILE_${Date.now()}`;
   await mockSessionApi(page, `mobile ${marker}`, marker);
   await unlock(page);
@@ -428,9 +551,15 @@ test("mobile session UX baseline (stacked layout + no horizontal overflow)", asy
   expect(chatBox).not.toBeNull();
   expect((chatBox?.y ?? 0) > (sideBox?.y ?? 0)).toBeTruthy();
 
-  const overflowX = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  const overflowX = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
   expect(overflowX <= 2).toBeTruthy();
 
-  await expect(page.getByPlaceholder("Tell codex what to do in this workspace...")).toBeVisible();
+  await expect(
+    page.getByPlaceholder("Tell codex what to do in this workspace..."),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
 });
