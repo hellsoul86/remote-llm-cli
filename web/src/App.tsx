@@ -103,6 +103,7 @@ type SessionStreamHealth = {
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
 const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
+const MAX_SESSION_STREAMS = 4;
 
 type SessionTreePrefs = {
   projectFilter: string;
@@ -759,16 +760,68 @@ export function App() {
     }
     return out;
   }, [workspaces]);
-  const allSessionIDs = useMemo(() => {
-    const ids: string[] = [];
+  const sessionStreamTargetIDs = useMemo(() => {
+    type StreamTarget = {
+      id: string;
+      priority: number;
+      updatedAtMS: number;
+    };
+    const byID = new Map<string, StreamTarget>();
+    const touch = (idRaw: string, priority: number, updatedAtRaw: string) => {
+      const id = idRaw.trim();
+      if (!id) return;
+      const parsed = Date.parse(updatedAtRaw);
+      const updatedAtMS = Number.isFinite(parsed) ? parsed : 0;
+      const existing = byID.get(id);
+      if (
+        !existing ||
+        priority < existing.priority ||
+        (priority === existing.priority && updatedAtMS > existing.updatedAtMS)
+      ) {
+        byID.set(id, { id, priority, updatedAtMS });
+      }
+    };
+
     for (const workspace of workspaces) {
       for (const thread of workspace.sessions) {
-        const id = thread.id.trim();
-        if (id) ids.push(id);
+        const priority = thread.id === activeThreadID
+          ? 0
+          : thread.activeJobID.trim()
+            ? 1
+            : thread.pinned
+              ? 2
+              : thread.unreadDone
+                ? 3
+                : 9;
+        touch(thread.id, priority, thread.updatedAt);
       }
     }
-    return ids;
-  }, [workspaces]);
+
+    const ordered = Array.from(byID.values()).sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+      if (left.updatedAtMS !== right.updatedAtMS) {
+        return right.updatedAtMS - left.updatedAtMS;
+      }
+      return left.id.localeCompare(right.id);
+    });
+
+    const pinned = ordered.filter((item) => item.priority <= 3);
+    if (pinned.length >= MAX_SESSION_STREAMS) {
+      return pinned.slice(0, MAX_SESSION_STREAMS).map((item) => item.id);
+    }
+
+    const chosen = [...pinned];
+    const chosenIDs = new Set(chosen.map((item) => item.id));
+    for (const item of ordered) {
+      if (chosenIDs.has(item.id)) continue;
+      chosen.push(item);
+      chosenIDs.add(item.id);
+      if (chosen.length >= MAX_SESSION_STREAMS) break;
+    }
+    return chosen.map((item) => item.id);
+  }, [workspaces, activeThreadID]);
   const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
   const sessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
     const hostLookup = new Map<string, Host>();
@@ -2376,7 +2429,7 @@ export function App() {
       streamAuthTokenRef.current = token;
     }
 
-    const expected = new Set(allSessionIDs);
+    const expected = new Set(sessionStreamTargetIDs);
     for (const sessionID of expected) {
       if (!sessionStreamStateRef.current.has(sessionID)) {
         startSessionStream(sessionID, token);
@@ -2386,7 +2439,7 @@ export function App() {
       if (expected.has(sessionID)) continue;
       stopSessionStream(sessionID);
     }
-  }, [authPhase, token, allSessionIDs]);
+  }, [authPhase, token, sessionStreamTargetIDs]);
 
   useEffect(() => {
     return () => {
