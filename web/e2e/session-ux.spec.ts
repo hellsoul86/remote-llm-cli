@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 type MockHarness = {
   runRequests: () => number;
+  sessionOneStreamAfterValues: () => number[];
 };
 
 type MockOptions = {
@@ -39,6 +40,7 @@ async function mockSessionApi(
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   let sessionOneStreamAttempts = 0;
+  const sessionOneStreamAfterValues: number[] = [];
   let canceled = false;
   const nowISO = new Date().toISOString();
   const sessions = [
@@ -256,6 +258,13 @@ async function mockSessionApi(
     });
   });
   await page.route("**/v1/sessions/session_cli_1/stream**", async (route) => {
+    const url = new URL(route.request().url());
+    const streamAfterRaw = url.searchParams.get("after") ?? "0";
+    const streamAfter = Number.parseInt(streamAfterRaw, 10);
+    const safeStreamAfter = Number.isFinite(streamAfter) && streamAfter > 0
+      ? streamAfter
+      : 0;
+    sessionOneStreamAfterValues.push(safeStreamAfter);
     if (sessionOneStreamAttempts < streamFailAttempts) {
       sessionOneStreamAttempts += 1;
       await route.fulfill({
@@ -350,12 +359,13 @@ async function mockSessionApi(
         payload: { job_id: "job_ux_1" },
         createdAt: "2026-03-03T00:00:01Z",
       });
-      const streamLines = [
+      const replayEvents = events.filter((event) => event.seq > safeStreamAfter);
+      const streamLines: string[] = [
         `event: session.ready`,
-        `data: {"session_id":"session_cli_1","cursor":0}`,
+        `data: {"session_id":"session_cli_1","cursor":${safeStreamAfter}}`,
         ``,
       ];
-      for (const event of events) {
+      for (const event of replayEvents) {
         streamLines.push(`event: session.event`);
         streamLines.push(
           `data: ${JSON.stringify({
@@ -741,6 +751,7 @@ async function mockSessionApi(
 
   return {
     runRequests: () => runReqCount,
+    sessionOneStreamAfterValues: () => [...sessionOneStreamAfterValues],
   };
 }
 
@@ -950,6 +961,41 @@ test("historical stream replay on refresh does not trigger session alerts", asyn
   await page.waitForTimeout(1800);
   await expect(page.locator(".session-alert")).toHaveCount(0);
   await expect(page.locator(".session-chip-badge.unread")).toHaveCount(0);
+});
+
+test("refresh resumes stream from persisted cursor without duplicate timeline", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `CURSOR_${Date.now()}`;
+  const harness = await mockSessionApi(page, `cursor reply ${marker}`, marker, {
+    streamPattern: "completion-once",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`check cursor replay safety ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  await expect(
+    page.locator(".message.message-assistant pre", { hasText: marker }),
+  ).toHaveCount(1);
+  await expect(page.getByText("Run Started")).toHaveCount(1);
+  await expect(page.getByText("Target Done")).toHaveCount(1);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(
+    page.locator(".message.message-assistant pre", { hasText: marker }),
+  ).toHaveCount(1);
+  await expect(page.getByText("Run Started")).toHaveCount(1);
+  await expect(page.getByText("Target Done")).toHaveCount(1);
+  await expect.poll(
+    () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
+  ).toBe(true);
+  await expect(page.locator(".session-alert")).toHaveCount(0);
 });
 
 test("session tree keyboard nav and prefs survive reload", async ({ page }) => {

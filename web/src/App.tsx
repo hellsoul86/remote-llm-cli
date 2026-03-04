@@ -51,6 +51,10 @@ import {
 
 const TOKEN_KEY = "remote_llm_access_key";
 const SESSION_TREE_PREFS_KEY = "remote_llm_session_tree_prefs_v1";
+const SESSION_EVENT_CURSOR_KEY = "remote_llm_session_event_cursor_v1";
+const COMPLETED_RUNS_KEY = "remote_llm_completed_runs_v1";
+const MAX_PERSISTED_SESSION_CURSORS = 1200;
+const MAX_PERSISTED_COMPLETED_RUNS = 2400;
 
 type AuthPhase = "checking" | "locked" | "ready";
 type AppMode = "session" | "ops";
@@ -137,6 +141,82 @@ type SessionLastStatus =
   | "succeeded"
   | "failed"
   | "canceled";
+
+function loadPersistedSessionEventCursors(): Map<string, number> {
+  if (typeof window === "undefined") {
+    return new Map();
+  }
+  const raw = window.localStorage.getItem(SESSION_EVENT_CURSOR_KEY);
+  if (!raw) return new Map();
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const entries = Object.entries(parsed)
+      .map(([sessionID, cursor]) => {
+        const normalizedID = sessionID.trim();
+        const normalizedCursor =
+          typeof cursor === "number" ? cursor : Number(cursor);
+        return [normalizedID, normalizedCursor] as const;
+      })
+      .filter(
+        ([sessionID, cursor]) =>
+          sessionID !== "" && Number.isFinite(cursor) && cursor > 0,
+      )
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, MAX_PERSISTED_SESSION_CURSORS);
+    return new Map(entries);
+  } catch {
+    return new Map();
+  }
+}
+
+function persistSessionEventCursors(map: Map<string, number>) {
+  if (typeof window === "undefined") return;
+  const entries = Array.from(map.entries())
+    .filter(
+      ([sessionID, cursor]) =>
+        sessionID.trim() !== "" && Number.isFinite(cursor) && cursor > 0,
+    )
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_PERSISTED_SESSION_CURSORS);
+  const payload: Record<string, number> = {};
+  for (const [sessionID, cursor] of entries) {
+    payload[sessionID] = cursor;
+  }
+  window.localStorage.setItem(SESSION_EVENT_CURSOR_KEY, JSON.stringify(payload));
+}
+
+function loadPersistedCompletedRuns(): Set<string> {
+  if (typeof window === "undefined") {
+    return new Set();
+  }
+  const raw = window.localStorage.getItem(COMPLETED_RUNS_KEY);
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    const out = new Set<string>();
+    for (const value of parsed) {
+      if (typeof value !== "string") continue;
+      const normalized = value.trim();
+      if (!normalized) continue;
+      out.add(normalized);
+      if (out.size >= MAX_PERSISTED_COMPLETED_RUNS) break;
+    }
+    return out;
+  } catch {
+    return new Set();
+  }
+}
+
+function persistCompletedRuns(set: Set<string>) {
+  if (typeof window === "undefined") return;
+  const values = Array.from(set).filter((runID) => runID.trim() !== "");
+  const trimmed =
+    values.length > MAX_PERSISTED_COMPLETED_RUNS
+      ? values.slice(values.length - MAX_PERSISTED_COMPLETED_RUNS)
+      : values;
+  window.localStorage.setItem(COMPLETED_RUNS_KEY, JSON.stringify(trimmed));
+}
 
 function loadSessionTreePrefs(): SessionTreePrefs {
   if (typeof window === "undefined") {
@@ -1068,7 +1148,9 @@ export function App() {
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
   const jobNoTextFinalizeRetriesRef = useRef<Map<string, number>>(new Map());
-  const sessionEventCursorRef = useRef<Map<string, number>>(new Map());
+  const sessionEventCursorRef = useRef<Map<string, number>>(
+    loadPersistedSessionEventCursors(),
+  );
   const sessionStreamStateRef = useRef<
     Map<
       string,
@@ -1085,6 +1167,7 @@ export function App() {
   );
   const streamAuthTokenRef = useRef("");
   const completionAlertCutoffMSRef = useRef<number>(Date.now());
+  const completedRunsHydratedRef = useRef(false);
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
@@ -1420,6 +1503,18 @@ export function App() {
   }, [token]);
 
   useEffect(() => {
+    if (completedRunsHydratedRef.current) return;
+    completedRunsHydratedRef.current = true;
+    const persisted = loadPersistedCompletedRuns();
+    if (persisted.size === 0) return;
+    for (const runID of persisted) {
+      completedJobsRef.current.add(runID);
+    }
+    trimCompletedRunsStore();
+    persistCompletedRuns(completedJobsRef.current);
+  }, [completedJobsRef]);
+
+  useEffect(() => {
     activeThreadIDRef.current = activeThreadID;
   }, [activeThreadID]);
 
@@ -1433,12 +1528,23 @@ export function App() {
 
   useEffect(() => {
     const running = new Set<string>();
+    const validSessionIDs = new Set<string>();
     for (const workspace of workspaces) {
       for (const sessionItem of workspace.sessions) {
+        validSessionIDs.add(sessionItem.id);
         if (sessionItem.activeJobID.trim()) {
           running.add(sessionItem.id);
         }
       }
+    }
+    let cursorChanged = false;
+    for (const sessionID of Array.from(sessionEventCursorRef.current.keys())) {
+      if (validSessionIDs.has(sessionID)) continue;
+      sessionEventCursorRef.current.delete(sessionID);
+      cursorChanged = true;
+    }
+    if (cursorChanged) {
+      persistSessionEventCursors(sessionEventCursorRef.current);
     }
     runningSessionIDsRef.current = running;
   }, [workspaces]);
@@ -2210,6 +2316,40 @@ export function App() {
     });
   }
 
+  function trimCompletedRunsStore() {
+    while (completedJobsRef.current.size > MAX_PERSISTED_COMPLETED_RUNS) {
+      const oldest = completedJobsRef.current.values().next().value;
+      if (typeof oldest !== "string" || !oldest.trim()) break;
+      completedJobsRef.current.delete(oldest);
+    }
+  }
+
+  function markRunCompleted(runID: string): boolean {
+    const normalized = runID.trim();
+    if (!normalized) return false;
+    if (completedJobsRef.current.has(normalized)) return false;
+    completedJobsRef.current.add(normalized);
+    trimCompletedRunsStore();
+    persistCompletedRuns(completedJobsRef.current);
+    return true;
+  }
+
+  function setSessionEventCursor(sessionID: string, cursor: number) {
+    const normalizedSessionID = sessionID.trim();
+    if (!normalizedSessionID || !Number.isFinite(cursor) || cursor <= 0) return;
+    const current = sessionEventCursorRef.current.get(normalizedSessionID) ?? 0;
+    if (cursor <= current) return;
+    sessionEventCursorRef.current.set(normalizedSessionID, cursor);
+    persistSessionEventCursors(sessionEventCursorRef.current);
+  }
+
+  function deleteSessionEventCursor(sessionID: string) {
+    const normalizedSessionID = sessionID.trim();
+    if (!normalizedSessionID) return;
+    if (!sessionEventCursorRef.current.delete(normalizedSessionID)) return;
+    persistSessionEventCursors(sessionEventCursorRef.current);
+  }
+
   function sessionPayloadRecord(
     event: SessionEventRecord,
   ): Record<string, unknown> {
@@ -2277,8 +2417,7 @@ export function App() {
     status: "succeeded" | "failed" | "canceled",
     options?: { surface?: boolean },
   ): boolean {
-    if (!runID || completedJobsRef.current.has(runID)) return false;
-    completedJobsRef.current.add(runID);
+    if (!runID || !markRunCompleted(runID)) return false;
     if (!options?.surface) return false;
     const sessionTitle = threadTitleMapRef.current.get(sessionID) ?? "Session";
     const completion = sessionCompletionCopy(status);
@@ -2707,11 +2846,8 @@ export function App() {
       });
       const data = asRecord(frame.data);
       const cursor = data ? Number(data.cursor) : NaN;
-      if (
-        Number.isFinite(cursor) &&
-        cursor > (sessionEventCursorRef.current.get(sessionID) ?? 0)
-      ) {
-        sessionEventCursorRef.current.set(sessionID, cursor);
+      if (Number.isFinite(cursor)) {
+        setSessionEventCursor(sessionID, cursor);
       }
       return;
     }
@@ -2725,11 +2861,8 @@ export function App() {
       const data = asRecord(frame.data);
       const nextAfter = data ? Number(data.next_after) : NaN;
       state.suppressReplaySurface = !(Number.isFinite(nextAfter) && nextAfter > 0);
-      if (
-        Number.isFinite(nextAfter) &&
-        nextAfter > (sessionEventCursorRef.current.get(sessionID) ?? 0)
-      ) {
-        sessionEventCursorRef.current.set(sessionID, nextAfter);
+      if (Number.isFinite(nextAfter)) {
+        setSessionEventCursor(sessionID, nextAfter);
       }
       return;
     }
@@ -2754,7 +2887,7 @@ export function App() {
 
     const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
     if (event.seq <= current) return;
-    sessionEventCursorRef.current.set(sessionID, event.seq);
+    setSessionEventCursor(sessionID, event.seq);
     const surfaceByReplay = !state.suppressReplaySurface;
     const surfaceCompletions = state.ready || surfaceByReplay;
     const surfaceLifecycle = state.ready || surfaceByReplay;
@@ -3454,7 +3587,7 @@ export function App() {
             continue;
           }
 
-          completedJobsRef.current.add(job.id);
+          markRunCompleted(job.id);
           {
             const failedSummary = summarizeTargetFailures(job);
             if (
@@ -3626,6 +3759,8 @@ export function App() {
 
   function onLogout() {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(SESSION_EVENT_CURSOR_KEY);
+    localStorage.removeItem(COMPLETED_RUNS_KEY);
     stopAllSessionStreams();
     streamAuthTokenRef.current = "";
     resetOpsDomain();
@@ -3635,6 +3770,7 @@ export function App() {
     jobNoTextFinalizeRetriesRef.current.clear();
     sessionEventCursorRef.current.clear();
     sessionRunStateRef.current.clear();
+    completedJobsRef.current.clear();
     setSubmittingThreadID("");
     setCancelingThreadID("");
     setSessionAlerts([]);
@@ -3846,7 +3982,7 @@ export function App() {
     try {
       await archiveSession(token, targetSessionID);
       stopSessionStream(targetSessionID);
-      sessionEventCursorRef.current.delete(targetSessionID);
+      deleteSessionEventCursor(targetSessionID);
       sessionRunStateRef.current.delete(targetSessionID);
       removeThread(targetSessionID);
       await refreshProjectsFromSource(token, hosts, false, true);
