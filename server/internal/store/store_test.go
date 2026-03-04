@@ -338,6 +338,32 @@ func TestProjectAndSessionBindingLifecycle(t *testing.T) {
 	}
 }
 
+func TestUpsertProjectKeepsTitleWhenIncomingTitleEmpty(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	project, err := st.UpsertProject(model.ProjectRecord{
+		ID:       "project_h1::/srv/app",
+		HostID:   "h1",
+		HostName: "staging",
+		Path:     "/srv/app",
+		Title:    "My App",
+		Runtime:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	project.Title = ""
+	updated, err := st.UpsertProject(project)
+	if err != nil {
+		t.Fatalf("upsert project with empty title: %v", err)
+	}
+	if updated.Title != "My App" {
+		t.Fatalf("title=%q want=My App", updated.Title)
+	}
+}
+
 func TestDeleteProjectRequiresEmptySessions(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

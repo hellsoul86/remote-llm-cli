@@ -693,6 +693,100 @@ func TestDeleteProjectRequiresEmptySessions(t *testing.T) {
 	}
 }
 
+func TestUpsertProjectCreateAndRename(t *testing.T) {
+	_, httpSrv, token, host := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	createBody := map[string]any{
+		"host_id": host.ID,
+		"path":    "/srv/new-project",
+		"title":   "Alpha Project",
+		"runtime": "codex",
+	}
+	var createResp struct {
+		Project model.ProjectRecord `json:"project"`
+	}
+	createStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodPost,
+		httpSrv.URL+"/v1/projects",
+		token,
+		createBody,
+		&createResp,
+	)
+	if createStatus != http.StatusOK {
+		t.Fatalf("create project status=%d want=200", createStatus)
+	}
+	if createResp.Project.ID == "" {
+		t.Fatalf("project id should not be empty")
+	}
+	if createResp.Project.Title != "Alpha Project" {
+		t.Fatalf("project title=%q want=Alpha Project", createResp.Project.Title)
+	}
+	if createResp.Project.Path != "/srv/new-project" {
+		t.Fatalf("project path=%q", createResp.Project.Path)
+	}
+
+	renameBody := map[string]any{
+		"id":      createResp.Project.ID,
+		"host_id": createResp.Project.HostID,
+		"path":    createResp.Project.Path,
+		"title":   "Beta Project",
+		"runtime": createResp.Project.Runtime,
+	}
+	var renameResp struct {
+		Project model.ProjectRecord `json:"project"`
+	}
+	renameStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodPost,
+		httpSrv.URL+"/v1/projects",
+		token,
+		renameBody,
+		&renameResp,
+	)
+	if renameStatus != http.StatusOK {
+		t.Fatalf("rename project status=%d want=200", renameStatus)
+	}
+	if renameResp.Project.ID != createResp.Project.ID {
+		t.Fatalf("renamed project id=%q want=%q", renameResp.Project.ID, createResp.Project.ID)
+	}
+	if renameResp.Project.Title != "Beta Project" {
+		t.Fatalf("renamed title=%q want=Beta Project", renameResp.Project.Title)
+	}
+
+	var listResp struct {
+		Projects []model.ProjectRecord `json:"projects"`
+	}
+	listStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/projects?host_id=%s", httpSrv.URL, host.ID),
+		token,
+		nil,
+		&listResp,
+	)
+	if listStatus != http.StatusOK {
+		t.Fatalf("list projects status=%d want=200", listStatus)
+	}
+	found := false
+	for _, project := range listResp.Projects {
+		if project.ID != createResp.Project.ID {
+			continue
+		}
+		found = true
+		if project.Title != "Beta Project" {
+			t.Fatalf("listed title=%q want=Beta Project", project.Title)
+		}
+	}
+	if !found {
+		t.Fatalf("renamed project not found in list")
+	}
+}
+
 func TestDiscoverCodexModels(t *testing.T) {
 	srv, httpSrv, token, host := newAuthedTestServer(t)
 	defer httpSrv.Close()

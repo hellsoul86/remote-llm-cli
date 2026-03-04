@@ -279,6 +279,7 @@ export type ProjectRecord = {
   host_id: string;
   host_name?: string;
   path: string;
+  title?: string;
   runtime: string;
   created_at: string;
   updated_at: string;
@@ -637,6 +638,22 @@ export async function listProjects(
   if (!res.ok) throw new Error(`list projects failed: ${res.status}`);
   const body = await res.json();
   return body.projects ?? [];
+}
+
+export async function upsertProject(
+  token: string,
+  project: Partial<ProjectRecord>,
+): Promise<ProjectRecord> {
+  const res = await fetch(`${API_BASE}/v1/projects`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(project),
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.project) {
+    throw new Error(`upsert project failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body.project;
 }
 
 export async function deleteProject(

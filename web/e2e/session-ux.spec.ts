@@ -56,6 +56,27 @@ async function mockSessionApi(
         ]
       : []),
   ];
+  const projectRecords: Array<{
+    id: string;
+    host_id: string;
+    host_name: string;
+    path: string;
+    title?: string;
+    runtime: string;
+    created_at: string;
+    updated_at: string;
+  }> = [
+    {
+      id: "project_local_1__srv_work",
+      host_id: "local_1",
+      host_name: "local-default",
+      path: "/srv/work",
+      title: "work",
+      runtime: "codex",
+      created_at: "2026-03-03T00:00:00Z",
+      updated_at: "2026-03-03T00:00:00Z",
+    },
+  ];
 
   await page.route("**/v1/healthz", async (route) => {
     await route.fulfill({
@@ -159,23 +180,60 @@ async function mockSessionApi(
       },
     });
   });
-  await page.route("**/v1/projects**", async (route) => {
-    await route.fulfill({
-      status: 200,
-      json: {
-        projects: [
-          {
-            id: "project_local_1__srv_work",
-            host_id: "local_1",
-            host_name: "local-default",
-            path: "/srv/work",
-            runtime: "codex",
-            created_at: "2026-03-03T00:00:00Z",
-            updated_at: "2026-03-03T00:00:00Z",
-          },
-        ],
-      },
-    });
+  await page.route("**/v1/projects**", async (route, request) => {
+    const method = request.method();
+    if (method === "GET") {
+      await route.fulfill({
+        status: 200,
+        json: {
+          projects: projectRecords,
+        },
+      });
+      return;
+    }
+    if (method === "POST") {
+      const bodyRaw = request.postData() ?? "{}";
+      const body = JSON.parse(bodyRaw) as {
+        id?: string;
+        host_id?: string;
+        host_name?: string;
+        path?: string;
+        title?: string;
+        runtime?: string;
+      };
+      const hostID = (body.host_id ?? "").trim();
+      const path = (body.path ?? "").trim();
+      const id = (body.id ?? "").trim() || `project_${hostID}::${path}`;
+      const now = new Date().toISOString();
+      const existingIndex = projectRecords.findIndex((item) => item.id === id);
+      const existing = existingIndex >= 0 ? projectRecords[existingIndex] : null;
+      const nextRecord = {
+        id,
+        host_id: hostID || existing?.host_id || "local_1",
+        host_name:
+          (body.host_name ?? "").trim() ||
+          existing?.host_name ||
+          "local-default",
+        path: path || existing?.path || "/srv/work",
+        title: (body.title ?? "").trim() || existing?.title || undefined,
+        runtime: (body.runtime ?? "").trim() || existing?.runtime || "codex",
+        created_at: existing?.created_at || now,
+        updated_at: now,
+      };
+      if (existingIndex >= 0) {
+        projectRecords[existingIndex] = nextRecord;
+      } else {
+        projectRecords.push(nextRecord);
+      }
+      await route.fulfill({
+        status: 200,
+        json: {
+          project: nextRecord,
+        },
+      });
+      return;
+    }
+    await route.fallback();
   });
   await page.route("**/v1/sessions?**", async (route) => {
     await route.fulfill({
@@ -711,6 +769,40 @@ test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
   await expect(projectFilter).toHaveValue("session 2");
   await expect(
     page.getByRole("button", { name: "Expand" }).first(),
+  ).toBeVisible();
+});
+
+test("project create and rename use project name as primary label", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PROJECT_NAME_${Date.now()}`;
+  await mockSessionApi(page, `project ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByRole("button", { name: "New Project" }).click();
+  await page
+    .getByPlaceholder("/home/ecs-user/project")
+    .fill("/srv/demo-app");
+  await page.getByPlaceholder("My Project").fill("Demo App");
+  await page.getByRole("button", { name: "Create" }).click();
+
+  const demoProjectNode = page.locator(".project-node", {
+    has: page.locator(".project-chip-main strong", { hasText: "Demo App" }),
+  });
+  await expect(demoProjectNode).toBeVisible();
+  await expect(demoProjectNode.locator(".project-chip-main em")).toContainText(
+    "/srv/demo-app",
+  );
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Project name");
+    await dialog.accept("Demo App v2");
+  });
+  await demoProjectNode.getByRole("button", { name: "Rename" }).click();
+
+  await expect(
+    page.locator(".project-chip-main strong", { hasText: "Demo App v2" }),
   ).toBeVisible();
 });
 

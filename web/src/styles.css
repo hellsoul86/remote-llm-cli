@@ -420,6 +420,12 @@ pre {
   gap: 8px;
 }
 
+.pane-title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .pane-block input,
 .pane-block select,
 .pane-block textarea {
@@ -661,6 +667,39 @@ button.ghost.danger-ghost:hover {
   font-size: 0.8rem;
 }
 
+.project-create-form {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid #dbe5f1;
+  background: #f8fbff;
+}
+
+.project-create-field {
+  display: grid;
+  gap: 4px;
+}
+
+.project-create-field span {
+  font-size: 0.69rem;
+  color: #5d728e;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.project-create-field input,
+.project-create-field select {
+  border-radius: 8px;
+  font-size: 0.76rem;
+  padding: 7px 9px;
+}
+
+.project-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
 .project-tree {
   display: grid;
   gap: 10px;
@@ -720,6 +759,8 @@ button.ghost.danger-ghost:hover {
 .project-node-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .project-archive-btn {

@@ -216,12 +216,16 @@ func (s *Store) UpsertProject(project model.ProjectRecord) (model.ProjectRecord,
 	project.HostID = strings.TrimSpace(project.HostID)
 	project.HostName = strings.TrimSpace(project.HostName)
 	project.Path = strings.TrimSpace(project.Path)
+	project.Title = strings.TrimSpace(project.Title)
 	project.Runtime = strings.TrimSpace(project.Runtime)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.state.Projects {
 		if s.state.Projects[i].ID != project.ID {
 			continue
+		}
+		if project.Title == "" {
+			project.Title = strings.TrimSpace(s.state.Projects[i].Title)
 		}
 		project.CreatedAt = s.state.Projects[i].CreatedAt
 		project.UpdatedAt = now

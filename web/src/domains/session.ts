@@ -33,6 +33,7 @@ export type WorkspaceDirectory = {
   hostID: string;
   hostName: string;
   path: string;
+  title: string;
   sessions: ConversationThread[];
   activeSessionID: string;
   createdAt: string;
@@ -46,9 +47,11 @@ export type DiscoveredProjectSession = {
 };
 
 export type DiscoveredProject = {
+  id?: string;
   hostID: string;
   hostName: string;
   path: string;
+  title?: string;
   sessions: DiscoveredProjectSession[];
 };
 
@@ -62,6 +65,14 @@ type PersistedSessionState = {
 };
 
 const SESSION_STATE_KEY = "remote_llm_session_state_v1";
+
+function projectTitleFromPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return "Untitled Project";
+  const parts = trimmed.split("/").filter((part) => part.trim() !== "");
+  const tail = parts[parts.length - 1];
+  return tail?.trim() || trimmed;
+}
 
 function createSession(index: number, title?: string): ConversationThread {
   const now = new Date().toISOString();
@@ -85,11 +96,13 @@ function createSession(index: number, title?: string): ConversationThread {
 function createWorkspace(index: number, path: string, hostID = "local", hostName = "local-default"): WorkspaceDirectory {
   const now = new Date().toISOString();
   const first = createSession(index, "Session 1");
+  const title = projectTitleFromPath(path);
   return {
     id: `workspace_${Date.now()}_${index}`,
     hostID,
     hostName,
     path,
+    title,
     sessions: [first],
     activeSessionID: first.id,
     createdAt: now,
@@ -171,6 +184,14 @@ function normalizeWorkspace(raw: unknown, index: number): WorkspaceDirectory {
     hostID: typeof candidate.hostID === "string" ? candidate.hostID : fallback.hostID,
     hostName: typeof candidate.hostName === "string" && candidate.hostName.trim() ? candidate.hostName : fallback.hostName,
     path: typeof candidate.path === "string" && candidate.path.trim() ? candidate.path : "/home/ecs-user",
+    title:
+      typeof candidate.title === "string" && candidate.title.trim()
+        ? candidate.title.trim()
+        : projectTitleFromPath(
+            typeof candidate.path === "string" && candidate.path.trim()
+              ? candidate.path
+              : "/home/ecs-user",
+          ),
     sessions: safeSessions,
     activeSessionID,
     createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : now,
@@ -644,10 +665,14 @@ export function useSessionDomain() {
       if (!hostID || !path) continue;
       incomingHostIDs.add(hostID);
 
-      const id = projectWorkspaceID(hostID, path);
+      const id = project.id?.trim() || projectWorkspaceID(hostID, path);
       const existing = currentByWorkspaceID.get(id);
       const seen = new Set<string>();
       const sessions: ConversationThread[] = [];
+      const projectTitle =
+        project.title?.trim() ||
+        existing?.title?.trim() ||
+        projectTitleFromPath(path);
 
       for (const discovered of project.sessions) {
         const sessionID = discovered.id.trim();
@@ -692,6 +717,7 @@ export function useSessionDomain() {
         hostID,
         hostName: project.hostName.trim() || existing?.hostName || hostID,
         path,
+        title: projectTitle,
         sessions,
         activeSessionID,
         createdAt: existing?.createdAt ?? now,

@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/jobs/run", s.withAuth(http.HandlerFunc(s.handleEnqueueRunJob)))
 	mux.Handle("POST /v1/jobs/sync", s.withAuth(http.HandlerFunc(s.handleEnqueueSyncJob)))
 	mux.Handle("GET /v1/projects", s.withAuth(http.HandlerFunc(s.handleListProjects)))
+	mux.Handle("POST /v1/projects", s.withAuth(http.HandlerFunc(s.handleUpsertProject)))
 	mux.Handle("DELETE /v1/projects/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteProject)))
 	mux.Handle("GET /v1/sessions", s.withAuth(http.HandlerFunc(s.handleListSessions)))
 	mux.Handle("GET /v1/sessions/{id}", s.withAuth(http.HandlerFunc(s.handleGetSession)))
@@ -290,6 +291,75 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		filtered = append(filtered, project)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": filtered})
+}
+
+func (s *Server) handleUpsertProject(w http.ResponseWriter, r *http.Request) {
+	var project model.ProjectRecord
+	if err := json.NewDecoder(r.Body).Decode(&project); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+
+	project.ID = strings.TrimSpace(project.ID)
+	project.HostID = strings.TrimSpace(project.HostID)
+	project.Path = strings.TrimSpace(project.Path)
+	project.Title = strings.TrimSpace(project.Title)
+	project.Runtime = strings.TrimSpace(project.Runtime)
+	if project.Runtime == "" {
+		project.Runtime = "codex"
+	}
+
+	if project.ID == "" {
+		if project.HostID == "" || project.Path == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "host_id and path are required when project id is missing",
+			})
+			return
+		}
+		project.ID = projectBindingID(project.HostID, project.Path)
+	}
+	if project.HostID == "" || project.Path == "" {
+		existing, ok := s.store.GetProject(project.ID)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "host_id and path are required",
+			})
+			return
+		}
+		if project.HostID == "" {
+			project.HostID = existing.HostID
+		}
+		if project.Path == "" {
+			project.Path = existing.Path
+		}
+		if project.Runtime == "" {
+			project.Runtime = existing.Runtime
+		}
+	}
+	if project.HostID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "host_id is required"})
+		return
+	}
+	if project.Path == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "path is required"})
+		return
+	}
+
+	host, ok := s.store.GetHost(project.HostID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "host not found"})
+		return
+	}
+	if project.HostName == "" {
+		project.HostName = strings.TrimSpace(host.Name)
+	}
+
+	saved, err := s.store.UpsertProject(project)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": saved})
 }
 
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
@@ -3187,6 +3257,8 @@ func inferAction(method string, path string) string {
 		return "job.sync.enqueue"
 	case method == http.MethodGet && path == "/v1/projects":
 		return "project.list"
+	case method == http.MethodPost && path == "/v1/projects":
+		return "project.upsert"
 	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/projects/"):
 		return "project.delete"
 	case method == http.MethodGet && path == "/v1/sessions":

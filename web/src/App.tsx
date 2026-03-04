@@ -31,6 +31,7 @@ import {
   streamSessionEvents,
   uploadImage,
   upsertHost,
+  upsertProject,
   type Host,
   type ProjectRecord,
   type SessionEventRecord,
@@ -60,6 +61,7 @@ type SessionAlert = {
 type SessionTreeProject = {
   id: string;
   hostID: string;
+  title: string;
   path: string;
   sessions: Array<{
     id: string;
@@ -478,15 +480,18 @@ function formatDateTime(ts: string | undefined): string {
   return d.toLocaleString();
 }
 
-function compactPath(path: string, keepSegments = 2): string {
-  const normalized = path.trim();
-  if (!normalized) return "/";
-  const segments = normalized.split("/").filter((part) => part.trim() !== "");
-  if (segments.length <= keepSegments) {
-    return normalized.startsWith("/") ? normalized : `/${normalized}`;
-  }
-  const tail = segments.slice(-keepSegments).join("/");
-  return `.../${tail}`;
+function projectTitleFromPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return "Untitled Project";
+  const segments = trimmed.split("/").filter((part) => part.trim() !== "");
+  const tail = segments[segments.length - 1];
+  return tail?.trim() || trimmed;
+}
+
+function resolveProjectTitle(path: string, title?: string): string {
+  const explicit = title?.trim() ?? "";
+  if (explicit) return explicit;
+  return projectTitleFromPath(path);
 }
 
 type MessageSegment =
@@ -696,9 +701,14 @@ export function App() {
   const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [deletingThreadID, setDeletingThreadID] = useState("");
   const [deletingProjectID, setDeletingProjectID] = useState("");
+  const [upsertingProjectID, setUpsertingProjectID] = useState("");
   const [sessionModelDefault, setSessionModelDefault] = useState("");
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
   const [sourceProjectIDs, setSourceProjectIDs] = useState<string[]>([]);
+  const [projectComposerOpen, setProjectComposerOpen] = useState(false);
+  const [projectFormHostID, setProjectFormHostID] = useState("");
+  const [projectFormPath, setProjectFormPath] = useState("");
+  const [projectFormTitle, setProjectFormTitle] = useState("");
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
   const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
@@ -855,6 +865,7 @@ export function App() {
       const project: SessionTreeProject = {
         id: workspace.id,
         hostID,
+        title: resolveProjectTitle(workspace.path, workspace.title),
         path: workspace.path,
         sessions: [...workspace.sessions]
           .sort((a, b) => {
@@ -887,7 +898,11 @@ export function App() {
 
     return Array.from(groups.values()).map((group) => ({
       ...group,
-      projects: group.projects.sort((a, b) => a.path.localeCompare(b.path)),
+      projects: group.projects.sort((a, b) => {
+        const titleDiff = a.title.localeCompare(b.title);
+        if (titleDiff !== 0) return titleDiff;
+        return a.path.localeCompare(b.path);
+      }),
     }));
   }, [hosts, workspaces]);
   const sourceProjectIDSet = useMemo(
@@ -911,7 +926,7 @@ export function App() {
       }
       const projects: SessionTreeProject[] = [];
       for (const project of host.projects) {
-        const projectText = project.path.toLowerCase();
+        const projectText = `${project.title} ${project.path}`.toLowerCase();
         if (projectText.includes(query)) {
           projects.push(project);
           continue;
@@ -1139,6 +1154,27 @@ export function App() {
   }, [sessionTreeHosts]);
 
   useEffect(() => {
+    if (!projectComposerOpen) return;
+    const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
+    if (
+      !projectFormHostID ||
+      !hosts.some((host) => host.id === projectFormHostID)
+    ) {
+      setProjectFormHostID(fallbackHostID);
+    }
+    if (!projectFormPath.trim()) {
+      setProjectFormPath(activeWorkspace?.path?.trim() || "/home/ecs-user");
+    }
+  }, [
+    projectComposerOpen,
+    projectFormHostID,
+    projectFormPath,
+    activeWorkspace?.hostID,
+    activeWorkspace?.path,
+    hosts,
+  ]);
+
+  useEffect(() => {
     if (activeThreadID.trim()) {
       setTreeCursorSessionID(activeThreadID);
     }
@@ -1165,6 +1201,20 @@ export function App() {
   function createThreadAndFocus() {
     createThread();
     promptInputRef.current?.focus();
+  }
+
+  function openProjectComposer() {
+    const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
+    const fallbackPath = activeWorkspace?.path?.trim() || "/home/ecs-user";
+    setProjectComposerOpen(true);
+    setProjectFormHostID(fallbackHostID);
+    setProjectFormPath(fallbackPath);
+    setProjectFormTitle("");
+  }
+
+  function closeProjectComposer() {
+    setProjectComposerOpen(false);
+    setProjectFormTitle("");
   }
 
   function registerSessionButtonRef(
@@ -1522,6 +1572,7 @@ export function App() {
       hostID: string;
       hostName: string;
       path: string;
+      title: string;
       sessions: Array<{ id: string; title: string; updatedAt?: string }>;
     }> = [];
     for (const [hostID, pathMap] of grouped.entries()) {
@@ -1538,6 +1589,7 @@ export function App() {
           hostID,
           hostName,
           path: projectPath,
+          title: resolveProjectTitle(projectPath),
           sessions: orderedSessions,
         });
       }
@@ -1550,6 +1602,7 @@ export function App() {
       hostID: host.id,
       hostName: host.name,
       path: host.workspace?.trim() || "/home/ecs-user",
+      title: resolveProjectTitle(host.workspace?.trim() || "/home/ecs-user"),
       sessions: [],
     }));
   }
@@ -1571,6 +1624,7 @@ export function App() {
         hostID: string;
         hostName: string;
         path: string;
+        title: string;
         sessions: Array<{ id: string; title: string; updatedAt?: string }>;
       }
     >();
@@ -1580,19 +1634,27 @@ export function App() {
       hostIDRaw: string,
       hostNameRaw: string,
       pathRaw: string,
+      titleRaw?: string,
     ) => {
       const hostID = hostIDRaw.trim();
       const path = pathRaw.trim();
       if (!hostID || !path) return "";
       const key = `${hostID}::${path}`;
+      const resolvedTitle = resolveProjectTitle(path, titleRaw);
       if (!grouped.has(key)) {
         const host = hostMap.get(hostID);
         grouped.set(key, {
           hostID,
           hostName: hostNameRaw.trim() || host?.name || hostID,
           path,
+          title: resolvedTitle,
           sessions: [],
         });
+      } else if (titleRaw?.trim()) {
+        const current = grouped.get(key);
+        if (current && current.title.trim() !== titleRaw.trim()) {
+          current.title = resolvedTitle;
+        }
       }
       if (!sessionSeenByProjectKey.has(key)) {
         sessionSeenByProjectKey.set(key, new Set<string>());
@@ -1605,6 +1667,7 @@ export function App() {
         project.host_id,
         project.host_name ?? "",
         project.path,
+        project.title,
       );
       if (!key) continue;
       projectKeyByID.set(project.id, key);
@@ -1653,6 +1716,7 @@ export function App() {
         host.id,
         host.name,
         host.workspace?.trim() || "/home/ecs-user",
+        "",
       );
     }
 
@@ -3113,6 +3177,101 @@ export function App() {
     await loadWorkspace(token, false);
   }
 
+  async function onCreateProject(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (authPhase !== "ready" || !token.trim()) return;
+    const hostID = projectFormHostID.trim();
+    const path = projectFormPath.trim();
+    const title = projectFormTitle.trim();
+    if (!hostID || !path) {
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Project Validation",
+        body: "Server and project path are required.",
+      });
+      return;
+    }
+
+    setUpsertingProjectID("__create__");
+    try {
+      const saved = await upsertProject(token, {
+        host_id: hostID,
+        path,
+        title: title || undefined,
+        runtime: "codex",
+      });
+      await refreshProjectsFromSource(token, hosts, false, true);
+      if (saved.id.trim()) {
+        setActiveWorkspaceID(saved.id.trim());
+      }
+      closeProjectComposer();
+      addTimelineEntry({
+        kind: "system",
+        state: "success",
+        title: "Project Created",
+        body: `${resolveProjectTitle(path, title)} · ${path}`,
+      });
+    } catch (error) {
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Create Project Failed",
+        body: String(error),
+      });
+    } finally {
+      setUpsertingProjectID("");
+    }
+  }
+
+  async function onRenameProject(project: SessionTreeProject) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const currentTitle = resolveProjectTitle(project.path, project.title);
+    const next = window.prompt("Project name", currentTitle);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed) {
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Rename Project Failed",
+        body: "Project name is required.",
+      });
+      return;
+    }
+    if (trimmed === currentTitle) return;
+
+    setUpsertingProjectID(project.id);
+    try {
+      const saved = await upsertProject(token, {
+        id: project.id,
+        host_id: project.hostID,
+        path: project.path,
+        title: trimmed,
+        runtime: "codex",
+      });
+      await refreshProjectsFromSource(token, hosts, false, true);
+      if (saved.id.trim()) {
+        setActiveWorkspaceID(saved.id.trim());
+      }
+      addTimelineEntry({
+        kind: "system",
+        state: "success",
+        title: "Project Renamed",
+        body: `${currentTitle} -> ${trimmed}`,
+      });
+    } catch (error) {
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Rename Project Failed",
+        body: String(error),
+      });
+    } finally {
+      setUpsertingProjectID("");
+    }
+  }
+
   async function onArchiveProject(
     projectID: string,
     projectPath: string,
@@ -3680,14 +3839,93 @@ export function App() {
             <section className="inspect-block focus-block">
               <div className="pane-title-line">
                 <h3>Projects</h3>
-                <button
-                  type="button"
-                  className="ghost new-thread"
-                  onClick={createThreadAndFocus}
-                >
-                  New
-                </button>
+                <div className="pane-title-actions">
+                  <button
+                    type="button"
+                    className="ghost new-thread"
+                    onClick={openProjectComposer}
+                  >
+                    New Project
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost new-thread"
+                    onClick={createThreadAndFocus}
+                  >
+                    New Session
+                  </button>
+                </div>
               </div>
+              {projectComposerOpen ? (
+                <form className="project-create-form" onSubmit={onCreateProject}>
+                  <label className="project-create-field">
+                    <span>Server</span>
+                    <select
+                      value={projectFormHostID}
+                      onChange={(event) => setProjectFormHostID(event.target.value)}
+                      disabled={
+                        authPhase !== "ready" ||
+                        !token.trim() ||
+                        upsertingProjectID !== ""
+                      }
+                    >
+                      {hosts.map((host) => (
+                        <option key={host.id} value={host.id}>
+                          {host.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="project-create-field">
+                    <span>Path</span>
+                    <input
+                      placeholder="/home/ecs-user/project"
+                      value={projectFormPath}
+                      onChange={(event) => setProjectFormPath(event.target.value)}
+                      disabled={
+                        authPhase !== "ready" ||
+                        !token.trim() ||
+                        upsertingProjectID !== ""
+                      }
+                    />
+                  </label>
+                  <label className="project-create-field">
+                    <span>Name</span>
+                    <input
+                      placeholder="My Project"
+                      value={projectFormTitle}
+                      onChange={(event) => setProjectFormTitle(event.target.value)}
+                      disabled={
+                        authPhase !== "ready" ||
+                        !token.trim() ||
+                        upsertingProjectID !== ""
+                      }
+                    />
+                  </label>
+                  <div className="project-create-actions">
+                    <button
+                      type="submit"
+                      disabled={
+                        authPhase !== "ready" ||
+                        !token.trim() ||
+                        upsertingProjectID !== "" ||
+                        !projectFormHostID.trim() ||
+                        !projectFormPath.trim()
+                      }
+                    >
+                      {upsertingProjectID === "__create__" ? "Creating..." : "Create"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={closeProjectComposer}
+                      disabled={upsertingProjectID !== ""}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : null}
               <label className="tree-filter">
                 <input
                   value={projectFilter}
@@ -3746,7 +3984,7 @@ export function App() {
                               >
                                 <span className="project-chip-main">
                                   <strong>
-                                    {compactPath(projectNode.path)}
+                                    {projectNode.title}
                                   </strong>
                                   <em>{projectNode.path}</em>
                                 </span>
@@ -3756,14 +3994,29 @@ export function App() {
                                     : `${projectNode.sessions.length}`}
                                 </small>
                               </button>
-                              {sourceProjectIDSet.has(projectNode.id) ? (
-                                <div className="project-node-actions">
+                              <div className="project-node-actions">
+                                <button
+                                  type="button"
+                                  className="ghost project-archive-btn"
+                                  disabled={
+                                    authPhase !== "ready" ||
+                                    !token.trim() ||
+                                    upsertingProjectID !== ""
+                                  }
+                                  onClick={() => void onRenameProject(projectNode)}
+                                >
+                                  {upsertingProjectID === projectNode.id
+                                    ? "Saving..."
+                                    : "Rename"}
+                                </button>
+                                {sourceProjectIDSet.has(projectNode.id) ? (
                                   <button
                                     type="button"
                                     className="ghost danger-ghost project-archive-btn"
                                     disabled={
                                       authPhase !== "ready" ||
                                       !token.trim() ||
+                                      upsertingProjectID !== "" ||
                                       deletingProjectID === projectNode.id ||
                                       deletingProjectID !== "" ||
                                       projectNode.sessions.length > 0
@@ -3785,8 +4038,8 @@ export function App() {
                                       ? "Archiving..."
                                       : "Archive"}
                                   </button>
-                                </div>
-                              ) : null}
+                                ) : null}
+                              </div>
                               <div className="project-session-list">
                                 {projectNode.sessions.length === 0 ? (
                                   <p className="pane-subtle-light compact-empty">
