@@ -25,6 +25,7 @@ export type ConversationThread = {
   activeJobID: string;
   lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
   unreadDone: boolean;
+  pinned: boolean;
 };
 
 export type WorkspaceDirectory = {
@@ -72,7 +73,8 @@ function createSession(index: number, title?: string): ConversationThread {
     imagePaths: [],
     activeJobID: "",
     lastJobStatus: "idle",
-    unreadDone: false
+    unreadDone: false,
+    pinned: false
   };
 }
 
@@ -141,7 +143,8 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     imagePaths: Array.isArray(candidate.imagePaths) ? candidate.imagePaths.filter((path): path is string => typeof path === "string" && path.trim() !== "") : [],
     activeJobID: typeof candidate.activeJobID === "string" ? candidate.activeJobID : "",
     lastJobStatus: safeLast,
-    unreadDone: Boolean(candidate.unreadDone)
+    unreadDone: Boolean(candidate.unreadDone),
+    pinned: Boolean(candidate.pinned)
   };
 }
 
@@ -553,6 +556,17 @@ export function useSessionDomain() {
     });
   }
 
+  function setThreadPinned(threadID: string, pinned: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.pinned === pinned) return thread;
+      return {
+        ...thread,
+        pinned,
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+
   function syncProjectsFromDiscovery(projects: DiscoveredProject[]) {
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
@@ -597,7 +611,8 @@ export function useSessionDomain() {
           imagePaths: prior?.imagePaths ?? [],
           activeJobID: prior?.activeJobID ?? "",
           lastJobStatus: prior?.lastJobStatus ?? "idle",
-          unreadDone: prior?.unreadDone ?? false
+          unreadDone: prior?.unreadDone ?? false,
+          pinned: prior?.pinned ?? false
         });
       }
 
@@ -710,6 +725,7 @@ export function useSessionDomain() {
     setThreadJobState,
     setThreadUnread,
     setThreadTitle,
+    setThreadPinned,
     syncProjectsFromDiscovery,
     resetSessionDomain
   };

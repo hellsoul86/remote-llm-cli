@@ -183,30 +183,20 @@ pre {
   gap: 10px;
 }
 
-.session-alert-stack {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 30;
-  display: grid;
-  gap: 8px;
-  max-width: min(420px, calc(100vw - 24px));
-}
-
 .session-alert {
   display: grid;
   gap: 4px;
-  border-radius: 12px;
-  border: 1px solid #d6c69f;
-  background: #fff8ea;
-  color: #3c2b0f;
-  padding: 10px 12px;
-  box-shadow: var(--shadow-soft);
+  border-radius: 10px;
+  border: 1px solid #d9e3ef;
+  background: #f8fbff;
+  color: #24384f;
+  padding: 8px 10px;
   text-align: left;
+  width: 100%;
 }
 
 .session-alert:hover {
-  background: #fff2d4;
+  background: #eef6ff;
   transform: none;
 }
 
@@ -217,6 +207,32 @@ pre {
 .session-alert span {
   font-size: 0.75rem;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.notification-center {
+  display: grid;
+  gap: 8px;
+}
+
+.notification-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: #405672;
+}
+
+.notification-head button {
+  padding: 4px 9px;
+  font-size: 0.68rem;
+}
+
+.notification-list {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
 }
 
 .app-topbar {
@@ -771,6 +787,12 @@ button.ghost.danger-ghost:hover {
   border-color: #b2d7c3;
   background: #edf9f2;
   color: #17603f;
+}
+
+.session-chip-badge.pinned {
+  border-color: #c9d5e8;
+  background: #edf2fb;
+  color: #29415f;
 }
 
 .session-chip-badge.status {

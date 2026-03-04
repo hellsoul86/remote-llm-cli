@@ -62,9 +62,11 @@ type SessionTreeProject = {
   sessions: Array<{
     id: string;
     title: string;
+    pinned: boolean;
     activeJobID: string;
     unreadDone: boolean;
     lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
+    updatedAt: string;
   }>;
 };
 
@@ -629,6 +631,7 @@ export function App() {
     setThreadJobState,
     setThreadUnread,
     setThreadTitle,
+    setThreadPinned,
     runningThreadJobs,
     syncProjectsFromDiscovery,
     resetSessionDomain,
@@ -639,6 +642,7 @@ export function App() {
       typeof Notification === "undefined" ? "denied" : Notification.permission,
     );
   const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
+  const [sessionAlertsExpanded, setSessionAlertsExpanded] = useState(true);
   const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [sessionModelDefault, setSessionModelDefault] = useState("");
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
@@ -680,6 +684,7 @@ export function App() {
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
+  const previousAlertCountRef = useRef(0);
   const tokenRef = useRef(token);
 
   const activeRuntime = useMemo(
@@ -742,13 +747,29 @@ export function App() {
         id: workspace.id,
         hostID,
         path: workspace.path,
-        sessions: workspace.sessions.map((sessionItem) => ({
-          id: sessionItem.id,
-          title: sessionItem.title,
-          activeJobID: sessionItem.activeJobID,
-          unreadDone: sessionItem.unreadDone,
-          lastJobStatus: sessionItem.lastJobStatus,
-        })),
+        sessions: [...workspace.sessions]
+          .sort((a, b) => {
+            if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+            if (a.unreadDone !== b.unreadDone) return a.unreadDone ? -1 : 1;
+            const aRunning = a.activeJobID.trim() !== "";
+            const bRunning = b.activeJobID.trim() !== "";
+            if (aRunning !== bRunning) return aRunning ? -1 : 1;
+            const aTS = Date.parse(a.updatedAt);
+            const bTS = Date.parse(b.updatedAt);
+            const safeA = Number.isFinite(aTS) ? aTS : 0;
+            const safeB = Number.isFinite(bTS) ? bTS : 0;
+            if (safeA !== safeB) return safeB - safeA;
+            return a.title.localeCompare(b.title);
+          })
+          .map((sessionItem) => ({
+            id: sessionItem.id,
+            title: sessionItem.title,
+            pinned: Boolean(sessionItem.pinned),
+            activeJobID: sessionItem.activeJobID,
+            unreadDone: sessionItem.unreadDone,
+            lastJobStatus: sessionItem.lastJobStatus,
+            updatedAt: sessionItem.updatedAt,
+          })),
       };
 
       group.projects.push(project);
@@ -919,6 +940,13 @@ export function App() {
   }, [threadWorkspaceMap]);
 
   useEffect(() => {
+    if (sessionAlerts.length > previousAlertCountRef.current) {
+      setSessionAlertsExpanded(true);
+    }
+    previousAlertCountRef.current = sessionAlerts.length;
+  }, [sessionAlerts.length]);
+
+  useEffect(() => {
     if (typeof document === "undefined") return;
     const title = activeThread?.title.trim() || "Session";
     document.title = `${title} · Codex Control App`;
@@ -1001,6 +1029,7 @@ export function App() {
   function onSessionTreeKeyDown(
     event: ReactKeyboardEvent<HTMLButtonElement>,
     sessionID: string,
+    pinned: boolean,
   ) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -1032,6 +1061,11 @@ export function App() {
       event.preventDefault();
       setTreeCursorSessionID(sessionID);
       activateThread(sessionID);
+      return;
+    }
+    if (event.key.toLowerCase() === "p") {
+      event.preventDefault();
+      setThreadPinned(sessionID, !pinned);
     }
   }
 
@@ -1145,10 +1179,26 @@ export function App() {
   function pushSessionAlert(alert: Omit<SessionAlert, "id">) {
     const id = `alert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const next: SessionAlert = { id, ...alert };
-    setSessionAlerts((prev) => [...prev, next]);
-    window.setTimeout(() => {
-      setSessionAlerts((prev) => prev.filter((item) => item.id !== id));
-    }, 7000);
+    setSessionAlerts((prev) => {
+      const duplicate = prev.some(
+        (item) =>
+          item.threadID === next.threadID &&
+          item.title === next.title &&
+          item.body === next.body,
+      );
+      if (duplicate) return prev;
+      const withNext = [...prev, next];
+      if (withNext.length <= 24) return withNext;
+      return withNext.slice(withNext.length - 24);
+    });
+  }
+
+  function dismissSessionAlert(alertID: string) {
+    setSessionAlerts((prev) => prev.filter((item) => item.id !== alertID));
+  }
+
+  function clearSessionAlerts() {
+    setSessionAlerts([]);
   }
 
   function openSessionFromAlert(alert: SessionAlert) {
@@ -1156,7 +1206,7 @@ export function App() {
       activateThread(alert.threadID);
       switchMode("session");
     }
-    setSessionAlerts((prev) => prev.filter((item) => item.id !== alert.id));
+    dismissSessionAlert(alert.id);
   }
 
   async function onEnableNotifications() {
@@ -3226,10 +3276,19 @@ export function App() {
                                       }
                                       className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
                                       data-session-id={sessionNode.id}
+                                      data-pinned={sessionNode.pinned ? "true" : "false"}
                                       tabIndex={
                                         treeCursorSessionID === sessionNode.id ? 0 : -1
                                       }
-                                      onClick={() => {
+                                      onClick={(event) => {
+                                        if (event.metaKey || event.ctrlKey) {
+                                          event.preventDefault();
+                                          setThreadPinned(
+                                            sessionNode.id,
+                                            !sessionNode.pinned,
+                                          );
+                                          return;
+                                        }
                                         setTreeCursorSessionID(sessionNode.id);
                                         activateThread(sessionNode.id);
                                       }}
@@ -3237,7 +3296,11 @@ export function App() {
                                         setTreeCursorSessionID(sessionNode.id)
                                       }
                                       onKeyDown={(event) =>
-                                        onSessionTreeKeyDown(event, sessionNode.id)
+                                        onSessionTreeKeyDown(
+                                          event,
+                                          sessionNode.id,
+                                          sessionNode.pinned,
+                                        )
                                       }
                                       title={sessionNode.title}
                                     >
@@ -3245,6 +3308,11 @@ export function App() {
                                         {sessionNode.title}
                                       </span>
                                       <span className="session-chip-state">
+                                        {sessionNode.pinned ? (
+                                          <small className="session-chip-badge pinned">
+                                            pin
+                                          </small>
+                                        ) : null}
                                         {sessionNode.activeJobID ? (
                                           <small className="session-chip-badge running">
                                             running
@@ -3280,7 +3348,7 @@ export function App() {
             <section className="inspect-block compact-session-meta">
               <p className="pane-subtle-light">
                 Ctrl/Cmd+K focus · Enter send · Shift+Enter newline ·
-                Ctrl/Cmd+Shift+N new session
+                Ctrl/Cmd+Shift+N new session · P pin (on focused session)
               </p>
               <div className="ops-actions-row">
                 <button
@@ -3290,7 +3358,47 @@ export function App() {
                 >
                   Alerts: {notificationPermission}
                 </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setSessionAlertsExpanded((prev) => !prev)}
+                  disabled={sessionAlerts.length === 0}
+                >
+                  Notifications {sessionAlerts.length > 0 ? `(${sessionAlerts.length})` : ""}
+                </button>
               </div>
+              {sessionAlerts.length === 0 ? (
+                <p className="pane-subtle-light">No notifications yet.</p>
+              ) : sessionAlertsExpanded ? (
+                <div className="notification-center">
+                  <div className="notification-head">
+                    <strong>Recent</strong>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={clearSessionAlerts}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="notification-list" role="status" aria-live="polite">
+                    {sessionAlerts
+                      .slice(Math.max(0, sessionAlerts.length - 8))
+                      .reverse()
+                      .map((alert) => (
+                        <button
+                          key={alert.id}
+                          type="button"
+                          className="session-alert"
+                          onClick={() => openSessionFromAlert(alert)}
+                        >
+                          <strong>{alert.title}</strong>
+                          <span>{alert.body}</span>
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
             </section>
           </aside>
 
@@ -3982,21 +4090,6 @@ export function App() {
         </div>
       )}
 
-      {sessionAlerts.length > 0 ? (
-        <div className="session-alert-stack" role="status" aria-live="polite">
-          {sessionAlerts.map((alert) => (
-            <button
-              key={alert.id}
-              type="button"
-              className="session-alert"
-              onClick={() => openSessionFromAlert(alert)}
-            >
-              <strong>{alert.title}</strong>
-              <span>{alert.body}</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
     </div>
   );
 }

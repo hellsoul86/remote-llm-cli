@@ -812,6 +812,38 @@ test("running state locks session controls then unlocks on completion", async ({
   await expect(attachInput).toBeEnabled();
 });
 
+test("pinning session reorders tree and persists across reload", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PIN_${Date.now()}`;
+  await mockSessionApi(page, `pin ${marker}`, marker, { includeSecondSession: true });
+  await unlock(page);
+
+  const sessionTwo = page.locator(
+    '.session-chip-tree[data-session-id="session_cli_2"]',
+  );
+  await sessionTwo.focus();
+  await page.keyboard.press("p");
+  await expect(
+    page.locator(
+      '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.pinned',
+    ),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(".project-session-list .session-chip-tree").first(),
+  ).toHaveAttribute("data-session-id", "session_cli_2");
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(
+    page.locator(
+      '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.pinned',
+    ),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(".project-session-list .session-chip-tree").first(),
+  ).toHaveAttribute("data-session-id", "session_cli_2");
+});
+
 test.use({ viewport: { width: 390, height: 844 } });
 test("mobile session UX baseline (stacked layout + no horizontal overflow)", async ({
   page,
