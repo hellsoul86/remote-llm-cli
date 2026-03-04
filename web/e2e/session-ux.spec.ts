@@ -359,6 +359,7 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({ pag
   const chatPane = page.locator(".chat-pane");
   await expect(sidebar).toBeVisible();
   await expect(chatPane).toBeVisible();
+  await expect(page.locator(".chat-context")).toContainText("local-default · /srv/work");
   const sideBox = await sidebar.boundingBox();
   const chatBox = await chatPane.boundingBox();
   expect(sideBox).not.toBeNull();
@@ -371,6 +372,10 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({ pag
   await composer.press("Shift+Enter");
   await composer.type("line-b");
   await expect(composer).toHaveValue("line-a\nline-b");
+  const initialHeight = await composer.evaluate((el) => Number.parseFloat(getComputedStyle(el).height));
+  await composer.fill(Array.from({ length: 12 }, (_, index) => `line-${index + 1}`).join("\n"));
+  const expandedHeight = await composer.evaluate((el) => Number.parseFloat(getComputedStyle(el).height));
+  expect(expandedHeight > initialHeight).toBeTruthy();
 
   await composer.fill(`reply once with marker: ${marker}`);
   await composer.press("Enter");

@@ -57,7 +57,6 @@ type SessionTreeProject = {
     activeJobID: string;
     unreadDone: boolean;
     lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
-    timelineSize: number;
   }>;
 };
 
@@ -322,6 +321,17 @@ function formatDateTime(ts: string | undefined): string {
   return d.toLocaleString();
 }
 
+function compactPath(path: string, keepSegments = 2): string {
+  const normalized = path.trim();
+  if (!normalized) return "/";
+  const segments = normalized.split("/").filter((part) => part.trim() !== "");
+  if (segments.length <= keepSegments) {
+    return normalized.startsWith("/") ? normalized : `/${normalized}`;
+  }
+  const tail = segments.slice(-keepSegments).join("/");
+  return `.../${tail}`;
+}
+
 function statusTone(status: string): "ok" | "warn" | "err" {
   if (status === "succeeded") return "ok";
   if (status === "failed" || status === "canceled") return "err";
@@ -529,8 +539,7 @@ export function App() {
           title: sessionItem.title,
           activeJobID: sessionItem.activeJobID,
           unreadDone: sessionItem.unreadDone,
-          lastJobStatus: sessionItem.lastJobStatus,
-          timelineSize: sessionItem.timeline.length
+          lastJobStatus: sessionItem.lastJobStatus
         }))
       };
 
@@ -1505,6 +1514,14 @@ export function App() {
   }
 
   useEffect(() => {
+    const node = promptInputRef.current;
+    if (!node) return;
+    node.style.height = "0px";
+    const nextHeight = Math.max(92, Math.min(240, node.scrollHeight));
+    node.style.height = `${nextHeight}px`;
+  }, [activeThreadID, activeDraft]);
+
+  useEffect(() => {
     if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
     if (!activeThread?.activeJobID) {
       setActiveJobID("");
@@ -2231,63 +2248,60 @@ export function App() {
                 ) : (
                   sessionTreeHosts.map((hostNode) => (
                     <article key={hostNode.hostID} className="project-host-group">
-                      <header className="project-host-head">
-                        <strong>{hostNode.hostName}</strong>
-                        {hostNode.hostAddress ? <small>{hostNode.hostAddress}</small> : null}
-                      </header>
-                      {hostNode.projects.length === 0 ? (
-                        <p className="pane-subtle-light compact-empty">No projects available.</p>
-                      ) : (
-                        hostNode.projects.map((projectNode) => (
-                          <div key={projectNode.id} className="project-node">
-                            <button
-                              type="button"
-                              className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
-                              onClick={() => setActiveWorkspaceID(projectNode.id)}
-                              title={projectNode.path}
-                            >
-                              <span>{projectNode.path}</span>
-                              <small>{projectNode.sessions.length}</small>
-                            </button>
-                            <div className="project-session-list">
-                              {projectNode.sessions.length === 0 ? (
-                                <p className="pane-subtle-light compact-empty">No sessions in this project.</p>
-                              ) : (
-                                projectNode.sessions.map((sessionNode) => (
-                                  <button
-                                    key={sessionNode.id}
-                                    type="button"
-                                    className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
-                                    data-session-id={sessionNode.id}
-                                    onClick={() => activateThread(sessionNode.id)}
-                                    title={sessionNode.title}
-                                  >
-                                    <span>
-                                      {sessionNode.activeJobID
-                                        ? `● ${sessionNode.title}`
-                                        : sessionNode.unreadDone
-                                          ? `* ${sessionNode.title}`
-                                          : sessionNode.title}
-                                    </span>
-                                    <small>
-                                      {sessionNode.activeJobID
-                                        ? "running"
-                                        : sessionNode.unreadDone
-                                          ? "done"
-                                          : sessionNode.lastJobStatus === "idle"
-                                            ? sessionNode.timelineSize
-                                            : sessionNode.lastJobStatus}
-                                    </small>
-                                  </button>
-                                ))
-                              )}
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </article>
-                  ))
-                )}
+	                      <header className="project-host-head">
+	                        <strong>{hostNode.hostName}</strong>
+	                        {hostNode.hostAddress ? <small>{hostNode.hostAddress}</small> : null}
+	                      </header>
+	                      {hostNode.projects.length === 0 ? (
+	                        <p className="pane-subtle-light compact-empty">No projects available.</p>
+	                      ) : (
+	                        hostNode.projects.map((projectNode) => (
+	                          <div key={projectNode.id} className="project-node">
+	                            <button
+	                              type="button"
+	                              className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
+	                              onClick={() => setActiveWorkspaceID(projectNode.id)}
+	                              title={projectNode.path}
+	                            >
+	                              <span className="project-chip-main">
+	                                <strong>{compactPath(projectNode.path)}</strong>
+	                                <em>{projectNode.path}</em>
+	                              </span>
+	                              <small>{projectNode.sessions.length === 0 ? "empty" : `${projectNode.sessions.length}`}</small>
+	                            </button>
+	                            <div className="project-session-list">
+	                              {projectNode.sessions.length === 0 ? (
+	                                <p className="pane-subtle-light compact-empty">No sessions in this project.</p>
+	                              ) : (
+	                                projectNode.sessions.map((sessionNode) => (
+	                                  <button
+	                                    key={sessionNode.id}
+	                                    type="button"
+	                                    className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
+	                                    data-session-id={sessionNode.id}
+	                                    onClick={() => activateThread(sessionNode.id)}
+	                                    title={sessionNode.title}
+	                                  >
+	                                    <span className="session-chip-label">{sessionNode.title}</span>
+	                                    <span className="session-chip-state">
+	                                      {sessionNode.activeJobID ? <small className="session-chip-badge running">running</small> : null}
+	                                      {sessionNode.unreadDone ? <small className="session-chip-badge unread">new</small> : null}
+	                                      {!sessionNode.activeJobID &&
+	                                      !sessionNode.unreadDone &&
+	                                      sessionNode.lastJobStatus !== "idle" ? (
+	                                        <small className="session-chip-badge status">{sessionNode.lastJobStatus}</small>
+	                                      ) : null}
+	                                    </span>
+	                                  </button>
+	                                ))
+	                              )}
+	                            </div>
+	                          </div>
+	                        ))
+	                      )}
+	                    </article>
+	                  ))
+	                )}
               </div>
             </section>
 
@@ -2301,12 +2315,17 @@ export function App() {
             </section>
           </aside>
 
-          <main className="chat-pane">
-            <header className="chat-head">
-              <div>
-                <h1>{activeThread?.title ?? "Session"}</h1>
-              </div>
-            </header>
+	          <main className="chat-pane">
+	            <header className="chat-head">
+	              <div>
+	                <h1>{activeThread?.title ?? "Session"}</h1>
+	                <p className="chat-context">
+	                  {(activeWorkspace?.hostName?.trim() || "local-default") +
+	                    " · " +
+	                    (activeWorkspace?.path?.trim() || "/home/ecs-user")}
+	                </p>
+	              </div>
+	            </header>
 
             <section className="timeline" aria-live="polite" ref={timelineViewportRef} onScroll={onTimelineScroll}>
               {activeTimeline.length === 0 ? (
@@ -2390,31 +2409,30 @@ export function App() {
                   />
                   {uploadingImage ? "uploading..." : "Attach Image"}
                 </label>
-                {(activeThread?.imagePaths ?? []).map((imagePath) => (
-                  <button
-                    key={imagePath}
-                    type="button"
+	                {(activeThread?.imagePaths ?? []).map((imagePath) => (
+	                  <button
+	                    key={imagePath}
+	                    type="button"
                     className="quick-chip ghost"
                     onClick={() => activeThread && removeThreadImagePath(activeThread.id, imagePath)}
-                  >
-                    {imagePath.split("/").pop() ?? imagePath} ×
-                  </button>
-                ))}
-                {imageUploadError ? <span className="shortcut-hint">{imageUploadError}</span> : null}
-                <span className="shortcut-hint">Enter send · Shift+Enter newline</span>
-              </div>
+	                  >
+	                    {imagePath.split("/").pop() ?? imagePath} ×
+	                  </button>
+	                ))}
+	                {imageUploadError ? <span className="shortcut-hint">{imageUploadError}</span> : null}
+	              </div>
 
-              <textarea
-                ref={promptInputRef}
+	              <textarea
+	                ref={promptInputRef}
                 value={activeDraft}
                 onChange={(event) => {
                   if (activeThread) {
                     updateThreadDraft(activeThread.id, event.target.value);
                   }
                 }}
-                rows={5}
-                placeholder={activeThread ? "Tell codex what to do in this workspace..." : "Select a session to start"}
-                disabled={!activeThread}
+	                rows={1}
+	                placeholder={activeThread ? "Tell codex what to do in this workspace..." : "Select a session to start"}
+	                disabled={!activeThread}
                 onKeyDown={(event) => {
                   const composing = "isComposing" in event.nativeEvent ? Boolean((event.nativeEvent as { isComposing?: boolean }).isComposing) : false;
                   if (event.key === "Enter" && !event.shiftKey && !composing) {

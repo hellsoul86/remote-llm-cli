@@ -525,12 +525,19 @@ button.ghost.danger-ghost:hover {
 }
 
 .chat-head h1 {
-  font-size: clamp(1.04rem, 1.8vw, 1.28rem);
+  font-size: clamp(1.01rem, 1.65vw, 1.2rem);
   color: #10223a;
 }
 
 .chat-head .pane-eyebrow {
   color: var(--muted);
+}
+
+.chat-context {
+  margin-top: 4px;
+  color: #607089;
+  font-size: 0.74rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
 .thread-bar {
@@ -639,6 +646,31 @@ button.ghost.danger-ghost:hover {
   text-align: left;
 }
 
+.project-chip-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.project-chip-main strong {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-chip-main em {
+  font-size: 0.68rem;
+  color: #6a7f9a;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
 .project-chip small {
   font-size: 0.72rem;
   color: #4f6481;
@@ -663,19 +695,54 @@ button.ghost.danger-ghost:hover {
   border-radius: 9px;
   background: #ffffff;
   color: #1d334f;
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 6px 8px;
   text-align: left;
   font-size: 0.8rem;
 }
 
-.session-chip-tree small {
-  font-size: 0.72rem;
+.session-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-chip-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-chip-badge {
+  border-radius: 999px;
+  border: 1px solid #d7e1ed;
+  background: #f8fbff;
   color: #5a6f8b;
+  padding: 2px 6px;
+  font-size: 0.66rem;
+  line-height: 1.15;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.session-chip-badge.running {
+  border-color: #d6c79f;
+  background: #fff8e7;
+  color: #7a5a10;
+}
+
+.session-chip-badge.unread {
+  border-color: #b2d7c3;
+  background: #edf9f2;
+  color: #17603f;
+}
+
+.session-chip-badge.status {
+  border-color: #d3deeb;
+  background: #f4f8ff;
+  color: #3f5470;
 }
 
 .session-chip-tree.active {
@@ -744,7 +811,9 @@ button.ghost.danger-ghost:hover {
 }
 
 .message h4 {
-  font-size: 0.92rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: #304965;
 }
 
 .message time {
@@ -758,6 +827,16 @@ button.ghost.danger-ghost:hover {
   line-height: 1.58;
 }
 
+.message-user pre,
+.message-assistant pre {
+  font-family: "Sora", "Segoe UI", sans-serif;
+}
+
+.message-system pre {
+  font-size: 0.78rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
 .composer {
   border-top: 1px solid #e1e7ef;
   background: #ffffff;
@@ -768,7 +847,7 @@ button.ghost.danger-ghost:hover {
 
 .session-inline-settings {
   display: grid;
-  grid-template-columns: minmax(200px, 1fr) minmax(180px, 220px);
+  grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr);
   gap: 8px;
 }
 
@@ -805,8 +884,11 @@ button.ghost.danger-ghost:hover {
 }
 
 .composer textarea {
-  min-height: 98px;
-  resize: vertical;
+  min-height: 92px;
+  max-height: 240px;
+  resize: none;
+  overflow-y: auto;
+  line-height: 1.55;
 }
 
 .composer-actions {
@@ -866,13 +948,18 @@ button.ghost.danger-ghost:hover {
 
 .session-setting-row {
   display: grid;
-  gap: 6px;
-  font-size: 0.8rem;
+  gap: 5px;
+  font-size: 0.73rem;
   color: #334964;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .session-setting-row select {
   width: 100%;
+  font-size: 0.8rem;
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .pane-subtle-light {
