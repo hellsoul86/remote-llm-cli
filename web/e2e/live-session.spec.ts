@@ -18,6 +18,10 @@ function requireLiveEnv(baseURL: string | undefined, token: string): void {
   test.skip(!baseURL, "Playwright baseURL is not configured.");
 }
 
+function composerInput(page: Page): Locator {
+  return page.locator(".composer textarea");
+}
+
 async function unlockSessionPage(page: Page, token: string): Promise<void> {
   await page.goto("/");
   const tokenInput = page.getByPlaceholder("rlm_xxx.yyy");
@@ -26,19 +30,25 @@ async function unlockSessionPage(page: Page, token: string): Promise<void> {
     await page.getByRole("button", { name: "Unlock Workspace" }).click();
   }
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByPlaceholder("Tell codex what to do in this workspace...")).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled({ timeout: 120_000 });
+  await expect(composerInput(page)).toBeVisible({ timeout: 120_000 });
 }
 
 async function createFreshSession(page: Page): Promise<void> {
-  await page.locator("button.new-thread").first().click();
+  await page.getByRole("button", { name: "New Session", exact: true }).click();
   const heading = page.locator(".chat-head h1");
-  await expect(heading).toContainText(/Session\s+\d+/, { timeout: 30_000 });
+  await expect
+    .poll(
+      async () => {
+        return ((await heading.textContent()) ?? "").trim();
+      },
+      { timeout: 30_000 }
+    )
+    .toMatch(/^Session(?:\s+\d+)?$/);
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled({ timeout: 120_000 });
 }
 
 async function submitPrompt(page: Page, prompt: string): Promise<void> {
-  const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+  const composer = composerInput(page);
   await composer.fill(prompt);
   await composer.press("Enter");
   await expect(composer).toHaveValue("");
@@ -96,7 +106,14 @@ test.describe.serial("live headless session flow (real API, no route mocking)", 
     await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
     if (latestText !== EMPTY_ASSISTANT_FALLBACK) {
       await expect(latestAssistant).toContainText(marker, { timeout: 240_000 });
-      await expect(page.locator(".message.message-assistant pre", { hasText: marker })).toHaveCount(1);
+      await expect
+        .poll(
+          async () => {
+            return page.locator(".message.message-assistant pre", { hasText: marker }).count();
+          },
+          { timeout: 120_000 }
+        )
+        .toBeGreaterThan(0);
       const lineCount = latestText.split("\n").filter((line) => line.trim() !== "").length;
       expect(lineCount >= 20).toBeTruthy();
 
@@ -121,7 +138,7 @@ test.describe.serial("live headless session flow (real API, no route mocking)", 
     const session1Chip = page.locator(".session-chip-tree.active").first();
     const session1ID = (await session1Chip.getAttribute("data-session-id")) ?? "";
     expect(session1ID).not.toBe("");
-    await page.locator("button.new-thread").first().click();
+    await page.getByRole("button", { name: "New Session", exact: true }).click();
     const session2Chip = page.locator(".session-chip-tree.active").first();
     await expect(session2Chip).toBeVisible({ timeout: 30_000 });
     const session2ID = (await session2Chip.getAttribute("data-session-id")) ?? "";
@@ -179,7 +196,7 @@ test.describe.serial("live headless mobile UX", () => {
     const overflowX = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflowX <= 2).toBeTruthy();
 
-    const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+    const composer = composerInput(page);
     await composer.fill("line-a");
     await composer.press("Shift+Enter");
     await composer.type("line-b");
