@@ -1015,8 +1015,9 @@ test("session stream completion keeps a single assistant reply", async ({
   await expect(assistantWithMarker).toHaveCount(1);
   await page.waitForTimeout(1800);
   await expect(assistantWithMarker).toHaveCount(1);
-  await expect(page.getByText("Run Started")).toBeVisible();
-  await expect(page.getByText("Target Done")).toBeVisible();
+  await expect(page.getByText("Response Started")).toBeVisible();
+  await expect(page.getByText("Server Completed")).toBeVisible();
+  await expect(page.getByText(/run=/)).toHaveCount(0);
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 });
@@ -1063,7 +1064,7 @@ test("stop and regenerate controls work in session composer", async ({
   await expect(stopButton).toBeVisible();
   await stopButton.click();
   await expect(
-    page.getByRole("heading", { name: "Cancel Requested" }),
+    page.getByRole("heading", { name: "Stopping" }),
   ).toBeVisible();
 
   const regenerateButton = page.getByRole("button", { name: "Regenerate" });
@@ -1135,16 +1136,16 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
   await expect(
     page.locator(".message.message-assistant pre", { hasText: marker }),
   ).toHaveCount(1);
-  await expect(page.getByText("Run Started")).toHaveCount(1);
-  await expect(page.getByText("Target Done")).toHaveCount(1);
+  await expect(page.getByText("Response Started")).toHaveCount(1);
+  await expect(page.getByText("Server Completed")).toHaveCount(1);
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(
     page.locator(".message.message-assistant pre", { hasText: marker }),
   ).toHaveCount(1);
-  await expect(page.getByText("Run Started")).toHaveCount(1);
-  await expect(page.getByText("Target Done")).toHaveCount(1);
+  await expect(page.getByText("Response Started")).toHaveCount(1);
+  await expect(page.getByText("Server Completed")).toHaveCount(1);
   await expect.poll(
     () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
   ).toBe(true);
@@ -1243,6 +1244,7 @@ test("background completion shows one alert and unread badge", async ({ page }) 
       '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.unread',
     ),
   ).toHaveCount(1);
+  await expect(alert).not.toContainText(/job_|run=/i);
 
   await alert.click();
   await expect(

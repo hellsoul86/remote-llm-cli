@@ -2890,8 +2890,8 @@ export function App() {
             {
               kind: "system",
               state: "running",
-              title: "Run Started",
-              body: `run=${id}`,
+              title: "Response Started",
+              body: "Assistant is working on your request.",
             },
             sessionID,
           );
@@ -2908,8 +2908,8 @@ export function App() {
             {
               kind: "system",
               state: "running",
-              title: "Target Started",
-              body: `${host} started`,
+              title: "Server Processing",
+              body: host,
             },
             sessionID,
           );
@@ -2988,7 +2988,8 @@ export function App() {
             {
               kind: "system",
               state: status && status !== "ok" ? "error" : "success",
-              title: status && status !== "ok" ? "Target Failed" : "Target Done",
+              title:
+                status && status !== "ok" ? "Server Failed" : "Server Completed",
               body:
                 status && status !== "ok"
                   ? `${host} failed${codeText}${errorText}`
@@ -3008,8 +3009,8 @@ export function App() {
             {
               kind: "system",
               state: "running",
-              title: "Cancel Requested",
-              body: runID ? `run=${runID}` : "Cancel requested",
+              title: "Stopping",
+              body: "Stopping current response...",
             },
             sessionID,
           );
@@ -3741,7 +3742,7 @@ export function App() {
               {
                 kind: "system",
                 state: "error",
-                title: "Session Sync Failed",
+                title: "Session Update Failed",
                 body: error,
               },
               item.threadID,
@@ -4405,8 +4406,8 @@ export function App() {
         {
           kind: "system",
           state: "error",
-          title: "No Target Host",
-          body: "No target server available for this session.",
+          title: "No Server Available",
+          body: "No server is available for this session.",
         },
         activeThread.id,
       );
@@ -4509,7 +4510,7 @@ export function App() {
           {
             kind: "assistant",
             state: status >= 400 ? "error" : "success",
-            title: `Run Finished (HTTP ${status})`,
+            title: `Response Finished (HTTP ${status})`,
             body: summarizeRunResponse(body),
           },
           activeThread.id,
@@ -4538,7 +4539,7 @@ export function App() {
         {
           kind: "system",
           state: "error",
-          title: "Run Failed",
+          title: "Response Failed",
           body: String(error),
         },
         activeThread.id,
@@ -4568,8 +4569,8 @@ export function App() {
         {
           kind: "system",
           state: "running",
-          title: "Cancel Requested",
-          body: `run=${runID}`,
+          title: "Stopping",
+          body: "Stopping current response...",
         },
         activeThread.id,
       );
@@ -4578,7 +4579,7 @@ export function App() {
         {
           kind: "system",
           state: "error",
-          title: "Cancel Failed",
+          title: "Stop Failed",
           body: String(error),
         },
         activeThread.id,
