@@ -1521,6 +1521,30 @@ test("project create and rename use project name as primary label", async ({
   ).toBeVisible();
 });
 
+test("active project is prioritized to top of project list", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PROJECT_ORDER_${Date.now()}`;
+  await mockSessionApi(page, `project order ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByRole("button", { name: "New Project" }).click();
+  await page
+    .getByPlaceholder("/home/ecs-user/project")
+    .fill("/srv/zzz-project");
+  await page.getByPlaceholder("My Project").fill("zzz Project");
+  await page.getByRole("button", { name: "Create" }).click();
+
+  const projectTitles = page.locator(".project-chip .project-chip-main strong");
+  await expect(projectTitles.first()).toHaveText("zzz Project");
+
+  await page
+    .locator(".project-chip", {
+      has: page.locator(".project-chip-main strong", { hasText: "work" }),
+    })
+    .click();
+  await expect(projectTitles.first()).toHaveText("work");
+});
+
 test("background completion shows one alert and unread badge", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `BG_${Date.now()}`;

@@ -78,6 +78,7 @@ type SessionTreeProject = {
   hostID: string;
   title: string;
   path: string;
+  updatedAt: string;
   sessions: Array<{
     id: string;
     title: string;
@@ -1482,6 +1483,7 @@ export function App() {
         hostID,
         title: resolveProjectTitle(workspace.path, workspace.title),
         path: workspace.path,
+        updatedAt: workspace.updatedAt,
         sessions: [...workspace.sessions]
           .sort((a, b) => {
             if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
@@ -1514,12 +1516,37 @@ export function App() {
     return Array.from(groups.values()).map((group) => ({
       ...group,
       projects: group.projects.sort((a, b) => {
+        const projectPriority = (project: SessionTreeProject): number => {
+          if (project.id === activeWorkspaceID) return 0;
+          if (project.sessions.some((sessionItem) => sessionItem.activeJobID.trim() !== "")) return 1;
+          if (project.sessions.some((sessionItem) => sessionItem.unreadDone)) return 2;
+          return 3;
+        };
+        const aPriority = projectPriority(a);
+        const bPriority = projectPriority(b);
+        if (aPriority !== bPriority) return aPriority - bPriority;
+
+        const projectUpdatedAtMS = (project: SessionTreeProject): number => {
+          const parsedProjectTS = Date.parse(project.updatedAt);
+          let latest = Number.isFinite(parsedProjectTS) ? parsedProjectTS : 0;
+          for (const sessionItem of project.sessions) {
+            const parsedSessionTS = Date.parse(sessionItem.updatedAt);
+            if (Number.isFinite(parsedSessionTS)) {
+              latest = Math.max(latest, parsedSessionTS);
+            }
+          }
+          return latest;
+        };
+        const aUpdatedAtMS = projectUpdatedAtMS(a);
+        const bUpdatedAtMS = projectUpdatedAtMS(b);
+        if (aUpdatedAtMS !== bUpdatedAtMS) return bUpdatedAtMS - aUpdatedAtMS;
+
         const titleDiff = a.title.localeCompare(b.title);
         if (titleDiff !== 0) return titleDiff;
         return a.path.localeCompare(b.path);
       }),
     }));
-  }, [hosts, workspaces]);
+  }, [hosts, workspaces, activeWorkspaceID]);
   const sourceProjectIDSet = useMemo(
     () =>
       new Set(
