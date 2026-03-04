@@ -52,6 +52,10 @@ export type DiscoveredProject = {
   sessions: DiscoveredProjectSession[];
 };
 
+type SyncProjectsOptions = {
+  preserveMissingSessions?: boolean;
+};
+
 type PersistedSessionState = {
   workspaces: WorkspaceDirectory[];
   activeWorkspaceID: string;
@@ -617,7 +621,11 @@ export function useSessionDomain() {
     });
   }
 
-  function syncProjectsFromDiscovery(projects: DiscoveredProject[]) {
+  function syncProjectsFromDiscovery(
+    projects: DiscoveredProject[],
+    options?: SyncProjectsOptions,
+  ) {
+    const preserveMissingSessions = options?.preserveMissingSessions !== false;
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
@@ -666,7 +674,7 @@ export function useSessionDomain() {
         });
       }
 
-      if (existing) {
+      if (existing && preserveMissingSessions) {
         for (const prior of existing.sessions) {
           if (seen.has(prior.id)) continue;
           sessions.push(prior);

@@ -1728,7 +1728,7 @@ export function App() {
       ]);
       const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
       if (built.length > 0) {
-        syncProjectsFromDiscovery(built);
+        syncProjectsFromDiscovery(built, { preserveMissingSessions: false });
         reconcileFromSessionRecords(sessions);
         return;
       }
