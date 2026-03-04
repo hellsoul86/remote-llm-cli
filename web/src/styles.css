@@ -906,6 +906,11 @@ button.ghost.danger-ghost:hover {
   margin: 0;
 }
 
+.timeline-shell {
+  position: relative;
+  min-height: 0;
+}
+
 .timeline {
   min-height: 0;
   overflow: auto;
@@ -914,6 +919,31 @@ button.ghost.danger-ghost:hover {
   gap: 12px;
   align-content: start;
   background: #fafbfc;
+}
+
+.timeline-jump-latest {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  border-radius: 999px;
+  border: 1px solid #9dbce0;
+  background: #ffffff;
+  color: #17324d;
+  box-shadow: 0 10px 22px rgba(13, 23, 35, 0.16);
+  padding: 7px 12px;
+  font-size: 0.72rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  z-index: 3;
+}
+
+.timeline-jump-latest:hover {
+  border-color: #799fcc;
+  background: #f5f9ff;
+}
+
+.timeline-jump-latest:focus-visible {
+  outline: 2px solid #4a81bd;
+  outline-offset: 2px;
 }
 
 .message {
@@ -1745,5 +1775,12 @@ button.ghost.danger-ghost:hover {
 
   .command-palette {
     border-radius: 12px;
+  }
+
+  .timeline-jump-latest {
+    right: 10px;
+    bottom: 10px;
+    padding: 6px 10px;
+    font-size: 0.68rem;
   }
 }

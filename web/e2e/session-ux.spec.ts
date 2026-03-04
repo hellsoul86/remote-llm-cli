@@ -16,6 +16,7 @@ type MockOptions = {
   backgroundCompletion?: boolean;
   titleUpdate?: string;
   jobRunningPolls?: number;
+  jobEventFirstPollDelayMS?: number;
   streamFailAttempts?: number;
   runtimeCommandEvents?: boolean;
 };
@@ -47,6 +48,10 @@ async function mockSessionApi(
   const backgroundCompletion = options?.backgroundCompletion ?? false;
   const titleUpdate = options?.titleUpdate?.trim() ?? "";
   const jobRunningPolls = Math.max(1, options?.jobRunningPolls ?? 1);
+  const jobEventFirstPollDelayMS = Math.max(
+    0,
+    options?.jobEventFirstPollDelayMS ?? 0,
+  );
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   let sessionOneStreamAttempts = 0;
@@ -770,6 +775,11 @@ async function mockSessionApi(
     });
   });
   await page.route("**/v1/jobs/job_ux_1/events**", async (route) => {
+    if (eventPollCount === 0 && jobEventFirstPollDelayMS > 0) {
+      await new Promise((resolve) => {
+        setTimeout(resolve, jobEventFirstPollDelayMS);
+      });
+    }
     if (canceled) {
       await route.fulfill({
         status: 200,
@@ -1013,6 +1023,56 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
     Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop),
   );
   expect(scrollGap <= 48).toBeTruthy();
+});
+
+test("jump-to-latest appears when timeline grows off-bottom", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 740 });
+  const marker = `JUMP_${Date.now()}`;
+  const assistantReply = buildLongAssistantReply(marker);
+  const harness = await mockSessionApi(page, assistantReply, marker, {
+    jobEventFirstPollDelayMS: 1200,
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  const largePrompt = Array.from(
+    { length: 56 },
+    (_, index) => `plan-step-${index + 1} ${marker}`,
+  ).join("\n");
+  await composer.fill(largePrompt);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const timeline = page.locator(".timeline");
+  await expect(page.locator(".message.message-user")).toHaveCount(1);
+  await timeline.evaluate((el) => {
+    el.style.height = "180px";
+    el.style.minHeight = "180px";
+    el.style.maxHeight = "180px";
+  });
+  await expect
+    .poll(() =>
+      timeline.evaluate((el) => Math.max(0, el.scrollHeight - el.clientHeight)),
+    )
+    .toBeGreaterThan(20);
+  await timeline.evaluate((el) => {
+    el.scrollTop = 0;
+    el.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+
+  const jumpButton = page.getByTestId("timeline-jump-latest");
+  await expect(jumpButton).toBeVisible({ timeout: 12000 });
+  await jumpButton.click();
+  await expect(jumpButton).toHaveCount(0);
+
+  const scrollGap = await timeline.evaluate((el) =>
+    Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop),
+  );
+  expect(scrollGap <= 56).toBeTruthy();
 });
 
 test("composer supports image paste and drag-drop upload", async ({ page }) => {

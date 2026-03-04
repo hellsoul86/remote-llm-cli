@@ -147,6 +147,8 @@ const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
 const MAX_SESSION_STREAMS = 4;
 const COMPOSER_MIN_HEIGHT = 52;
 const COMPOSER_MAX_HEIGHT = 260;
+const TIMELINE_STICK_GAP_PX = 72;
+const TIMELINE_JUMP_COUNT_CAP = 99;
 const APPROVAL_POLICY_OPTIONS: Array<{
   value: CodexApprovalPolicy;
   label: string;
@@ -1325,11 +1327,13 @@ export function App() {
   const [treeCursorSessionID, setTreeCursorSessionID] = useState("");
   const [expandedMessageIDs, setExpandedMessageIDs] = useState<string[]>([]);
   const [copiedCodeKey, setCopiedCodeKey] = useState("");
+  const [timelineUnreadCount, setTimelineUnreadCount] = useState(0);
 
   const timelineViewportRef = useRef<HTMLElement | null>(null);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
   const timelineStickToBottomRef = useRef(true);
   const timelineForceStickRef = useRef(false);
+  const timelineLastSignatureRef = useRef("");
   const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const commandPaletteInputRef = useRef<HTMLInputElement | null>(null);
@@ -3789,14 +3793,34 @@ export function App() {
     const node = timelineViewportRef.current;
     if (!node) return;
     const threadChanged = lastTimelineThreadIDRef.current !== activeThreadID;
+    const nextSignature = [
+      activeThreadID,
+      String(activeTimeline.length),
+      activeTimelineTail?.id ?? "",
+      activeTimelineTail?.state ?? "",
+      String(activeTimelineTail?.body?.length ?? 0),
+    ].join("|");
+    const previousSignature = timelineLastSignatureRef.current;
     if (threadChanged) {
       lastTimelineThreadIDRef.current = activeThreadID;
       timelineForceStickRef.current = true;
+      timelineLastSignatureRef.current = nextSignature;
+      setTimelineUnreadCount(0);
     }
     const shouldStick =
       timelineForceStickRef.current ||
       timelineStickToBottomRef.current ||
       threadChanged;
+    const timelineChanged =
+      !threadChanged && previousSignature !== nextSignature;
+    if (!shouldStick && timelineChanged) {
+      timelineLastSignatureRef.current = nextSignature;
+      setTimelineUnreadCount((count) =>
+        Math.min(TIMELINE_JUMP_COUNT_CAP, count + 1),
+      );
+      return;
+    }
+    timelineLastSignatureRef.current = nextSignature;
     if (!shouldStick) return;
     const frame = window.requestAnimationFrame(() => {
       if (timelineBottomRef.current) {
@@ -3805,6 +3829,7 @@ export function App() {
         node.scrollTop = node.scrollHeight;
       }
       timelineForceStickRef.current = false;
+      setTimelineUnreadCount(0);
     });
     return () => {
       window.cancelAnimationFrame(frame);
@@ -3822,7 +3847,24 @@ export function App() {
     const gap = Math.abs(
       node.scrollHeight - node.clientHeight - node.scrollTop,
     );
-    timelineStickToBottomRef.current = gap <= 72;
+    const pinned = gap <= TIMELINE_STICK_GAP_PX;
+    timelineStickToBottomRef.current = pinned;
+    if (pinned) {
+      setTimelineUnreadCount(0);
+    }
+  }
+
+  function jumpTimelineToLatest() {
+    const node = timelineViewportRef.current;
+    if (!node) return;
+    timelineForceStickRef.current = true;
+    timelineStickToBottomRef.current = true;
+    setTimelineUnreadCount(0);
+    if (timelineBottomRef.current) {
+      timelineBottomRef.current.scrollIntoView({ block: "end" });
+      return;
+    }
+    node.scrollTop = node.scrollHeight;
   }
 
   useEffect(() => {
@@ -5701,39 +5743,53 @@ export function App() {
               </div>
             </header>
 
-            <section
-              className="timeline"
-              aria-live="polite"
-              ref={timelineViewportRef}
-              onScroll={onTimelineScroll}
-            >
-              {activeTimeline.length === 0 ? (
-                <article className="message message-system">
-                  <div className="message-title-row">
-                    <h4>{isRefreshing ? "Loading" : "Start"}</h4>
-                  </div>
-                  <pre>
-                    {isRefreshing
-                      ? "Preparing session..."
-                      : "Ask Codex what to do in this workspace."}
-                  </pre>
-                </article>
-              ) : (
-                activeTimeline.map((entry) => (
-                  <article
-                    key={entry.id}
-                    className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}
-                  >
+            <div className="timeline-shell">
+              <section
+                className="timeline"
+                aria-live="polite"
+                ref={timelineViewportRef}
+                onScroll={onTimelineScroll}
+              >
+                {activeTimeline.length === 0 ? (
+                  <article className="message message-system">
                     <div className="message-title-row">
-                      <h4>{entry.title}</h4>
-                      <time>{formatClock(entry.createdAt)}</time>
+                      <h4>{isRefreshing ? "Loading" : "Start"}</h4>
                     </div>
-                    {renderTimelineEntryBody(entry)}
+                    <pre>
+                      {isRefreshing
+                        ? "Preparing session..."
+                        : "Ask Codex what to do in this workspace."}
+                    </pre>
                   </article>
-                ))
-              )}
-              <div ref={timelineBottomRef} />
-            </section>
+                ) : (
+                  activeTimeline.map((entry) => (
+                    <article
+                      key={entry.id}
+                      className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}
+                    >
+                      <div className="message-title-row">
+                        <h4>{entry.title}</h4>
+                        <time>{formatClock(entry.createdAt)}</time>
+                      </div>
+                      {renderTimelineEntryBody(entry)}
+                    </article>
+                  ))
+                )}
+                <div ref={timelineBottomRef} />
+              </section>
+              {timelineUnreadCount > 0 ? (
+                <button
+                  type="button"
+                  className="timeline-jump-latest"
+                  data-testid="timeline-jump-latest"
+                  onClick={jumpTimelineToLatest}
+                >
+                  {timelineUnreadCount > 1
+                    ? `Jump to latest (${timelineUnreadCount})`
+                    : "Jump to latest"}
+                </button>
+              ) : null}
+            </div>
 
             <form
               ref={composerFormRef}
