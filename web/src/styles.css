@@ -717,6 +717,17 @@ button.ghost.danger-ghost:hover {
   gap: 6px;
 }
 
+.project-node-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.project-archive-btn {
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 0.68rem;
+}
+
 .project-chip {
   width: 100%;
   border: 1px solid #dde5ef;

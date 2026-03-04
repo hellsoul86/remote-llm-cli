@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/jobs/run", s.withAuth(http.HandlerFunc(s.handleEnqueueRunJob)))
 	mux.Handle("POST /v1/jobs/sync", s.withAuth(http.HandlerFunc(s.handleEnqueueSyncJob)))
 	mux.Handle("GET /v1/projects", s.withAuth(http.HandlerFunc(s.handleListProjects)))
+	mux.Handle("DELETE /v1/projects/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteProject)))
 	mux.Handle("GET /v1/sessions", s.withAuth(http.HandlerFunc(s.handleListSessions)))
 	mux.Handle("GET /v1/sessions/{id}", s.withAuth(http.HandlerFunc(s.handleGetSession)))
 	mux.Handle("DELETE /v1/sessions/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteSession)))
@@ -289,6 +290,35 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		filtered = append(filtered, project)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": filtered})
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	projectID := strings.TrimSpace(r.PathValue("id"))
+	if projectID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing project id"})
+		return
+	}
+	project, deleted, sessionRefs, err := s.store.DeleteProject(projectID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !deleted && sessionRefs > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":         "project is not empty",
+			"project":       project,
+			"session_count": sessionRefs,
+		})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "project not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"project": project,
+	})
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -3157,6 +3187,8 @@ func inferAction(method string, path string) string {
 		return "job.sync.enqueue"
 	case method == http.MethodGet && path == "/v1/projects":
 		return "project.list"
+	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/projects/"):
+		return "project.delete"
 	case method == http.MethodGet && path == "/v1/sessions":
 		return "session.list"
 	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/sessions/"):

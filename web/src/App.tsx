@@ -12,6 +12,7 @@ import {
   discoverCodexSessions,
   discoverCodexModels,
   archiveSession,
+  deleteProject,
   deleteHost,
   enqueueRunJob,
   getMetrics,
@@ -694,6 +695,7 @@ export function App() {
   >({});
   const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [deletingThreadID, setDeletingThreadID] = useState("");
+  const [deletingProjectID, setDeletingProjectID] = useState("");
   const [sessionModelDefault, setSessionModelDefault] = useState("");
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
@@ -3091,6 +3093,60 @@ export function App() {
     await loadWorkspace(token, false);
   }
 
+  async function onArchiveProject(
+    projectID: string,
+    projectPath: string,
+    sessionCount: number,
+  ) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const targetProjectID = projectID.trim();
+    if (!targetProjectID) return;
+    if (sessionCount > 0) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Archive Blocked",
+          body: "Project is not empty. Archive its sessions first.",
+        },
+        activeThreadID,
+      );
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Archive empty project "${projectPath}"?`,
+    );
+    if (!confirmed) return;
+
+    setDeletingProjectID(targetProjectID);
+    try {
+      await deleteProject(token, targetProjectID);
+      await refreshProjectsFromSource(token, hosts, false, true);
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "success",
+          title: "Project Archived",
+          body: projectPath,
+        },
+        activeThreadID,
+      );
+    } catch (error) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Project Archive Failed",
+          body: String(error),
+        },
+        activeThreadID,
+      );
+    } finally {
+      setDeletingProjectID("");
+    }
+  }
+
   async function onArchiveActiveSession() {
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
     const targetSessionID = activeThread.id.trim();
@@ -3668,6 +3724,35 @@ export function App() {
                                     : `${projectNode.sessions.length}`}
                                 </small>
                               </button>
+                              <div className="project-node-actions">
+                                <button
+                                  type="button"
+                                  className="ghost danger-ghost project-archive-btn"
+                                  disabled={
+                                    authPhase !== "ready" ||
+                                    !token.trim() ||
+                                    deletingProjectID === projectNode.id ||
+                                    deletingProjectID !== "" ||
+                                    projectNode.sessions.length > 0
+                                  }
+                                  title={
+                                    projectNode.sessions.length > 0
+                                      ? "Archive sessions first"
+                                      : "Archive empty project"
+                                  }
+                                  onClick={() =>
+                                    void onArchiveProject(
+                                      projectNode.id,
+                                      projectNode.path,
+                                      projectNode.sessions.length,
+                                    )
+                                  }
+                                >
+                                  {deletingProjectID === projectNode.id
+                                    ? "Archiving..."
+                                    : "Archive"}
+                                </button>
+                              </div>
                               <div className="project-session-list">
                                 {projectNode.sessions.length === 0 ? (
                                   <p className="pane-subtle-light compact-empty">

@@ -338,6 +338,72 @@ func TestProjectAndSessionBindingLifecycle(t *testing.T) {
 	}
 }
 
+func TestDeleteProjectRequiresEmptySessions(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	project, err := st.UpsertProject(model.ProjectRecord{
+		ID:       "project_h1::/srv/app",
+		HostID:   "h1",
+		HostName: "staging",
+		Path:     "/srv/app",
+		Runtime:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	if _, err := st.UpsertSession(model.SessionRecord{
+		ID:        "session_project_delete_1",
+		ProjectID: project.ID,
+		HostID:    "h1",
+		Path:      "/srv/app",
+		Runtime:   "codex",
+		Title:     "keep",
+	}); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+
+	deletedProject, deleted, refs, err := st.DeleteProject(project.ID)
+	if err != nil {
+		t.Fatalf("delete project (non-empty): %v", err)
+	}
+	if deleted {
+		t.Fatalf("project should not be deleted when non-empty")
+	}
+	if refs != 1 {
+		t.Fatalf("refs=%d want=1", refs)
+	}
+	if deletedProject.ID != project.ID {
+		t.Fatalf("deletedProject.ID=%q want=%q", deletedProject.ID, project.ID)
+	}
+
+	if _, ok := st.GetProject(project.ID); !ok {
+		t.Fatalf("project should still exist after blocked delete")
+	}
+
+	if _, ok, err := st.DeleteSession("session_project_delete_1"); err != nil || !ok {
+		t.Fatalf("delete session err=%v ok=%v", err, ok)
+	}
+
+	deletedProject, deleted, refs, err = st.DeleteProject(project.ID)
+	if err != nil {
+		t.Fatalf("delete project (empty): %v", err)
+	}
+	if !deleted {
+		t.Fatalf("project should be deleted when empty")
+	}
+	if refs != 0 {
+		t.Fatalf("refs=%d want=0", refs)
+	}
+	if deletedProject.ID != project.ID {
+		t.Fatalf("deletedProject.ID=%q want=%q", deletedProject.ID, project.ID)
+	}
+	if _, ok := st.GetProject(project.ID); ok {
+		t.Fatalf("project should not exist after delete")
+	}
+}
+
 func TestDeleteSessionRemovesSessionAndEvents(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

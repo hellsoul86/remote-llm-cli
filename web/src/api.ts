@@ -639,6 +639,26 @@ export async function listProjects(
   return body.projects ?? [];
 }
 
+export async function deleteProject(
+  token: string,
+  projectID: string,
+): Promise<{ deleted: boolean; project?: ProjectRecord; session_count?: number }> {
+  const res = await fetch(`${API_BASE}/v1/projects/${encodeURIComponent(projectID)}`, {
+    method: "DELETE",
+    headers: headers(token),
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(`delete project failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return {
+    deleted: Boolean(body?.deleted),
+    project: body?.project,
+    session_count:
+      typeof body?.session_count === "number" ? body.session_count : undefined,
+  };
+}
+
 export async function listSessions(
   token: string,
   limit = 200,

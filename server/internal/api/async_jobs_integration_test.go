@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -590,6 +591,105 @@ func TestDeleteSessionRemovesRemoteCodexSessionAndLocalState(t *testing.T) {
 	}
 	if events := srv.store.ListSessionEvents(sessionID, 0, 100); len(events) != 0 {
 		t.Fatalf("session events should be removed, got=%d", len(events))
+	}
+}
+
+func TestDeleteProjectRequiresEmptySessions(t *testing.T) {
+	srv, httpSrv, token, host := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	project, err := srv.store.UpsertProject(model.ProjectRecord{
+		ID:       "project_h1::/srv/project-delete",
+		HostID:   host.ID,
+		HostName: host.Name,
+		Path:     "/srv/project-delete",
+		Runtime:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	if _, err := srv.store.UpsertSession(model.SessionRecord{
+		ID:        "session_project_delete_1",
+		ProjectID: project.ID,
+		HostID:    host.ID,
+		Path:      "/srv/project-delete",
+		Runtime:   "codex",
+		Title:     "Delete blocker",
+	}); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+
+	var blockedResp struct {
+		Error        string              `json:"error"`
+		Project      model.ProjectRecord `json:"project"`
+		SessionCount int                 `json:"session_count"`
+	}
+	blockedStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodDelete,
+		fmt.Sprintf("%s/v1/projects/%s", httpSrv.URL, url.PathEscape(project.ID)),
+		token,
+		nil,
+		&blockedResp,
+	)
+	if blockedStatus != http.StatusConflict {
+		t.Fatalf("delete non-empty project status=%d want=409", blockedStatus)
+	}
+	if blockedResp.Error != "project is not empty" {
+		t.Fatalf("error=%q want=project is not empty", blockedResp.Error)
+	}
+	if blockedResp.SessionCount != 1 {
+		t.Fatalf("session_count=%d want=1", blockedResp.SessionCount)
+	}
+	if blockedResp.Project.ID != project.ID {
+		t.Fatalf("project id=%q want=%q", blockedResp.Project.ID, project.ID)
+	}
+
+	if _, ok, err := srv.store.DeleteSession("session_project_delete_1"); err != nil || !ok {
+		t.Fatalf("delete session err=%v ok=%v", err, ok)
+	}
+
+	var deleteResp struct {
+		Deleted bool                `json:"deleted"`
+		Project model.ProjectRecord `json:"project"`
+	}
+	deleteStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodDelete,
+		fmt.Sprintf("%s/v1/projects/%s", httpSrv.URL, url.PathEscape(project.ID)),
+		token,
+		nil,
+		&deleteResp,
+	)
+	if deleteStatus != http.StatusOK {
+		t.Fatalf("delete empty project status=%d want=200", deleteStatus)
+	}
+	if !deleteResp.Deleted {
+		t.Fatalf("deleted should be true")
+	}
+	if deleteResp.Project.ID != project.ID {
+		t.Fatalf("deleted project id=%q want=%q", deleteResp.Project.ID, project.ID)
+	}
+
+	var listResp struct {
+		Projects []model.ProjectRecord `json:"projects"`
+	}
+	listStatus := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v1/projects?host_id=%s", httpSrv.URL, host.ID),
+		token,
+		nil,
+		&listResp,
+	)
+	if listStatus != http.StatusOK {
+		t.Fatalf("list projects status=%d want=200", listStatus)
+	}
+	if len(listResp.Projects) != 0 {
+		t.Fatalf("projects should be empty after delete: %#v", listResp.Projects)
 	}
 }
 
