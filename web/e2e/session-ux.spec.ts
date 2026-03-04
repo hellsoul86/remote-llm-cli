@@ -6,6 +6,8 @@ type MockHarness = {
 
 type MockOptions = {
   streamPattern?: "ready-only" | "completion-once";
+  includeSecondSession?: boolean;
+  backgroundCompletion?: boolean;
 };
 
 function buildLongAssistantReply(marker: string): string {
@@ -26,6 +28,27 @@ async function mockSessionApi(
   let eventPollCount = 0;
   let runReqCount = 0;
   const streamPattern = options?.streamPattern ?? "ready-only";
+  const includeSecondSession = options?.includeSecondSession ?? false;
+  const backgroundCompletion = options?.backgroundCompletion ?? false;
+  const nowISO = new Date().toISOString();
+  const sessions = [
+    {
+      id: "session_cli_1",
+      title: "Session 1",
+      updated_at: nowISO,
+      created_at: "2026-03-03T00:00:00Z",
+    },
+    ...(includeSecondSession
+      ? [
+          {
+            id: "session_cli_2",
+            title: "Session 2",
+            updated_at: nowISO,
+            created_at: "2026-03-03T00:00:00Z",
+          },
+        ]
+      : []),
+  ];
 
   await page.route("**/v1/healthz", async (route) => {
     await route.fulfill({
@@ -151,18 +174,16 @@ async function mockSessionApi(
     await route.fulfill({
       status: 200,
       json: {
-        sessions: [
-          {
-            id: "session_cli_1",
-            project_id: "project_local_1__srv_work",
-            host_id: "local_1",
-            path: "/srv/work",
-            runtime: "codex",
-            title: "Session 1",
-            created_at: "2026-03-03T00:00:00Z",
-            updated_at: "2026-03-03T00:00:00Z",
-          },
-        ],
+        sessions: sessions.map((sessionItem) => ({
+          id: sessionItem.id,
+          project_id: "project_local_1__srv_work",
+          host_id: "local_1",
+          path: "/srv/work",
+          runtime: "codex",
+          title: sessionItem.title,
+          created_at: sessionItem.created_at,
+          updated_at: sessionItem.updated_at,
+        })),
       },
     });
   });
@@ -201,6 +222,53 @@ async function mockSessionApi(
       status: 200,
       headers: { "content-type": "text/event-stream" },
       body: `event: session.ready\ndata: {"session_id":"session_cli_1","cursor":0}\n\n`,
+    });
+  });
+  await page.route("**/v1/sessions/session_cli_2/stream**", async (route) => {
+    if (!includeSecondSession) {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: `event: session.ready\ndata: {"session_id":"session_cli_2","cursor":0}\n\n`,
+      });
+      return;
+    }
+    if (!backgroundCompletion) {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: `event: session.ready\ndata: {"session_id":"session_cli_2","cursor":0}\n\n`,
+      });
+      return;
+    }
+    const streamChunk =
+      `{"type":"thread.started","thread_id":"t_bg"}\n` +
+      `{"type":"turn.started"}\n` +
+      `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: `background reply ${marker}` } })}\n`;
+    const startedAt = new Date(Date.now() - 1400).toISOString();
+    const finishedAt = new Date().toISOString();
+    const streamBody = [
+      `event: session.ready`,
+      `data: {"session_id":"session_cli_2","cursor":0}`,
+      ``,
+      `event: session.event`,
+      `data: {"seq":1,"session_id":"session_cli_2","run_id":"job_bg_1","type":"run.started","payload":{"job_id":"job_bg_1"},"created_at":"${startedAt}"}`,
+      ``,
+      `event: session.event`,
+      `data: {"seq":2,"session_id":"session_cli_2","run_id":"job_bg_1","type":"assistant.delta","payload":{"job_id":"job_bg_1","chunk":${JSON.stringify(streamChunk)}},"created_at":"${startedAt}"}`,
+      ``,
+      `event: session.event`,
+      `data: {"seq":3,"session_id":"session_cli_2","run_id":"job_bg_1","type":"assistant.completed","payload":{"job_id":"job_bg_1","run_id":"job_bg_1"},"created_at":"${finishedAt}"}`,
+      ``,
+      `event: session.event`,
+      `data: {"seq":4,"session_id":"session_cli_2","run_id":"job_bg_1","type":"run.completed","payload":{"job_id":"job_bg_1"},"created_at":"${finishedAt}"}`,
+      ``,
+      ``,
+    ].join("\n");
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: streamBody,
     });
   });
   await page.route("**/v1/codex/sessions/discover", async (route) => {
@@ -546,6 +614,76 @@ test("historical stream replay on refresh does not trigger session alerts", asyn
   await page.waitForTimeout(1800);
   await expect(page.locator(".session-alert")).toHaveCount(0);
   await expect(page.locator(".session-chip-badge.unread")).toHaveCount(0);
+});
+
+test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TREE_${Date.now()}`;
+  await mockSessionApi(page, `tree reply ${marker}`, marker, {
+    includeSecondSession: true,
+  });
+  await unlock(page);
+
+  const sessionOne = page.locator(
+    '.session-chip-tree[data-session-id="session_cli_1"]',
+  );
+  const sessionTwo = page.locator(
+    '.session-chip-tree[data-session-id="session_cli_2"]',
+  );
+  await expect(sessionOne).toBeVisible();
+  await expect(sessionTwo).toBeVisible();
+
+  await sessionOne.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(sessionTwo).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(sessionTwo).toHaveClass(/active/);
+  await expect(page.getByRole("heading", { name: "Session 2" })).toBeVisible();
+
+  const projectFilter = page.getByPlaceholder("Filter projects or sessions");
+  await projectFilter.fill("session 2");
+  await page.getByRole("button", { name: "Collapse" }).first().click();
+  await expect(
+    page.getByRole("button", { name: "Expand" }).first(),
+  ).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(projectFilter).toHaveValue("session 2");
+  await expect(
+    page.getByRole("button", { name: "Expand" }).first(),
+  ).toBeVisible();
+});
+
+test("background completion shows one alert and unread badge", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `BG_${Date.now()}`;
+  await mockSessionApi(page, `background ${marker}`, marker, {
+    includeSecondSession: true,
+    backgroundCompletion: true,
+  });
+  await unlock(page);
+
+  const alert = page.locator(".session-alert", {
+    hasText: "Session 2 completed",
+  });
+  await expect(alert).toBeVisible();
+  await expect(page.locator(".session-alert")).toHaveCount(1);
+  await expect(
+    page.locator(
+      '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.unread',
+    ),
+  ).toHaveCount(1);
+
+  await alert.click();
+  await expect(
+    page.locator('.session-chip-tree[data-session-id="session_cli_2"]'),
+  ).toHaveClass(/active/);
+  await expect(
+    page.locator(
+      '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.unread',
+    ),
+  ).toHaveCount(0);
 });
 
 test.use({ viewport: { width: 390, height: 844 } });

@@ -1,4 +1,11 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   API_BASE,
   cancelRunJob,
@@ -33,9 +40,10 @@ import {
   type RunResponse,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
-import { useSessionDomain } from "./domains/session";
+import { type TimelineEntry, useSessionDomain } from "./domains/session";
 
 const TOKEN_KEY = "remote_llm_access_key";
+const SESSION_TREE_PREFS_KEY = "remote_llm_session_tree_prefs_v1";
 
 type AuthPhase = "checking" | "locked" | "ready";
 type AppMode = "session" | "ops";
@@ -77,6 +85,33 @@ type SessionRunStreamState = {
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
 const COMPLETION_ALERT_GRACE_MS = 30_000;
+const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
+
+type SessionTreePrefs = {
+  projectFilter: string;
+  collapsedHostIDs: string[];
+};
+
+function loadSessionTreePrefs(): SessionTreePrefs {
+  if (typeof window === "undefined") {
+    return { projectFilter: "", collapsedHostIDs: [] };
+  }
+  const raw = window.localStorage.getItem(SESSION_TREE_PREFS_KEY);
+  if (!raw) return { projectFilter: "", collapsedHostIDs: [] };
+  try {
+    const parsed = JSON.parse(raw) as Partial<SessionTreePrefs>;
+    const projectFilter =
+      typeof parsed.projectFilter === "string" ? parsed.projectFilter : "";
+    const collapsedHostIDs = Array.isArray(parsed.collapsedHostIDs)
+      ? parsed.collapsedHostIDs.filter(
+          (item): item is string => typeof item === "string" && item.trim() !== "",
+        )
+      : [];
+    return { projectFilter, collapsedHostIDs };
+  } catch {
+    return { projectFilter: "", collapsedHostIDs: [] };
+  }
+}
 
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
   if (!job) return false;
@@ -400,27 +435,11 @@ function parseMessageSegments(raw: string): MessageSegment[] {
   return segments;
 }
 
-function renderMessageBody(body: string) {
-  const segments = parseMessageSegments(body);
-  if (segments.length === 1 && segments[0].kind === "text") {
-    return <pre>{segments[0].content}</pre>;
-  }
-  return (
-    <div className="message-body">
-      {segments.map((segment, index) =>
-        segment.kind === "text" ? (
-          <pre key={`text_${index}`}>{segment.content}</pre>
-        ) : (
-          <section key={`code_${index}`} className="message-code-block">
-            <header className="message-code-head">
-              {segment.lang || "code"}
-            </header>
-            <pre className="message-code-pre">{segment.content}</pre>
-          </section>
-        ),
-      )}
-    </div>
-  );
+function shouldCollapseMessageBody(raw: string): boolean {
+  if (!raw.trim()) return false;
+  const lines = raw.split(/\r?\n/);
+  if (lines.length > MESSAGE_COLLAPSE_LINE_LIMIT) return true;
+  return raw.length > 7000;
 }
 
 function statusTone(status: string): "ok" | "warn" | "err" {
@@ -553,8 +572,14 @@ export function App() {
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
-  const [projectFilter, setProjectFilter] = useState("");
-  const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>([]);
+  const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
+  const [projectFilter, setProjectFilter] = useState(sessionTreePrefs.projectFilter);
+  const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
+    sessionTreePrefs.collapsedHostIDs,
+  );
+  const [treeCursorSessionID, setTreeCursorSessionID] = useState("");
+  const [expandedMessageIDs, setExpandedMessageIDs] = useState<string[]>([]);
+  const [copiedCodeKey, setCopiedCodeKey] = useState("");
 
   const timelineViewportRef = useRef<HTMLElement | null>(null);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
@@ -563,6 +588,8 @@ export function App() {
   const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const sessionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const copyResetTimerRef = useRef<number | null>(null);
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
   const jobNoTextFinalizeRetriesRef = useRef<Map<string, number>>(new Map());
@@ -696,6 +723,18 @@ export function App() {
     }
     return nextHosts;
   }, [projectFilter, sessionTreeHosts]);
+  const visibleTreeSessionIDs = useMemo(() => {
+    const out: string[] = [];
+    for (const hostNode of filteredSessionTreeHosts) {
+      if (collapsedHostIDs.includes(hostNode.hostID)) continue;
+      for (const projectNode of hostNode.projects) {
+        for (const sessionNode of projectNode.sessions) {
+          out.push(sessionNode.id);
+        }
+      }
+    }
+    return out;
+  }, [collapsedHostIDs, filteredSessionTreeHosts]);
   const activeThreadBusy =
     Boolean(activeThread?.activeJobID) ||
     (activeThread ? submittingThreadID === activeThread.id : false);
@@ -800,9 +839,195 @@ export function App() {
     threadWorkspaceMapRef.current = threadWorkspaceMap;
   }, [threadWorkspaceMap]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const payload: SessionTreePrefs = {
+      projectFilter,
+      collapsedHostIDs,
+    };
+    window.localStorage.setItem(SESSION_TREE_PREFS_KEY, JSON.stringify(payload));
+  }, [projectFilter, collapsedHostIDs]);
+
+  useEffect(() => {
+    if (sessionTreeHosts.length === 0) return;
+    const validHostIDs = new Set(sessionTreeHosts.map((item) => item.hostID));
+    setCollapsedHostIDs((prev) => {
+      const next = prev.filter((hostID) => validHostIDs.has(hostID));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [sessionTreeHosts]);
+
+  useEffect(() => {
+    if (activeThreadID.trim()) {
+      setTreeCursorSessionID(activeThreadID);
+    }
+  }, [activeThreadID]);
+
+  useEffect(() => {
+    if (visibleTreeSessionIDs.length === 0) {
+      setTreeCursorSessionID("");
+      return;
+    }
+    setTreeCursorSessionID((prev) =>
+      prev && visibleTreeSessionIDs.includes(prev) ? prev : visibleTreeSessionIDs[0],
+    );
+  }, [visibleTreeSessionIDs]);
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
   function createThreadAndFocus() {
     createThread();
     promptInputRef.current?.focus();
+  }
+
+  function registerSessionButtonRef(
+    sessionID: string,
+    node: HTMLButtonElement | null,
+  ) {
+    if (!sessionID) return;
+    if (node) {
+      sessionButtonRefs.current.set(sessionID, node);
+      return;
+    }
+    sessionButtonRefs.current.delete(sessionID);
+  }
+
+  function moveTreeCursor(step: number) {
+    if (visibleTreeSessionIDs.length === 0) return;
+    const currentIndex = Math.max(
+      0,
+      visibleTreeSessionIDs.findIndex((id) => id === treeCursorSessionID),
+    );
+    const nextIndex =
+      (currentIndex + step + visibleTreeSessionIDs.length) %
+      visibleTreeSessionIDs.length;
+    const nextID = visibleTreeSessionIDs[nextIndex];
+    setTreeCursorSessionID(nextID);
+    const node = sessionButtonRefs.current.get(nextID);
+    node?.focus();
+  }
+
+  function onSessionTreeKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    sessionID: string,
+  ) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveTreeCursor(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveTreeCursor(-1);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      const nextID = visibleTreeSessionIDs[0];
+      if (!nextID) return;
+      setTreeCursorSessionID(nextID);
+      sessionButtonRefs.current.get(nextID)?.focus();
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      const nextID = visibleTreeSessionIDs[visibleTreeSessionIDs.length - 1];
+      if (!nextID) return;
+      setTreeCursorSessionID(nextID);
+      sessionButtonRefs.current.get(nextID)?.focus();
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setTreeCursorSessionID(sessionID);
+      activateThread(sessionID);
+    }
+  }
+
+  function toggleMessageExpanded(entryID: string) {
+    setExpandedMessageIDs((prev) =>
+      prev.includes(entryID)
+        ? prev.filter((id) => id !== entryID)
+        : [...prev, entryID],
+    );
+  }
+
+  async function copyToClipboard(content: string, key: string) {
+    const text = content ?? "";
+    if (!text) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.focus();
+        area.select();
+        document.execCommand("copy");
+        document.body.removeChild(area);
+      }
+      setCopiedCodeKey(key);
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopiedCodeKey("");
+      }, 1500);
+    } catch {
+      setCopiedCodeKey("");
+    }
+  }
+
+  function renderTimelineEntryBody(entry: TimelineEntry) {
+    const segments = parseMessageSegments(entry.body);
+    const collapsible = shouldCollapseMessageBody(entry.body);
+    const expanded = expandedMessageIDs.includes(entry.id);
+    const showCollapsed = collapsible && !expanded;
+    const wrapperClass = `message-body${showCollapsed ? " message-body-collapsed" : ""}`;
+    return (
+      <div className={wrapperClass}>
+        {segments.map((segment, index) =>
+          segment.kind === "text" ? (
+            <pre key={`${entry.id}_text_${index}`}>{segment.content}</pre>
+          ) : (
+            <section key={`${entry.id}_code_${index}`} className="message-code-block">
+              <header className="message-code-head">
+                <span>{segment.lang || "code"}</span>
+                <button
+                  type="button"
+                  className="ghost code-copy-btn"
+                  onClick={() => void copyToClipboard(segment.content, `${entry.id}_${index}`)}
+                >
+                  {copiedCodeKey === `${entry.id}_${index}` ? "Copied" : "Copy"}
+                </button>
+              </header>
+              <pre className="message-code-pre">{segment.content}</pre>
+            </section>
+          ),
+        )}
+        {showCollapsed ? <div className="message-collapse-mask" aria-hidden="true" /> : null}
+        {collapsible ? (
+          <div className="message-collapse-actions">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => toggleMessageExpanded(entry.id)}
+            >
+              {expanded ? "Collapse" : "Expand"}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   function toggleHostCollapsed(hostID: string) {
@@ -1271,7 +1496,7 @@ export function App() {
         {
           kind: "system",
           state: "error",
-          title: "System",
+          title: "Failed",
           body: failureSummary || "Session failed.",
         },
         sessionID,
@@ -1431,7 +1656,7 @@ export function App() {
           {
             kind: "system",
             state: "error",
-            title: "System",
+            title: "Failed",
             body: errText,
           },
           sessionID,
@@ -1457,8 +1682,8 @@ export function App() {
           {
             kind: "system",
             state: "error",
-            title: "System",
-            body: "Session canceled.",
+            title: "Interrupted",
+            body: "Session interrupted.",
           },
           sessionID,
         );
@@ -2087,7 +2312,7 @@ export function App() {
               {
                 kind: "system",
                 state: "error",
-                title: "System",
+                title: "Failed",
                 body: terminalHints.join("\n"),
               },
               item.threadID,
@@ -2183,10 +2408,14 @@ export function App() {
                 {
                   kind: "system",
                   state: "error",
-                  title: "System",
+                  title: job.status === "canceled" ? "Interrupted" : "Failed",
                   body:
                     failedSummary ||
-                    (job.error ? String(job.error) : "Session failed."),
+                    (job.status === "canceled"
+                      ? "Session interrupted."
+                      : job.error
+                        ? String(job.error)
+                        : "Session failed."),
                 },
                 item.threadID,
               );
@@ -2893,10 +3122,23 @@ export function App() {
                                     <button
                                       key={sessionNode.id}
                                       type="button"
+                                      ref={(node) =>
+                                        registerSessionButtonRef(sessionNode.id, node)
+                                      }
                                       className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
                                       data-session-id={sessionNode.id}
-                                      onClick={() =>
-                                        activateThread(sessionNode.id)
+                                      tabIndex={
+                                        treeCursorSessionID === sessionNode.id ? 0 : -1
+                                      }
+                                      onClick={() => {
+                                        setTreeCursorSessionID(sessionNode.id);
+                                        activateThread(sessionNode.id);
+                                      }}
+                                      onFocus={() =>
+                                        setTreeCursorSessionID(sessionNode.id)
+                                      }
+                                      onKeyDown={(event) =>
+                                        onSessionTreeKeyDown(event, sessionNode.id)
                                       }
                                       title={sessionNode.title}
                                     >
@@ -2992,7 +3234,7 @@ export function App() {
                       <h4>{entry.title}</h4>
                       <time>{formatClock(entry.createdAt)}</time>
                     </div>
-                    {renderMessageBody(entry.body)}
+                    {renderTimelineEntryBody(entry)}
                   </article>
                 ))
               )}
