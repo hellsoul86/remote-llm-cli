@@ -144,6 +144,8 @@ type CommandPaletteAction = {
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
 const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
 const MAX_SESSION_STREAMS = 4;
+const COMPOSER_MIN_HEIGHT = 52;
+const COMPOSER_MAX_HEIGHT = 260;
 const APPROVAL_POLICY_OPTIONS: Array<{
   value: CodexApprovalPolicy;
   label: string;
@@ -1734,9 +1736,11 @@ export function App() {
           const preferredSession = workspace.activeSessionID.trim();
           if (preferredSession) {
             activateThread(preferredSession);
+            focusComposerSoon();
             return;
           }
           setActiveWorkspaceID(workspace.id);
+          focusComposerSoon();
         },
       );
     }
@@ -2031,7 +2035,13 @@ export function App() {
 
   function createThreadAndFocus() {
     createThread();
-    promptInputRef.current?.focus();
+    focusComposerSoon();
+  }
+
+  function focusComposerSoon() {
+    window.requestAnimationFrame(() => {
+      promptInputRef.current?.focus();
+    });
   }
 
   function openCommandPalette(initialQuery = "") {
@@ -2046,9 +2056,7 @@ export function App() {
     setCommandPaletteQuery("");
     setCommandPaletteCursor(0);
     if (options?.focusComposer === false) return;
-    window.requestAnimationFrame(() => {
-      promptInputRef.current?.focus();
-    });
+    focusComposerSoon();
   }
 
   function runCommandPaletteAction(index: number) {
@@ -2199,6 +2207,7 @@ export function App() {
       event.preventDefault();
       setTreeCursorSessionID(sessionID);
       activateThread(sessionID);
+      focusComposerSoon();
       return;
     }
     if (event.key.toLowerCase() === "p") {
@@ -2424,6 +2433,7 @@ export function App() {
     if (threadWorkspaceMap.has(alert.threadID)) {
       activateThread(alert.threadID);
       switchMode("session");
+      focusComposerSoon();
     }
     dismissSessionAlert(alert.id);
   }
@@ -3792,7 +3802,10 @@ export function App() {
     const node = promptInputRef.current;
     if (!node) return;
     node.style.height = "0px";
-    const nextHeight = Math.max(92, Math.min(240, node.scrollHeight));
+    const nextHeight = Math.max(
+      COMPOSER_MIN_HEIGHT,
+      Math.min(COMPOSER_MAX_HEIGHT, node.scrollHeight),
+    );
     node.style.height = `${nextHeight}px`;
   }, [activeThreadID, activeDraft]);
 
@@ -5416,9 +5429,10 @@ export function App() {
                               <button
                                 type="button"
                                 className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
-                                onClick={() =>
-                                  setActiveWorkspaceID(projectNode.id)
-                                }
+                                onClick={() => {
+                                  setActiveWorkspaceID(projectNode.id);
+                                  focusComposerSoon();
+                                }}
                                 title={projectNode.path}
                               >
                                 <span className="project-chip-main">
@@ -5509,6 +5523,7 @@ export function App() {
                                         }
                                         setTreeCursorSessionID(sessionNode.id);
                                         activateThread(sessionNode.id);
+                                        focusComposerSoon();
                                       }}
                                       onFocus={() =>
                                         setTreeCursorSessionID(sessionNode.id)

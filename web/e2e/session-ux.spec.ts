@@ -1059,6 +1059,34 @@ test("composer supports image paste and drag-drop upload", async ({ page }) => {
   await expect(page.getByRole("button", { name: /mock-image-02\.png/i })).toBeVisible();
 });
 
+test("tree interactions return focus to composer", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TREE_FOCUS_${Date.now()}`;
+  await mockSessionApi(page, `tree focus ${marker}`, marker, {
+    includeSecondSession: true,
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.focus();
+  await expect(composer).toBeFocused();
+
+  const sessionTwo = page.locator(
+    '.session-chip-tree[data-session-id="session_cli_2"]',
+  );
+  await sessionTwo.click();
+  await expect(composer).toBeFocused();
+
+  const projectChip = page.locator(".project-chip").first();
+  await projectChip.click();
+  await expect(composer).toBeFocused();
+
+  await page.keyboard.type("focus returned");
+  await expect(composer).toHaveValue("focus returned");
+});
+
 test("command palette executes session and model actions", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `PALETTE_${Date.now()}`;

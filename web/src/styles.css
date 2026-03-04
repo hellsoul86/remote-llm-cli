@@ -1246,11 +1246,12 @@ button.ghost.danger-ghost:hover {
 }
 
 .composer textarea {
-  min-height: 92px;
-  max-height: 240px;
+  min-height: 52px;
+  max-height: 260px;
   resize: none;
   overflow-y: auto;
   line-height: 1.55;
+  transition: height 120ms ease;
 }
 
 .composer-actions {
