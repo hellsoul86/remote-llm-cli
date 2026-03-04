@@ -1259,6 +1259,13 @@ export function App() {
     setThreadSandbox,
     setThreadApprovalPolicy,
     setThreadWebSearch,
+    setThreadProfile,
+    addThreadConfigFlag,
+    removeThreadConfigFlag,
+    addThreadEnableFlag,
+    removeThreadEnableFlag,
+    addThreadDisableFlag,
+    removeThreadDisableFlag,
     addThreadAddDir,
     removeThreadAddDir,
     setThreadSkipGitRepoCheck,
@@ -1300,6 +1307,9 @@ export function App() {
   const [imageUploadError, setImageUploadError] = useState("");
   const [sessionAdvancedOpen, setSessionAdvancedOpen] = useState(false);
   const [addDirDraft, setAddDirDraft] = useState("");
+  const [configFlagDraft, setConfigFlagDraft] = useState("");
+  const [enableFlagDraft, setEnableFlagDraft] = useState("");
+  const [disableFlagDraft, setDisableFlagDraft] = useState("");
   const [composerDropActive, setComposerDropActive] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
@@ -2087,6 +2097,30 @@ export function App() {
     if (!trimmed) return;
     addThreadAddDir(activeThread.id, trimmed);
     setAddDirDraft("");
+  }
+
+  function onConfigFlagDraftSubmit() {
+    if (!activeThread) return;
+    const trimmed = configFlagDraft.trim();
+    if (!trimmed) return;
+    addThreadConfigFlag(activeThread.id, trimmed);
+    setConfigFlagDraft("");
+  }
+
+  function onEnableFlagDraftSubmit() {
+    if (!activeThread) return;
+    const trimmed = enableFlagDraft.trim();
+    if (!trimmed) return;
+    addThreadEnableFlag(activeThread.id, trimmed);
+    setEnableFlagDraft("");
+  }
+
+  function onDisableFlagDraftSubmit() {
+    if (!activeThread) return;
+    const trimmed = disableFlagDraft.trim();
+    if (!trimmed) return;
+    addThreadDisableFlag(activeThread.id, trimmed);
+    setDisableFlagDraft("");
   }
 
   function openProjectComposer() {
@@ -4597,6 +4631,19 @@ export function App() {
             model: effectiveModel,
             ask_for_approval: activeThread.approvalPolicy || undefined,
             search: activeThread.webSearch ? true : undefined,
+            profile: activeThread.profile.trim() || undefined,
+            config:
+              activeThread.configFlags.length > 0
+                ? activeThread.configFlags
+                : undefined,
+            enable:
+              activeThread.enableFlags.length > 0
+                ? activeThread.enableFlags
+                : undefined,
+            disable:
+              activeThread.disableFlags.length > 0
+                ? activeThread.disableFlags
+                : undefined,
             json_output: activeThread.jsonOutput,
             skip_git_repo_check: activeThread.skipGitRepoCheck,
             ephemeral: activeThread.ephemeral,
@@ -5781,6 +5828,164 @@ export function App() {
                         setThreadWebSearch(activeThread.id, event.target.checked)
                       }
                     />
+                  </label>
+
+                  <label className="session-setting-row">
+                    profile
+                    <input
+                      data-testid="advanced-profile-input"
+                      placeholder="default"
+                      value={activeThread?.profile ?? ""}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadProfile(activeThread.id, event.target.value)
+                      }
+                    />
+                  </label>
+
+                  <label className="session-setting-row">
+                    config (-c)
+                    <div className="add-dir-row">
+                      <input
+                        data-testid="advanced-config-input"
+                        placeholder="sandbox_workspace_write=true"
+                        value={configFlagDraft}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          setConfigFlagDraft(event.target.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") return;
+                          event.preventDefault();
+                          onConfigFlagDraftSubmit();
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={
+                          !activeThread ||
+                          activeThreadBusy ||
+                          !configFlagDraft.trim()
+                        }
+                        onClick={onConfigFlagDraftSubmit}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="add-dir-list">
+                      {(activeThread?.configFlags ?? []).map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className="quick-chip ghost"
+                          disabled={!activeThread || activeThreadBusy}
+                          onClick={() =>
+                            activeThread &&
+                            removeThreadConfigFlag(activeThread.id, value)
+                          }
+                        >
+                          {value} ×
+                        </button>
+                      ))}
+                    </div>
+                  </label>
+
+                  <label className="session-setting-row">
+                    enable
+                    <div className="add-dir-row">
+                      <input
+                        data-testid="advanced-enable-input"
+                        placeholder="web_search"
+                        value={enableFlagDraft}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          setEnableFlagDraft(event.target.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") return;
+                          event.preventDefault();
+                          onEnableFlagDraftSubmit();
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={
+                          !activeThread ||
+                          activeThreadBusy ||
+                          !enableFlagDraft.trim()
+                        }
+                        onClick={onEnableFlagDraftSubmit}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="add-dir-list">
+                      {(activeThread?.enableFlags ?? []).map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className="quick-chip ghost"
+                          disabled={!activeThread || activeThreadBusy}
+                          onClick={() =>
+                            activeThread &&
+                            removeThreadEnableFlag(activeThread.id, value)
+                          }
+                        >
+                          {value} ×
+                        </button>
+                      ))}
+                    </div>
+                  </label>
+
+                  <label className="session-setting-row">
+                    disable
+                    <div className="add-dir-row">
+                      <input
+                        data-testid="advanced-disable-input"
+                        placeholder="legacy_preview"
+                        value={disableFlagDraft}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          setDisableFlagDraft(event.target.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") return;
+                          event.preventDefault();
+                          onDisableFlagDraftSubmit();
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={
+                          !activeThread ||
+                          activeThreadBusy ||
+                          !disableFlagDraft.trim()
+                        }
+                        onClick={onDisableFlagDraftSubmit}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="add-dir-list">
+                      {(activeThread?.disableFlags ?? []).map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className="quick-chip ghost"
+                          disabled={!activeThread || activeThreadBusy}
+                          onClick={() =>
+                            activeThread &&
+                            removeThreadDisableFlag(activeThread.id, value)
+                          }
+                        >
+                          {value} ×
+                        </button>
+                      ))}
+                    </div>
                   </label>
 
                   <label className="session-setting-row">

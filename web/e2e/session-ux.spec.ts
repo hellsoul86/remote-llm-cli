@@ -1159,6 +1159,15 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await page.getByTestId("advanced-toggle-btn").click();
   await page.getByTestId("advanced-approval-select").selectOption("never");
   await page.getByTestId("advanced-web-search-toggle").check();
+  await page.getByTestId("advanced-profile-input").fill("default");
+  await page
+    .getByTestId("advanced-config-input")
+    .fill("sandbox_workspace_write=true");
+  await page.getByTestId("advanced-config-input").press("Enter");
+  await page.getByTestId("advanced-enable-input").fill("web_search");
+  await page.getByTestId("advanced-enable-input").press("Enter");
+  await page.getByTestId("advanced-disable-input").fill("legacy_preview");
+  await page.getByTestId("advanced-disable-input").press("Enter");
   const addDirInput = page.getByTestId("advanced-add-dir-input");
   await addDirInput.fill("/srv/extra");
   await addDirInput.press("Enter");
@@ -1179,6 +1188,25 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await expect.poll(() => {
     const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
     return Boolean(req?.codex?.search);
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return String(req?.codex?.profile ?? "");
+  }).toBe("default");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    const config = req?.codex?.config;
+    return Array.isArray(config) && config.includes("sandbox_workspace_write=true");
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    const enable = req?.codex?.enable;
+    return Array.isArray(enable) && enable.includes("web_search");
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    const disable = req?.codex?.disable;
+    return Array.isArray(disable) && disable.includes("legacy_preview");
   }).toBe(true);
   await expect.poll(() => {
     const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;

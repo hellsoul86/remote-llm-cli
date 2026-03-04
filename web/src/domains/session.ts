@@ -39,6 +39,10 @@ export type ConversationThread = {
   sandbox: "" | "read-only" | "workspace-write" | "danger-full-access";
   approvalPolicy: CodexApprovalPolicy;
   webSearch: boolean;
+  profile: string;
+  configFlags: string[];
+  enableFlags: string[];
+  disableFlags: string[];
   addDirs: string[];
   skipGitRepoCheck: boolean;
   ephemeral: boolean;
@@ -143,6 +147,10 @@ function createSession(index: number, title?: string): ConversationThread {
     sandbox: "workspace-write",
     approvalPolicy: "",
     webSearch: false,
+    profile: "",
+    configFlags: [],
+    enableFlags: [],
+    disableFlags: [],
     addDirs: [],
     skipGitRepoCheck: true,
     ephemeral: false,
@@ -236,6 +244,24 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
           typeof path === "string" && path.trim() !== "",
       )
     : [];
+  const configFlags = Array.isArray(candidate.configFlags)
+    ? candidate.configFlags.filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim() !== "",
+      )
+    : [];
+  const enableFlags = Array.isArray(candidate.enableFlags)
+    ? candidate.enableFlags.filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim() !== "",
+      )
+    : [];
+  const disableFlags = Array.isArray(candidate.disableFlags)
+    ? candidate.disableFlags.filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim() !== "",
+      )
+    : [];
 
   return {
     id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : fallback.id,
@@ -260,6 +286,10 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     sandbox: safeSandbox,
     approvalPolicy: normalizeApprovalPolicy(candidate.approvalPolicy),
     webSearch: Boolean(candidate.webSearch),
+    profile: typeof candidate.profile === "string" ? candidate.profile : "",
+    configFlags,
+    enableFlags,
+    disableFlags,
     addDirs,
     skipGitRepoCheck:
       typeof candidate.skipGitRepoCheck === "boolean"
@@ -813,6 +843,77 @@ export function useSessionDomain() {
     }));
   }
 
+  function setThreadProfile(threadID: string, profile: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      profile,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function addThreadConfigFlag(threadID: string, value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.configFlags.includes(trimmed)) return thread;
+      return {
+        ...thread,
+        configFlags: [...thread.configFlags, trimmed],
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+
+  function removeThreadConfigFlag(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      configFlags: thread.configFlags.filter((item) => item !== value),
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function addThreadEnableFlag(threadID: string, value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.enableFlags.includes(trimmed)) return thread;
+      return {
+        ...thread,
+        enableFlags: [...thread.enableFlags, trimmed],
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+
+  function removeThreadEnableFlag(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      enableFlags: thread.enableFlags.filter((item) => item !== value),
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function addThreadDisableFlag(threadID: string, value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.disableFlags.includes(trimmed)) return thread;
+      return {
+        ...thread,
+        disableFlags: [...thread.disableFlags, trimmed],
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+
+  function removeThreadDisableFlag(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      disableFlags: thread.disableFlags.filter((item) => item !== value),
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
   function addThreadAddDir(threadID: string, dir: string) {
     const trimmed = dir.trim();
     if (!trimmed) return;
@@ -975,6 +1076,10 @@ export function useSessionDomain() {
           sandbox: prior?.sandbox ?? "workspace-write",
           approvalPolicy: prior?.approvalPolicy ?? "",
           webSearch: prior?.webSearch ?? false,
+          profile: prior?.profile ?? "",
+          configFlags: prior?.configFlags ?? [],
+          enableFlags: prior?.enableFlags ?? [],
+          disableFlags: prior?.disableFlags ?? [],
           addDirs: prior?.addDirs ?? [],
           skipGitRepoCheck: prior?.skipGitRepoCheck ?? true,
           ephemeral: prior?.ephemeral ?? false,
@@ -1103,6 +1208,13 @@ export function useSessionDomain() {
     setThreadSandbox,
     setThreadApprovalPolicy,
     setThreadWebSearch,
+    setThreadProfile,
+    addThreadConfigFlag,
+    removeThreadConfigFlag,
+    addThreadEnableFlag,
+    removeThreadEnableFlag,
+    addThreadDisableFlag,
+    removeThreadDisableFlag,
     addThreadAddDir,
     removeThreadAddDir,
     setThreadSkipGitRepoCheck,
