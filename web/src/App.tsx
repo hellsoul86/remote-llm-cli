@@ -76,6 +76,7 @@ type SessionRunStreamState = {
 };
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
+const COMPLETION_ALERT_GRACE_MS = 30_000;
 
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
   if (!job) return false;
@@ -576,6 +577,7 @@ export function App() {
     new Map(),
   );
   const streamAuthTokenRef = useRef("");
+  const appStartedAtMSRef = useRef<number>(Date.now());
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
@@ -820,6 +822,14 @@ export function App() {
     } catch {
       // Notification failures are non-fatal for session completion flow.
     }
+  }
+
+  function shouldSurfaceCompletion(createdAt?: string): boolean {
+    const ts = createdAt?.trim();
+    if (!ts) return false;
+    const parsed = Date.parse(ts);
+    if (!Number.isFinite(parsed)) return false;
+    return parsed >= appStartedAtMSRef.current - COMPLETION_ALERT_GRACE_MS;
   }
 
   function pushSessionAlert(alert: Omit<SessionAlert, "id">) {
@@ -1165,9 +1175,11 @@ export function App() {
     sessionID: string,
     runID: string,
     status: "succeeded" | "failed" | "canceled",
-  ) {
-    if (!runID || completedJobsRef.current.has(runID)) return;
+    options?: { surface?: boolean },
+  ): boolean {
+    if (!runID || completedJobsRef.current.has(runID)) return false;
     completedJobsRef.current.add(runID);
+    if (!options?.surface) return false;
     const sessionTitle = threadTitleMapRef.current.get(sessionID) ?? "Session";
     const completion = sessionCompletionCopy(status);
     notifySessionDone(`${sessionTitle} ${completion.suffix}`, completion.body);
@@ -1176,6 +1188,7 @@ export function App() {
       title: `${sessionTitle} ${completion.suffix}`,
       body: completion.body,
     });
+    return true;
   }
 
   function stopSessionStream(sessionID: string) {
@@ -1194,7 +1207,11 @@ export function App() {
     sessionRunStateRef.current.clear();
   }
 
-  async function finalizeStreamCompleted(sessionID: string, runID: string) {
+  async function finalizeStreamCompleted(
+    sessionID: string,
+    runID: string,
+    completedAt?: string,
+  ) {
     if (runID && completedJobsRef.current.has(runID)) {
       return;
     }
@@ -1260,8 +1277,10 @@ export function App() {
         sessionID,
       );
       setThreadJobState(sessionID, "", "failed");
-      markSessionDone(sessionID, runID, "failed");
-      if (sessionID !== activeThreadIDRef.current) {
+      const surfaced = markSessionDone(sessionID, runID, "failed", {
+        surface: shouldSurfaceCompletion(completedAt),
+      });
+      if (surfaced && sessionID !== activeThreadIDRef.current) {
         setThreadUnread(sessionID, true);
       }
       sessionRunStateRef.current.delete(sessionID);
@@ -1294,8 +1313,10 @@ export function App() {
         EMPTY_ASSISTANT_FALLBACK,
       );
     }
-    markSessionDone(sessionID, runID, "succeeded");
-    if (sessionID !== activeThreadIDRef.current) {
+    const surfaced = markSessionDone(sessionID, runID, "succeeded", {
+      surface: shouldSurfaceCompletion(completedAt),
+    });
+    if (surfaced && sessionID !== activeThreadIDRef.current) {
       setThreadUnread(sessionID, true);
     }
     sessionRunStateRef.current.delete(sessionID);
@@ -1416,8 +1437,10 @@ export function App() {
           sessionID,
         );
         setThreadJobState(sessionID, "", "failed");
-        markSessionDone(sessionID, id, "failed");
-        if (sessionID !== activeThreadIDRef.current) {
+        const surfaced = markSessionDone(sessionID, id, "failed", {
+          surface: shouldSurfaceCompletion(event.created_at),
+        });
+        if (surfaced && sessionID !== activeThreadIDRef.current) {
           setThreadUnread(sessionID, true);
         }
         sessionRunStateRef.current.delete(sessionID);
@@ -1440,8 +1463,10 @@ export function App() {
           sessionID,
         );
         setThreadJobState(sessionID, "", "canceled");
-        markSessionDone(sessionID, id, "canceled");
-        if (sessionID !== activeThreadIDRef.current) {
+        const surfaced = markSessionDone(sessionID, id, "canceled", {
+          surface: shouldSurfaceCompletion(event.created_at),
+        });
+        if (surfaced && sessionID !== activeThreadIDRef.current) {
           setThreadUnread(sessionID, true);
         }
         sessionRunStateRef.current.delete(sessionID);
@@ -1450,7 +1475,7 @@ export function App() {
       case "run.completed":
       case "job.succeeded": {
         if (!runID) return;
-        await finalizeStreamCompleted(sessionID, runID);
+        await finalizeStreamCompleted(sessionID, runID, event.created_at);
         return;
       }
       default:
@@ -2110,12 +2135,15 @@ export function App() {
                 : job.status === "succeeded"
                   ? "succeeded"
                   : "failed";
+          const shouldSurfaceJobCompletion = shouldSurfaceCompletion(
+            job.finished_at || job.started_at || job.queued_at,
+          );
           setThreadJobState(item.threadID, "", terminalStatus);
           jobEventCursorRef.current.delete(item.jobID);
           jobNoTextFinalizeRetriesRef.current.delete(job.id);
           const sawStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
           jobStreamSeenRef.current.delete(item.jobID);
-          if (item.threadID !== activeThreadID) {
+          if (shouldSurfaceJobCompletion && item.threadID !== activeThreadID) {
             setThreadUnread(item.threadID, true);
           }
 
@@ -2196,15 +2224,17 @@ export function App() {
                   ? "succeeded"
                   : "failed";
             const completion = sessionCompletionCopy(completionStatus);
-            notifySessionDone(
-              `${sessionTitle} ${completion.suffix}`,
-              completion.body,
-            );
-            pushSessionAlert({
-              threadID: item.threadID,
-              title: `${sessionTitle} ${completion.suffix}`,
-              body: completion.body,
-            });
+            if (shouldSurfaceJobCompletion) {
+              notifySessionDone(
+                `${sessionTitle} ${completion.suffix}`,
+                completion.body,
+              );
+              pushSessionAlert({
+                threadID: item.threadID,
+                title: `${sessionTitle} ${completion.suffix}`,
+                body: completion.body,
+              });
+            }
           }
         }
 

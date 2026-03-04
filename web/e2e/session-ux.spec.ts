@@ -533,6 +533,21 @@ test("session stream completion keeps a single assistant reply", async ({
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 });
 
+test("historical stream replay on refresh does not trigger session alerts", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `HIST_${Date.now()}`;
+  await mockSessionApi(page, `historical reply ${marker}`, marker, {
+    streamPattern: "completion-once",
+  });
+  await unlock(page);
+
+  await page.waitForTimeout(1800);
+  await expect(page.locator(".session-alert")).toHaveCount(0);
+  await expect(page.locator(".session-chip-badge.unread")).toHaveCount(0);
+});
+
 test.use({ viewport: { width: 390, height: 844 } });
 test("mobile session UX baseline (stacked layout + no horizontal overflow)", async ({
   page,
