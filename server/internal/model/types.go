@@ -125,6 +125,7 @@ type ProjectRecord struct {
 	HostID    string    `json:"host_id"`
 	HostName  string    `json:"host_name,omitempty"`
 	Path      string    `json:"path"`
+	Title     string    `json:"title,omitempty"`
 	Runtime   string    `json:"runtime"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

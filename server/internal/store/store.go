@@ -216,12 +216,16 @@ func (s *Store) UpsertProject(project model.ProjectRecord) (model.ProjectRecord,
 	project.HostID = strings.TrimSpace(project.HostID)
 	project.HostName = strings.TrimSpace(project.HostName)
 	project.Path = strings.TrimSpace(project.Path)
+	project.Title = strings.TrimSpace(project.Title)
 	project.Runtime = strings.TrimSpace(project.Runtime)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.state.Projects {
 		if s.state.Projects[i].ID != project.ID {
 			continue
+		}
+		if project.Title == "" {
+			project.Title = strings.TrimSpace(s.state.Projects[i].Title)
 		}
 		project.CreatedAt = s.state.Projects[i].CreatedAt
 		project.UpdatedAt = now
@@ -239,6 +243,58 @@ func (s *Store) ListProjects(limit int) []model.ProjectRecord {
 	defer s.mu.RUnlock()
 	out := copyTail(s.state.Projects, limit)
 	return out
+}
+
+func (s *Store) GetProject(id string) (model.ProjectRecord, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.ProjectRecord{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, project := range s.state.Projects {
+		if strings.TrimSpace(project.ID) == id {
+			return project, true
+		}
+	}
+	return model.ProjectRecord{}, false
+}
+
+func (s *Store) DeleteProject(id string) (model.ProjectRecord, bool, int, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.ProjectRecord{}, false, 0, errors.New("project id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	index := -1
+	var deleted model.ProjectRecord
+	for i := range s.state.Projects {
+		if strings.TrimSpace(s.state.Projects[i].ID) != id {
+			continue
+		}
+		index = i
+		deleted = s.state.Projects[i]
+		break
+	}
+	if index < 0 {
+		return model.ProjectRecord{}, false, 0, nil
+	}
+
+	sessionRefs := 0
+	for _, session := range s.state.Sessions {
+		if strings.TrimSpace(session.ProjectID) == id {
+			sessionRefs += 1
+		}
+	}
+	if sessionRefs > 0 {
+		return deleted, false, sessionRefs, nil
+	}
+
+	s.state.Projects = append(s.state.Projects[:index], s.state.Projects[index+1:]...)
+	return deleted, true, 0, s.saveLocked()
 }
 
 func (s *Store) UpsertSession(session model.SessionRecord) (model.SessionRecord, error) {
@@ -289,6 +345,46 @@ func (s *Store) ListSessions(limit int) []model.SessionRecord {
 	defer s.mu.RUnlock()
 	out := copyTail(s.state.Sessions, limit)
 	return out
+}
+
+func (s *Store) DeleteSession(id string) (model.SessionRecord, bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.SessionRecord{}, false, errors.New("session id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	index := -1
+	var deleted model.SessionRecord
+	for i := range s.state.Sessions {
+		if s.state.Sessions[i].ID != id {
+			continue
+		}
+		index = i
+		deleted = s.state.Sessions[i]
+		break
+	}
+	if index < 0 {
+		return model.SessionRecord{}, false, nil
+	}
+
+	s.state.Sessions = append(s.state.Sessions[:index], s.state.Sessions[index+1:]...)
+	delete(s.state.SessionEventSeq, id)
+
+	if len(s.state.SessionEvents) > 0 {
+		kept := make([]model.SessionEvent, 0, len(s.state.SessionEvents))
+		for _, event := range s.state.SessionEvents {
+			if strings.TrimSpace(event.SessionID) == id {
+				continue
+			}
+			kept = append(kept, event)
+		}
+		s.state.SessionEvents = kept
+	}
+
+	return deleted, true, s.saveLocked()
 }
 
 func (s *Store) ListKeys() []model.AccessKey {

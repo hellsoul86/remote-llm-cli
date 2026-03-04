@@ -85,6 +85,15 @@ func appendCodexOptions(args *[]string, opts CodexRunOptions, mode CodexRunMode)
 	if v := strings.TrimSpace(opts.Model); v != "" {
 		*args = append(*args, "--model", v)
 	}
+	if v := strings.TrimSpace(opts.AskForApproval); v != "" {
+		if err := validateAskForApproval(v); err != nil {
+			return err
+		}
+		*args = append(*args, "--ask-for-approval", v)
+	}
+	if opts.Search {
+		*args = append(*args, "--search")
+	}
 	if opts.FullAuto {
 		*args = append(*args, "--full-auto")
 	}
@@ -280,5 +289,14 @@ func validateColor(v string) error {
 		return nil
 	default:
 		return fmt.Errorf("invalid codex color: %q", v)
+	}
+}
+
+func validateAskForApproval(v string) error {
+	switch v {
+	case "untrusted", "on-failure", "on-request", "never":
+		return nil
+	default:
+		return fmt.Errorf("invalid codex ask_for_approval: %q", v)
 	}
 }

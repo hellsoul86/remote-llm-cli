@@ -109,8 +109,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/jobs/run", s.withAuth(http.HandlerFunc(s.handleEnqueueRunJob)))
 	mux.Handle("POST /v1/jobs/sync", s.withAuth(http.HandlerFunc(s.handleEnqueueSyncJob)))
 	mux.Handle("GET /v1/projects", s.withAuth(http.HandlerFunc(s.handleListProjects)))
+	mux.Handle("POST /v1/projects", s.withAuth(http.HandlerFunc(s.handleUpsertProject)))
+	mux.Handle("DELETE /v1/projects/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteProject)))
 	mux.Handle("GET /v1/sessions", s.withAuth(http.HandlerFunc(s.handleListSessions)))
 	mux.Handle("GET /v1/sessions/{id}", s.withAuth(http.HandlerFunc(s.handleGetSession)))
+	mux.Handle("DELETE /v1/sessions/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteSession)))
 	mux.Handle("GET /v1/jobs", s.withAuth(http.HandlerFunc(s.handleListRunJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
 	mux.Handle("GET /v1/jobs/{id}/events", s.withAuth(http.HandlerFunc(s.handleListRunJobEvents)))
@@ -121,6 +124,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/codex/models", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexModels)))
 	mux.Handle("POST /v1/codex/sessions/discover", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexSessions)))
 	mux.Handle("POST /v1/codex/sessions/cleanup", s.withAuth(http.HandlerFunc(s.handleCleanupCodexSessions)))
+	mux.Handle("POST /v1/codex/platform/login", s.withAuth(http.HandlerFunc(s.handleCodexPlatformLogin)))
+	mux.Handle("POST /v1/codex/platform/mcp", s.withAuth(http.HandlerFunc(s.handleCodexPlatformMCP)))
+	mux.Handle("POST /v1/codex/platform/cloud", s.withAuth(http.HandlerFunc(s.handleCodexPlatformCloud)))
 	mux.Handle("POST /v1/files/images", s.withAuth(http.HandlerFunc(s.handleUploadImage)))
 	mux.Handle("GET /v1/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
 	mux.Handle("GET /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleGetRetentionPolicy)))
@@ -290,6 +296,104 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"projects": filtered})
 }
 
+func (s *Server) handleUpsertProject(w http.ResponseWriter, r *http.Request) {
+	var project model.ProjectRecord
+	if err := json.NewDecoder(r.Body).Decode(&project); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+
+	project.ID = strings.TrimSpace(project.ID)
+	project.HostID = strings.TrimSpace(project.HostID)
+	project.Path = strings.TrimSpace(project.Path)
+	project.Title = strings.TrimSpace(project.Title)
+	project.Runtime = strings.TrimSpace(project.Runtime)
+	if project.Runtime == "" {
+		project.Runtime = "codex"
+	}
+
+	if project.ID == "" {
+		if project.HostID == "" || project.Path == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "host_id and path are required when project id is missing",
+			})
+			return
+		}
+		project.ID = projectBindingID(project.HostID, project.Path)
+	}
+	if project.HostID == "" || project.Path == "" {
+		existing, ok := s.store.GetProject(project.ID)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "host_id and path are required",
+			})
+			return
+		}
+		if project.HostID == "" {
+			project.HostID = existing.HostID
+		}
+		if project.Path == "" {
+			project.Path = existing.Path
+		}
+		if project.Runtime == "" {
+			project.Runtime = existing.Runtime
+		}
+	}
+	if project.HostID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "host_id is required"})
+		return
+	}
+	if project.Path == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "path is required"})
+		return
+	}
+
+	host, ok := s.store.GetHost(project.HostID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "host not found"})
+		return
+	}
+	if project.HostName == "" {
+		project.HostName = strings.TrimSpace(host.Name)
+	}
+
+	saved, err := s.store.UpsertProject(project)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": saved})
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	projectID := strings.TrimSpace(r.PathValue("id"))
+	if projectID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing project id"})
+		return
+	}
+	project, deleted, sessionRefs, err := s.store.DeleteProject(projectID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !deleted && sessionRefs > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":         "project is not empty",
+			"project":       project,
+			"session_count": sessionRefs,
+		})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "project not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"project": project,
+	})
+}
+
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r, 200, 5000)
 	sessions := s.store.ListSessions(limit)
@@ -328,6 +432,89 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": session})
+}
+
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	if sessionID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session id"})
+		return
+	}
+	session, ok := s.store.GetSession(sessionID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	sessionRuntime := strings.ToLower(strings.TrimSpace(session.Runtime))
+	if sessionRuntime != "" && sessionRuntime != "codex" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "remote delete unsupported for session runtime",
+			"runtime": session.Runtime,
+		})
+		return
+	}
+
+	hostID := strings.TrimSpace(session.HostID)
+	if hostID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "session host_id is missing",
+		})
+		return
+	}
+	host, ok := s.store.GetHost(hostID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error":   "session host not found",
+			"host_id": hostID,
+		})
+		return
+	}
+
+	spec := buildCodexSessionDeleteSpec(sessionID)
+	execRes, runErr := s.runViaSSH(
+		r.Context(),
+		host,
+		spec,
+		resolveWorkdir("", host.Workspace),
+		executor.ExecOptions{
+			MaxStdoutBytes: 512 * 1024,
+			MaxStderrBytes: 256 * 1024,
+		},
+	)
+	if runErr != nil {
+		msg, class, hint := errorDetails(runErr)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":       msg,
+			"error_class": class,
+			"error_hint":  hint,
+			"host":        host,
+			"result":      execRes,
+		})
+		return
+	}
+
+	paths := parseCodexSessionDeleteOutput(execRes.Stdout)
+	deletedSession, deleted, err := s.store.DeleteSession(sessionID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	s.closeSessionStreams(sessionID)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"session": deletedSession,
+		"remote": map[string]any{
+			"host":       host,
+			"result":     execRes,
+			"paths":      capStringList(paths, 200),
+			"path_count": len(paths),
+		},
+	})
 }
 
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
@@ -542,6 +729,51 @@ type codexCleanupRequest struct {
 	TimeoutSec     int      `json:"timeout_sec,omitempty"`
 	OlderThanHours int      `json:"older_than_hours,omitempty"`
 	DryRun         bool     `json:"dry_run,omitempty"`
+}
+
+type codexPlatformLoginRequest struct {
+	HostID     string `json:"host_id,omitempty"`
+	Action     string `json:"action,omitempty"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+}
+
+type codexPlatformMCPRequest struct {
+	HostID            string   `json:"host_id,omitempty"`
+	Action            string   `json:"action,omitempty"`
+	Name              string   `json:"name,omitempty"`
+	URL               string   `json:"url,omitempty"`
+	Command           []string `json:"command,omitempty"`
+	Env               []string `json:"env,omitempty"`
+	BearerTokenEnvVar string   `json:"bearer_token_env_var,omitempty"`
+	Scopes            []string `json:"scopes,omitempty"`
+	TimeoutSec        int      `json:"timeout_sec,omitempty"`
+}
+
+type codexPlatformCloudRequest struct {
+	HostID     string `json:"host_id,omitempty"`
+	Action     string `json:"action,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
+	EnvID      string `json:"env_id,omitempty"`
+	Query      string `json:"query,omitempty"`
+	Attempts   int    `json:"attempts,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	Cursor     string `json:"cursor,omitempty"`
+	Attempt    int    `json:"attempt,omitempty"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+}
+
+type codexPlatformResult struct {
+	Operation  string              `json:"operation"`
+	Host       model.Host          `json:"host"`
+	Command    []string            `json:"command"`
+	Workdir    string              `json:"workdir,omitempty"`
+	OK         bool                `json:"ok"`
+	Error      string              `json:"error,omitempty"`
+	ErrorClass string              `json:"error_class,omitempty"`
+	ErrorHint  string              `json:"error_hint,omitempty"`
+	Result     executor.ExecResult `json:"result"`
+	JSON       any                 `json:"json,omitempty"`
 }
 
 type codexModelsResponse struct {
@@ -1415,6 +1647,25 @@ func (s *Server) publishSessionEvent(event model.SessionEvent) {
 	}
 }
 
+func (s *Server) closeSessionStreams(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bySession := s.streamSubs[sessionID]
+	if len(bySession) == 0 {
+		delete(s.streamSubs, sessionID)
+		return
+	}
+	for subID, ch := range bySession {
+		close(ch)
+		delete(bySession, subID)
+	}
+	delete(s.streamSubs, sessionID)
+}
+
 func (s *Server) listRunJobEvents(jobID string, afterSeq int64, limit int) ([]runJobEvent, int64) {
 	if limit <= 0 {
 		limit = 200
@@ -2060,6 +2311,311 @@ func (s *Server) handleCleanupCodexSessions(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (s *Server) handleCodexPlatformLogin(w http.ResponseWriter, r *http.Request) {
+	var req codexPlatformLoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	host, err := s.resolveCodexModelHost(req.HostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	spec, action, err := buildCodexPlatformLoginSpec(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	status, payload := s.executeCodexPlatformCommand(
+		r.Context(),
+		host,
+		"codex_platform_login_"+action,
+		spec,
+		req.TimeoutSec,
+		false,
+	)
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) handleCodexPlatformMCP(w http.ResponseWriter, r *http.Request) {
+	var req codexPlatformMCPRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	host, err := s.resolveCodexModelHost(req.HostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	spec, action, expectJSON, err := buildCodexPlatformMCPSpec(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	status, payload := s.executeCodexPlatformCommand(
+		r.Context(),
+		host,
+		"codex_platform_mcp_"+action,
+		spec,
+		req.TimeoutSec,
+		expectJSON,
+	)
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) handleCodexPlatformCloud(w http.ResponseWriter, r *http.Request) {
+	var req codexPlatformCloudRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	host, err := s.resolveCodexModelHost(req.HostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	spec, action, expectJSON, err := buildCodexPlatformCloudSpec(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	status, payload := s.executeCodexPlatformCommand(
+		r.Context(),
+		host,
+		"codex_platform_cloud_"+action,
+		spec,
+		req.TimeoutSec,
+		expectJSON,
+	)
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) executeCodexPlatformCommand(
+	parentCtx context.Context,
+	host model.Host,
+	operation string,
+	spec runtime.CommandSpec,
+	timeoutSec int,
+	expectJSON bool,
+) (int, codexPlatformResult) {
+	timeout := normalizeCodexPlatformTimeout(timeoutSec)
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
+	defer cancel()
+
+	workdir := resolveWorkdir("", host.Workspace)
+	res, runErr := s.runViaSSH(
+		ctx,
+		host,
+		spec,
+		workdir,
+		executor.ExecOptions{
+			MaxStdoutBytes: 1024 * 1024,
+			MaxStderrBytes: 512 * 1024,
+		},
+	)
+	msg, class, hint := errorDetails(runErr)
+	payload := codexPlatformResult{
+		Operation:  operation,
+		Host:       host,
+		Command:    append([]string{spec.Program}, spec.Args...),
+		Workdir:    workdir,
+		OK:         runErr == nil,
+		Error:      msg,
+		ErrorClass: class,
+		ErrorHint:  hint,
+		Result:     res,
+	}
+	if expectJSON && strings.TrimSpace(res.Stdout) != "" {
+		var decoded any
+		if err := json.Unmarshal([]byte(res.Stdout), &decoded); err == nil {
+			payload.JSON = decoded
+		}
+	}
+	if runErr != nil {
+		return http.StatusBadGateway, payload
+	}
+	return http.StatusOK, payload
+}
+
+func normalizeCodexPlatformTimeout(v int) time.Duration {
+	if v <= 0 {
+		return 120 * time.Second
+	}
+	if v > 900 {
+		v = 900
+	}
+	return time.Duration(v) * time.Second
+}
+
+func buildCodexPlatformLoginSpec(req codexPlatformLoginRequest) (runtime.CommandSpec, string, error) {
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "status"
+	}
+	switch action {
+	case "status":
+		return runtime.CommandSpec{Program: "codex", Args: []string{"login", "status"}}, action, nil
+	case "login_device":
+		return runtime.CommandSpec{Program: "codex", Args: []string{"login", "--device-auth"}}, action, nil
+	case "logout":
+		return runtime.CommandSpec{Program: "codex", Args: []string{"logout"}}, action, nil
+	default:
+		return runtime.CommandSpec{}, "", fmt.Errorf("unsupported codex login action: %q", req.Action)
+	}
+}
+
+func buildCodexPlatformMCPSpec(req codexPlatformMCPRequest) (runtime.CommandSpec, string, bool, error) {
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "list"
+	}
+	args := []string{"mcp"}
+	expectJSON := false
+	name := strings.TrimSpace(req.Name)
+	switch action {
+	case "list":
+		args = append(args, "list", "--json")
+		expectJSON = true
+	case "get":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp get")
+		}
+		args = append(args, "get", name, "--json")
+		expectJSON = true
+	case "add":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp add")
+		}
+		args = append(args, "add", name)
+		url := strings.TrimSpace(req.URL)
+		command := trimStringList(req.Command)
+		if url != "" && len(command) > 0 {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("mcp add accepts either url or command, not both")
+		}
+		if url != "" {
+			args = append(args, "--url", url)
+			if v := strings.TrimSpace(req.BearerTokenEnvVar); v != "" {
+				args = append(args, "--bearer-token-env-var", v)
+			}
+			if len(req.Env) > 0 {
+				return runtime.CommandSpec{}, "", false, fmt.Errorf("env is only supported for stdio mcp add")
+			}
+		} else {
+			if len(command) == 0 {
+				return runtime.CommandSpec{}, "", false, fmt.Errorf("command is required for stdio mcp add")
+			}
+			for _, envKV := range trimStringList(req.Env) {
+				args = append(args, "--env", envKV)
+			}
+			args = append(args, "--")
+			args = append(args, command...)
+		}
+	case "remove":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp remove")
+		}
+		args = append(args, "remove", name)
+	case "login":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp login")
+		}
+		args = append(args, "login", name)
+		scopes := trimStringList(req.Scopes)
+		if len(scopes) > 0 {
+			args = append(args, "--scopes", strings.Join(scopes, ","))
+		}
+	case "logout":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp logout")
+		}
+		args = append(args, "logout", name)
+	default:
+		return runtime.CommandSpec{}, "", false, fmt.Errorf("unsupported codex mcp action: %q", req.Action)
+	}
+	return runtime.CommandSpec{Program: "codex", Args: args}, action, expectJSON, nil
+}
+
+func buildCodexPlatformCloudSpec(req codexPlatformCloudRequest) (runtime.CommandSpec, string, bool, error) {
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "list"
+	}
+	args := []string{"cloud"}
+	expectJSON := false
+	switch action {
+	case "list":
+		args = append(args, "list", "--json")
+		expectJSON = true
+		if envID := strings.TrimSpace(req.EnvID); envID != "" {
+			args = append(args, "--env", envID)
+		}
+		if req.Limit > 0 {
+			limit := req.Limit
+			if limit < 1 {
+				limit = 1
+			}
+			if limit > 20 {
+				limit = 20
+			}
+			args = append(args, "--limit", strconv.Itoa(limit))
+		}
+		if cursor := strings.TrimSpace(req.Cursor); cursor != "" {
+			args = append(args, "--cursor", cursor)
+		}
+	case "status":
+		taskID := strings.TrimSpace(req.TaskID)
+		if taskID == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("task_id is required for cloud status")
+		}
+		args = append(args, "status", taskID)
+	case "exec":
+		envID := strings.TrimSpace(req.EnvID)
+		if envID == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("env_id is required for cloud exec")
+		}
+		args = append(args, "exec", "--env", envID)
+		if req.Attempts > 0 {
+			attempts := req.Attempts
+			if attempts < 1 {
+				attempts = 1
+			}
+			if attempts > 20 {
+				attempts = 20
+			}
+			args = append(args, "--attempts", strconv.Itoa(attempts))
+		}
+		if branch := strings.TrimSpace(req.Branch); branch != "" {
+			args = append(args, "--branch", branch)
+		}
+		if query := strings.TrimSpace(req.Query); query != "" {
+			args = append(args, query)
+		}
+	case "diff":
+		taskID := strings.TrimSpace(req.TaskID)
+		if taskID == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("task_id is required for cloud diff")
+		}
+		args = append(args, "diff", taskID)
+		if req.Attempt > 0 {
+			args = append(args, "--attempt", strconv.Itoa(req.Attempt))
+		}
+	case "apply":
+		taskID := strings.TrimSpace(req.TaskID)
+		if taskID == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("task_id is required for cloud apply")
+		}
+		args = append(args, "apply", taskID)
+		if req.Attempt > 0 {
+			args = append(args, "--attempt", strconv.Itoa(req.Attempt))
+		}
+	default:
+		return runtime.CommandSpec{}, "", false, fmt.Errorf("unsupported codex cloud action: %q", req.Action)
+	}
+	return runtime.CommandSpec{Program: "codex", Args: args}, action, expectJSON, nil
+}
+
 func buildCodexSessionDiscoverSpec(limitPerHost int) runtime.CommandSpec {
 	script := fmt.Sprintf(`
 set -e
@@ -2181,6 +2737,149 @@ fi
 	return runtime.CommandSpec{Program: "sh", Args: []string{"-lc", script}}
 }
 
+func buildCodexSessionDeleteSpec(sessionID string) runtime.CommandSpec {
+	script := fmt.Sprintf(`
+set -e
+session_id=%q
+if [ -z "$session_id" ]; then
+  exit 0
+fi
+if command -v python3 >/dev/null 2>&1; then
+  py_exec=python3
+elif command -v python >/dev/null 2>&1; then
+  py_exec=python
+else
+  target="$HOME/.codex/sessions"
+  if [ -d "$target" ]; then
+    find "$target" -type f -name "*$session_id*.jsonl" -print -delete 2>/dev/null
+  fi
+  if [ -f "$HOME/.codex/session_index.jsonl" ]; then
+    tmp="$HOME/.codex/session_index.jsonl.tmp.$$"
+    grep -v "\"id\"[[:space:]]*:[[:space:]]*\"$session_id\"" "$HOME/.codex/session_index.jsonl" >"$tmp" || true
+    mv "$tmp" "$HOME/.codex/session_index.jsonl"
+  fi
+  exit 0
+fi
+
+"$py_exec" - "$session_id" <<'PY'
+import json
+import os
+import sys
+
+def infer_session_id_from_name(name: str) -> str:
+    base = name
+    if base.endswith(".jsonl"):
+        base = base[:-6]
+    if base.startswith("rollout-"):
+        parts = base.split("-")
+        if len(parts) >= 5:
+            candidate = "-".join(parts[-5:]).strip()
+            if candidate:
+                return candidate
+    return base.strip()
+
+def file_matches(path: str, target_session_id: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            first = fh.readline().strip()
+        if first:
+            row = json.loads(first)
+            payload = row.get("payload") if isinstance(row, dict) else {}
+            if isinstance(payload, dict):
+                payload_id = str(payload.get("id") or "").strip()
+                if payload_id == target_session_id:
+                    return True
+    except Exception:
+        pass
+    inferred = infer_session_id_from_name(os.path.basename(path))
+    return inferred == target_session_id
+
+def prune_empty_dirs(root_path: str) -> None:
+    if not os.path.isdir(root_path):
+        return
+    for root, dirs, files in os.walk(root_path, topdown=False):
+        if dirs or files:
+            continue
+        try:
+            os.rmdir(root)
+        except Exception:
+            pass
+
+def rewrite_session_index(index_path: str, target_session_id: str) -> None:
+    if not os.path.isfile(index_path):
+        return
+    keep_lines = []
+    changed = False
+    try:
+        with open(index_path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.rstrip("\n")
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                remove = False
+                try:
+                    row = json.loads(stripped)
+                    row_id = str(row.get("id") or "").strip() if isinstance(row, dict) else ""
+                    if row_id == target_session_id:
+                        remove = True
+                except Exception:
+                    remove = False
+                if remove:
+                    changed = True
+                    continue
+                keep_lines.append(stripped)
+    except Exception:
+        return
+    if not changed:
+        return
+    tmp_path = index_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            for line in keep_lines:
+                fh.write(line + "\n")
+        os.replace(tmp_path, index_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+session_id = str(sys.argv[1] if len(sys.argv) > 1 else "").strip()
+if not session_id:
+    raise SystemExit(0)
+
+home = os.path.expanduser("~")
+sessions_root = os.path.join(home, ".codex", "sessions")
+index_path = os.path.join(home, ".codex", "session_index.jsonl")
+
+matches = []
+if os.path.isdir(sessions_root):
+    for root, _, files in os.walk(sessions_root):
+        for name in files:
+            if not name.endswith(".jsonl"):
+                continue
+            full = os.path.join(root, name)
+            if file_matches(full, session_id):
+                matches.append(full)
+
+for full in sorted(set(matches)):
+    try:
+        os.remove(full)
+        print(full)
+    except FileNotFoundError:
+        continue
+    except Exception:
+        pass
+
+prune_empty_dirs(sessions_root)
+rewrite_session_index(index_path, session_id)
+PY
+`, sessionID)
+	return runtime.CommandSpec{Program: "sh", Args: []string{"-lc", script}}
+}
+
 func parseCodexSessionDiscoverOutput(stdout string) []codexSessionInfo {
 	lines := parsePathLines(stdout)
 	out := make([]codexSessionInfo, 0, len(lines))
@@ -2215,6 +2914,10 @@ func parseCodexSessionDiscoverOutput(stdout string) []codexSessionInfo {
 		})
 	}
 	return out
+}
+
+func parseCodexSessionDeleteOutput(stdout string) []string {
+	return parsePathLines(stdout)
 }
 
 func parseEpochSeconds(raw string) (time.Time, error) {
@@ -2263,6 +2966,24 @@ func capStringList(src []string, max int) []string {
 		return src
 	}
 	return src[:max]
+}
+
+func trimStringList(src []string) []string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(src))
+	for _, raw := range src {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type probeRequest struct {
@@ -2907,8 +3628,14 @@ func inferAction(method string, path string) string {
 		return "job.sync.enqueue"
 	case method == http.MethodGet && path == "/v1/projects":
 		return "project.list"
+	case method == http.MethodPost && path == "/v1/projects":
+		return "project.upsert"
+	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/projects/"):
+		return "project.delete"
 	case method == http.MethodGet && path == "/v1/sessions":
 		return "session.list"
+	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/sessions/"):
+		return "session.delete"
 	case method == http.MethodGet && path == "/v1/jobs":
 		return "job.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/events"):
@@ -2931,6 +3658,12 @@ func inferAction(method string, path string) string {
 		return "codex.sessions.discover"
 	case method == http.MethodPost && path == "/v1/codex/sessions/cleanup":
 		return "codex.sessions.cleanup"
+	case method == http.MethodPost && path == "/v1/codex/platform/login":
+		return "codex.platform.login"
+	case method == http.MethodPost && path == "/v1/codex/platform/mcp":
+		return "codex.platform.mcp"
+	case method == http.MethodPost && path == "/v1/codex/platform/cloud":
+		return "codex.platform.cloud"
 	case method == http.MethodPost && path == "/v1/files/images":
 		return "files.image.upload"
 	case method == http.MethodGet && path == "/v1/metrics":

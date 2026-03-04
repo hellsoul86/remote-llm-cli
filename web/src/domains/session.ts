@@ -12,6 +12,15 @@ export type TimelineEntry = {
   createdAt: string;
 };
 
+export type CodexApprovalPolicy =
+  | ""
+  | "untrusted"
+  | "on-failure"
+  | "on-request"
+  | "never";
+
+export type CodexSessionMode = "exec" | "resume" | "review";
+
 export type ConversationThread = {
   id: string;
   title: string;
@@ -20,11 +29,25 @@ export type ConversationThread = {
   createdAt: string;
   updatedAt: string;
   model: string;
+  codexMode: CodexSessionMode;
+  resumeLast: boolean;
+  resumeSessionID: string;
+  reviewUncommitted: boolean;
+  reviewBase: string;
+  reviewCommit: string;
+  reviewTitle: string;
   sandbox: "" | "read-only" | "workspace-write" | "danger-full-access";
+  approvalPolicy: CodexApprovalPolicy;
+  webSearch: boolean;
+  addDirs: string[];
+  skipGitRepoCheck: boolean;
+  ephemeral: boolean;
+  jsonOutput: boolean;
   imagePaths: string[];
   activeJobID: string;
   lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
   unreadDone: boolean;
+  pinned: boolean;
 };
 
 export type WorkspaceDirectory = {
@@ -32,6 +55,7 @@ export type WorkspaceDirectory = {
   hostID: string;
   hostName: string;
   path: string;
+  title: string;
   sessions: ConversationThread[];
   activeSessionID: string;
   createdAt: string;
@@ -45,10 +69,16 @@ export type DiscoveredProjectSession = {
 };
 
 export type DiscoveredProject = {
+  id?: string;
   hostID: string;
   hostName: string;
   path: string;
+  title?: string;
   sessions: DiscoveredProjectSession[];
+};
+
+type SyncProjectsOptions = {
+  preserveMissingSessions?: boolean;
 };
 
 type PersistedSessionState = {
@@ -57,6 +87,41 @@ type PersistedSessionState = {
 };
 
 const SESSION_STATE_KEY = "remote_llm_session_state_v1";
+
+function projectTitleFromPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return "Untitled Project";
+  const parts = trimmed.split("/").filter((part) => part.trim() !== "");
+  const tail = parts[parts.length - 1];
+  return tail?.trim() || trimmed;
+}
+
+function normalizeApprovalPolicy(raw: unknown): CodexApprovalPolicy {
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (
+    value === "untrusted" ||
+    value === "on-failure" ||
+    value === "on-request" ||
+    value === "never"
+  ) {
+    return value;
+  }
+  return "";
+}
+
+function normalizeSessionMode(raw: unknown): CodexSessionMode {
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (value === "resume" || value === "review") {
+    return value;
+  }
+  return "exec";
+}
+
+function forkTitleFromSource(sourceTitle: string, fallbackIndex: number): string {
+  const trimmed = sourceTitle.trim();
+  if (!trimmed) return `Fork ${fallbackIndex}`;
+  return `Fork · ${trimmed}`;
+}
 
 function createSession(index: number, title?: string): ConversationThread {
   const now = new Date().toISOString();
@@ -68,22 +133,59 @@ function createSession(index: number, title?: string): ConversationThread {
     createdAt: now,
     updatedAt: now,
     model: "",
+    codexMode: "exec",
+    resumeLast: true,
+    resumeSessionID: "",
+    reviewUncommitted: false,
+    reviewBase: "",
+    reviewCommit: "",
+    reviewTitle: "",
     sandbox: "workspace-write",
+    approvalPolicy: "",
+    webSearch: false,
+    addDirs: [],
+    skipGitRepoCheck: true,
+    ephemeral: false,
+    jsonOutput: true,
     imagePaths: [],
     activeJobID: "",
     lastJobStatus: "idle",
-    unreadDone: false
+    unreadDone: false,
+    pinned: false
+  };
+}
+
+function createForkSession(
+  source: ConversationThread,
+  index: number,
+): ConversationThread {
+  const now = new Date().toISOString();
+  return {
+    ...source,
+    id: `session_${Date.now()}_${index}`,
+    title: forkTitleFromSource(source.title, index),
+    timeline: source.timeline.map((entry) => ({ ...entry })),
+    addDirs: [...source.addDirs],
+    imagePaths: [...source.imagePaths],
+    createdAt: now,
+    updatedAt: now,
+    activeJobID: "",
+    lastJobStatus: "idle",
+    unreadDone: false,
+    pinned: false
   };
 }
 
 function createWorkspace(index: number, path: string, hostID = "local", hostName = "local-default"): WorkspaceDirectory {
   const now = new Date().toISOString();
   const first = createSession(index, "Session 1");
+  const title = projectTitleFromPath(path);
   return {
     id: `workspace_${Date.now()}_${index}`,
     hostID,
     hostName,
     path,
+    title,
     sessions: [first],
     activeSessionID: first.id,
     createdAt: now,
@@ -128,6 +230,12 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     last === "idle" || last === "running" || last === "succeeded" || last === "failed" || last === "canceled"
       ? last
       : fallback.lastJobStatus;
+  const addDirs = Array.isArray(candidate.addDirs)
+    ? candidate.addDirs.filter(
+        (path): path is string =>
+          typeof path === "string" && path.trim() !== "",
+      )
+    : [];
 
   return {
     id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : fallback.id,
@@ -137,11 +245,34 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : now,
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : now,
     model: typeof candidate.model === "string" ? candidate.model : "",
+    codexMode: normalizeSessionMode(candidate.codexMode),
+    resumeLast:
+      typeof candidate.resumeLast === "boolean" ? candidate.resumeLast : true,
+    resumeSessionID:
+      typeof candidate.resumeSessionID === "string"
+        ? candidate.resumeSessionID
+        : "",
+    reviewUncommitted: Boolean(candidate.reviewUncommitted),
+    reviewBase: typeof candidate.reviewBase === "string" ? candidate.reviewBase : "",
+    reviewCommit:
+      typeof candidate.reviewCommit === "string" ? candidate.reviewCommit : "",
+    reviewTitle: typeof candidate.reviewTitle === "string" ? candidate.reviewTitle : "",
     sandbox: safeSandbox,
+    approvalPolicy: normalizeApprovalPolicy(candidate.approvalPolicy),
+    webSearch: Boolean(candidate.webSearch),
+    addDirs,
+    skipGitRepoCheck:
+      typeof candidate.skipGitRepoCheck === "boolean"
+        ? candidate.skipGitRepoCheck
+        : true,
+    ephemeral: Boolean(candidate.ephemeral),
+    jsonOutput:
+      typeof candidate.jsonOutput === "boolean" ? candidate.jsonOutput : true,
     imagePaths: Array.isArray(candidate.imagePaths) ? candidate.imagePaths.filter((path): path is string => typeof path === "string" && path.trim() !== "") : [],
     activeJobID: typeof candidate.activeJobID === "string" ? candidate.activeJobID : "",
     lastJobStatus: safeLast,
-    unreadDone: Boolean(candidate.unreadDone)
+    unreadDone: Boolean(candidate.unreadDone),
+    pinned: Boolean(candidate.pinned)
   };
 }
 
@@ -164,6 +295,14 @@ function normalizeWorkspace(raw: unknown, index: number): WorkspaceDirectory {
     hostID: typeof candidate.hostID === "string" ? candidate.hostID : fallback.hostID,
     hostName: typeof candidate.hostName === "string" && candidate.hostName.trim() ? candidate.hostName : fallback.hostName,
     path: typeof candidate.path === "string" && candidate.path.trim() ? candidate.path : "/home/ecs-user",
+    title:
+      typeof candidate.title === "string" && candidate.title.trim()
+        ? candidate.title.trim()
+        : projectTitleFromPath(
+            typeof candidate.path === "string" && candidate.path.trim()
+              ? candidate.path
+              : "/home/ecs-user",
+          ),
     sessions: safeSessions,
     activeSessionID,
     createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : now,
@@ -265,15 +404,24 @@ export function useSessionDomain() {
     return `entry_${Date.now()}_${entryCounter.current}`;
   }
 
-  function updateWorkspacesByThread(threadID: string, updater: (thread: ConversationThread) => ConversationThread) {
+  function updateWorkspacesByThread(
+    threadID: string,
+    updater: (thread: ConversationThread) => ConversationThread,
+  ) {
     setWorkspaces((prev) =>
       prev.map((workspace) => {
-        if (!workspace.sessions.some((thread) => thread.id === threadID)) return workspace;
-        const now = new Date().toISOString();
+        let touched = false;
+        const nextSessions = workspace.sessions.map((thread) => {
+          if (thread.id !== threadID) return thread;
+          const nextThread = updater(thread);
+          if (nextThread !== thread) touched = true;
+          return nextThread;
+        });
+        if (!touched) return workspace;
         return {
           ...workspace,
-          sessions: workspace.sessions.map((thread) => (thread.id === threadID ? updater(thread) : thread)),
-          updatedAt: now
+          sessions: nextSessions,
+          updatedAt: new Date().toISOString()
         };
       })
     );
@@ -353,11 +501,19 @@ export function useSessionDomain() {
     const now = new Date().toISOString();
     updateWorkspacesByThread(threadID, (thread) => {
       const timeline = [...thread.timeline];
-      const last = timeline[timeline.length - 1];
-      if (last && last.kind === "assistant" && last.state === "running") {
-        if (last.body === trimmed) return thread;
-        timeline[timeline.length - 1] = {
-          ...last,
+      let runningIndex = -1;
+      for (let index = timeline.length - 1; index >= 0; index -= 1) {
+        const candidate = timeline[index];
+        if (candidate.kind === "assistant" && candidate.state === "running") {
+          runningIndex = index;
+          break;
+        }
+      }
+      if (runningIndex >= 0) {
+        const running = timeline[runningIndex];
+        if (running.body === trimmed) return thread;
+        timeline[runningIndex] = {
+          ...running,
           body: trimmed
         };
       } else {
@@ -383,12 +539,20 @@ export function useSessionDomain() {
     const now = new Date().toISOString();
     updateWorkspacesByThread(threadID, (thread) => {
       const timeline = [...thread.timeline];
-      const last = timeline[timeline.length - 1];
-      if (last && last.kind === "assistant" && last.state === "running") {
-        timeline[timeline.length - 1] = {
-          ...last,
+      let runningIndex = -1;
+      for (let index = timeline.length - 1; index >= 0; index -= 1) {
+        const candidate = timeline[index];
+        if (candidate.kind === "assistant" && candidate.state === "running") {
+          runningIndex = index;
+          break;
+        }
+      }
+      if (runningIndex >= 0) {
+        const running = timeline[runningIndex];
+        timeline[runningIndex] = {
+          ...running,
           state,
-          body: trimmed || last.body
+          body: trimmed || running.body
         };
         return {
           ...thread,
@@ -430,6 +594,85 @@ export function useSessionDomain() {
       })
     );
     setThreadRenameDraft(next.title);
+  }
+
+  function forkThread(threadID: string) {
+    const sourceID = threadID.trim();
+    if (!sourceID) return;
+    const workspace = workspaces.find((item) =>
+      item.sessions.some((thread) => thread.id === sourceID),
+    );
+    if (!workspace) return;
+    const source = workspace.sessions.find((thread) => thread.id === sourceID);
+    if (!source) return;
+
+    sessionCounterRef.current += 1;
+    const idx = sessionCounterRef.current;
+    const forked = createForkSession(source, idx);
+
+    setWorkspaces((prev) =>
+      prev.map((item) => {
+        if (item.id !== workspace.id) return item;
+        return {
+          ...item,
+          sessions: [...item.sessions, forked],
+          activeSessionID: forked.id,
+          updatedAt: new Date().toISOString()
+        };
+      })
+    );
+    setActiveWorkspaceID(workspace.id);
+    setThreadRenameDraft(forked.title);
+  }
+
+  function removeThread(threadID: string) {
+    const targetID = threadID.trim();
+    if (!targetID) return;
+    let removed = false;
+    let nextActiveWorkspaceID = activeWorkspaceID;
+    let fallbackThreadID = "";
+    setWorkspaces((prev) => {
+      const now = new Date().toISOString();
+      const next = prev.map((workspace) => {
+        const currentIndex = workspace.sessions.findIndex((thread) => thread.id === targetID);
+        if (currentIndex < 0) return workspace;
+        removed = true;
+
+        const nextSessions = workspace.sessions.filter((thread) => thread.id !== targetID);
+        let nextActiveSessionID = workspace.activeSessionID;
+        if (workspace.activeSessionID === targetID) {
+          if (nextSessions.length > 0) {
+            const fallbackIndex = Math.min(currentIndex, nextSessions.length - 1);
+            nextActiveSessionID = nextSessions[fallbackIndex]?.id ?? "";
+          } else {
+            nextActiveSessionID = "";
+          }
+        }
+        return {
+          ...workspace,
+          sessions: nextSessions,
+          activeSessionID: nextActiveSessionID,
+          updatedAt: now
+        };
+      });
+
+      if (!removed) {
+        return prev;
+      }
+      if (!next.some((workspace) => workspace.id === nextActiveWorkspaceID)) {
+        nextActiveWorkspaceID = next[0]?.id ?? "";
+      }
+      const nextActiveWorkspace = next.find((workspace) => workspace.id === nextActiveWorkspaceID);
+      fallbackThreadID = nextActiveWorkspace?.activeSessionID ?? "";
+      return next;
+    });
+    if (!removed) return;
+    if (nextActiveWorkspaceID !== activeWorkspaceID) {
+      setActiveWorkspaceID(nextActiveWorkspaceID);
+    }
+    if (activeJobThreadID === targetID) {
+      setActiveJobThreadID(fallbackThreadID);
+    }
   }
 
   function renameThread(threadID: string, nextTitle: string) {
@@ -488,10 +731,129 @@ export function useSessionDomain() {
     }));
   }
 
+  function setThreadCodexMode(threadID: string, mode: CodexSessionMode) {
+    const safeMode = normalizeSessionMode(mode);
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      codexMode: safeMode,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadResumeLast(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      resumeLast: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadResumeSessionID(threadID: string, sessionID: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      resumeSessionID: sessionID,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadReviewUncommitted(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      reviewUncommitted: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadReviewBase(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      reviewBase: value,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadReviewCommit(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      reviewCommit: value,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadReviewTitle(threadID: string, value: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      reviewTitle: value,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
   function setThreadSandbox(threadID: string, sandbox: "" | "read-only" | "workspace-write" | "danger-full-access") {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       sandbox,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadApprovalPolicy(threadID: string, policy: CodexApprovalPolicy) {
+    const safePolicy = normalizeApprovalPolicy(policy);
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      approvalPolicy: safePolicy,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadWebSearch(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      webSearch: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function addThreadAddDir(threadID: string, dir: string) {
+    const trimmed = dir.trim();
+    if (!trimmed) return;
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.addDirs.includes(trimmed)) return thread;
+      return {
+        ...thread,
+        addDirs: [...thread.addDirs, trimmed],
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+
+  function removeThreadAddDir(threadID: string, dir: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      addDirs: thread.addDirs.filter((item) => item !== dir),
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadSkipGitRepoCheck(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      skipGitRepoCheck: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadEphemeral(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      ephemeral: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadJSONOutput(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      jsonOutput: enabled,
       updatedAt: new Date().toISOString()
     }));
   }
@@ -534,14 +896,32 @@ export function useSessionDomain() {
   function setThreadTitle(threadID: string, title: string) {
     const trimmed = title.trim();
     if (!trimmed) return;
-    updateWorkspacesByThread(threadID, (thread) => ({
-      ...thread,
-      title: trimmed,
-      updatedAt: new Date().toISOString()
-    }));
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.title.trim() === trimmed) return thread;
+      return {
+        ...thread,
+        title: trimmed,
+        updatedAt: new Date().toISOString()
+      };
+    });
   }
 
-  function syncProjectsFromDiscovery(projects: DiscoveredProject[]) {
+  function setThreadPinned(threadID: string, pinned: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.pinned === pinned) return thread;
+      return {
+        ...thread,
+        pinned,
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+
+  function syncProjectsFromDiscovery(
+    projects: DiscoveredProject[],
+    options?: SyncProjectsOptions,
+  ) {
+    const preserveMissingSessions = options?.preserveMissingSessions !== false;
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
@@ -560,10 +940,14 @@ export function useSessionDomain() {
       if (!hostID || !path) continue;
       incomingHostIDs.add(hostID);
 
-      const id = projectWorkspaceID(hostID, path);
+      const id = project.id?.trim() || projectWorkspaceID(hostID, path);
       const existing = currentByWorkspaceID.get(id);
       const seen = new Set<string>();
       const sessions: ConversationThread[] = [];
+      const projectTitle =
+        project.title?.trim() ||
+        existing?.title?.trim() ||
+        projectTitleFromPath(path);
 
       for (const discovered of project.sessions) {
         const sessionID = discovered.id.trim();
@@ -581,15 +965,29 @@ export function useSessionDomain() {
           createdAt,
           updatedAt,
           model: prior?.model ?? "",
+          codexMode: prior?.codexMode ?? "exec",
+          resumeLast: prior?.resumeLast ?? true,
+          resumeSessionID: prior?.resumeSessionID ?? "",
+          reviewUncommitted: prior?.reviewUncommitted ?? false,
+          reviewBase: prior?.reviewBase ?? "",
+          reviewCommit: prior?.reviewCommit ?? "",
+          reviewTitle: prior?.reviewTitle ?? "",
           sandbox: prior?.sandbox ?? "workspace-write",
+          approvalPolicy: prior?.approvalPolicy ?? "",
+          webSearch: prior?.webSearch ?? false,
+          addDirs: prior?.addDirs ?? [],
+          skipGitRepoCheck: prior?.skipGitRepoCheck ?? true,
+          ephemeral: prior?.ephemeral ?? false,
+          jsonOutput: prior?.jsonOutput ?? true,
           imagePaths: prior?.imagePaths ?? [],
           activeJobID: prior?.activeJobID ?? "",
           lastJobStatus: prior?.lastJobStatus ?? "idle",
-          unreadDone: prior?.unreadDone ?? false
+          unreadDone: prior?.unreadDone ?? false,
+          pinned: prior?.pinned ?? false
         });
       }
 
-      if (existing) {
+      if (existing && preserveMissingSessions) {
         for (const prior of existing.sessions) {
           if (seen.has(prior.id)) continue;
           sessions.push(prior);
@@ -607,6 +1005,7 @@ export function useSessionDomain() {
         hostID,
         hostName: project.hostName.trim() || existing?.hostName || hostID,
         path,
+        title: projectTitle,
         sessions,
         activeSessionID,
         createdAt: existing?.createdAt ?? now,
@@ -689,15 +1088,32 @@ export function useSessionDomain() {
     upsertAssistantStreamEntry,
     finalizeAssistantStreamEntry,
     createThread,
+    forkThread,
+    removeThread,
     renameThread,
     switchThreadByOffset,
     setThreadModel,
+    setThreadCodexMode,
+    setThreadResumeLast,
+    setThreadResumeSessionID,
+    setThreadReviewUncommitted,
+    setThreadReviewBase,
+    setThreadReviewCommit,
+    setThreadReviewTitle,
     setThreadSandbox,
+    setThreadApprovalPolicy,
+    setThreadWebSearch,
+    addThreadAddDir,
+    removeThreadAddDir,
+    setThreadSkipGitRepoCheck,
+    setThreadEphemeral,
+    setThreadJSONOutput,
     addThreadImagePath,
     removeThreadImagePath,
     setThreadJobState,
     setThreadUnread,
     setThreadTitle,
+    setThreadPinned,
     syncProjectsFromDiscovery,
     resetSessionDomain
   };

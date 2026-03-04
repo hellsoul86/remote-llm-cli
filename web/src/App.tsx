@@ -1,9 +1,23 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
+  FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   API_BASE,
   cancelRunJob,
+  codexPlatformCloud,
+  codexPlatformLogin,
+  codexPlatformMCP,
   discoverCodexSessions,
   discoverCodexModels,
+  archiveSession,
+  deleteProject,
   deleteHost,
   enqueueRunJob,
   getMetrics,
@@ -22,6 +36,7 @@ import {
   streamSessionEvents,
   uploadImage,
   upsertHost,
+  upsertProject,
   type Host,
   type ProjectRecord,
   type SessionEventRecord,
@@ -30,12 +45,24 @@ import {
   type RunJobEvent,
   type RunJobRecord,
   type RunRequest,
-  type RunResponse
+  type RunResponse,
+  type CodexPlatformResult,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
-import { useSessionDomain } from "./domains/session";
+import {
+  type CodexApprovalPolicy,
+  type CodexSessionMode,
+  type TimelineEntry,
+  type TimelineState,
+  useSessionDomain,
+} from "./domains/session";
 
 const TOKEN_KEY = "remote_llm_access_key";
+const SESSION_TREE_PREFS_KEY = "remote_llm_session_tree_prefs_v1";
+const SESSION_EVENT_CURSOR_KEY = "remote_llm_session_event_cursor_v1";
+const COMPLETED_RUNS_KEY = "remote_llm_completed_runs_v1";
+const MAX_PERSISTED_SESSION_CURSORS = 1200;
+const MAX_PERSISTED_COMPLETED_RUNS = 2400;
 
 type AuthPhase = "checking" | "locked" | "ready";
 type AppMode = "session" | "ops";
@@ -50,14 +77,16 @@ type SessionAlert = {
 type SessionTreeProject = {
   id: string;
   hostID: string;
+  title: string;
   path: string;
   sessions: Array<{
     id: string;
     title: string;
+    pinned: boolean;
     activeJobID: string;
     unreadDone: boolean;
     lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
-    timelineSize: number;
+    updatedAt: string;
   }>;
 };
 
@@ -74,9 +103,206 @@ type SessionRunStreamState = {
   streamSeen: boolean;
   assistantFinalized: boolean;
   failureHints: string[];
+  eventParseOffset: number;
+  surfacedEventKeys: Set<string>;
+};
+
+type SessionStreamHealthState =
+  | "offline"
+  | "connecting"
+  | "live"
+  | "reconnecting"
+  | "error";
+
+type SessionStreamHealth = {
+  state: SessionStreamHealthState;
+  retries: number;
+  lastEventAt: number;
+  updatedAt: number;
+  lastError: string;
+};
+
+type SessionEventHandleOptions = {
+  surfaceCompletions?: boolean;
+  surfaceLifecycle?: boolean;
+};
+
+type CodexRuntimeCard = {
+  key: string;
+  title: string;
+  body: string;
+  state: TimelineState;
+};
+
+type CommandPaletteAction = {
+  id: string;
+  label: string;
+  detail: string;
+  searchText: string;
+  run: () => void;
 };
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
+const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
+const MAX_SESSION_STREAMS = 4;
+const APPROVAL_POLICY_OPTIONS: Array<{
+  value: CodexApprovalPolicy;
+  label: string;
+}> = [
+  { value: "", label: "default" },
+  { value: "untrusted", label: "untrusted" },
+  { value: "on-request", label: "on-request" },
+  { value: "never", label: "never" },
+  { value: "on-failure", label: "on-failure (legacy)" },
+];
+const CODEX_MODE_OPTIONS: Array<{ value: CodexSessionMode; label: string }> = [
+  { value: "exec", label: "exec" },
+  { value: "resume", label: "resume" },
+  { value: "review", label: "review" },
+];
+type CodexPlatformMCPAction =
+  | "list"
+  | "get"
+  | "add"
+  | "remove"
+  | "login"
+  | "logout";
+type CodexPlatformCloudAction =
+  | "list"
+  | "status"
+  | "exec"
+  | "diff"
+  | "apply";
+const CODEX_PLATFORM_MCP_ACTIONS: Array<{
+  value: CodexPlatformMCPAction;
+  label: string;
+}> = [
+  { value: "list", label: "list" },
+  { value: "get", label: "get" },
+  { value: "add", label: "add" },
+  { value: "remove", label: "remove" },
+  { value: "login", label: "login" },
+  { value: "logout", label: "logout" },
+];
+const CODEX_PLATFORM_CLOUD_ACTIONS: Array<{
+  value: CodexPlatformCloudAction;
+  label: string;
+}> = [
+  { value: "list", label: "list" },
+  { value: "status", label: "status" },
+  { value: "exec", label: "exec" },
+  { value: "diff", label: "diff" },
+  { value: "apply", label: "apply" },
+];
+
+type SessionTreePrefs = {
+  projectFilter: string;
+  collapsedHostIDs: string[];
+};
+
+type SessionLastStatus =
+  | "idle"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "canceled";
+
+function loadPersistedSessionEventCursors(): Map<string, number> {
+  if (typeof window === "undefined") {
+    return new Map();
+  }
+  const raw = window.localStorage.getItem(SESSION_EVENT_CURSOR_KEY);
+  if (!raw) return new Map();
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const entries = Object.entries(parsed)
+      .map(([sessionID, cursor]) => {
+        const normalizedID = sessionID.trim();
+        const normalizedCursor =
+          typeof cursor === "number" ? cursor : Number(cursor);
+        return [normalizedID, normalizedCursor] as const;
+      })
+      .filter(
+        ([sessionID, cursor]) =>
+          sessionID !== "" && Number.isFinite(cursor) && cursor > 0,
+      )
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, MAX_PERSISTED_SESSION_CURSORS);
+    return new Map(entries);
+  } catch {
+    return new Map();
+  }
+}
+
+function persistSessionEventCursors(map: Map<string, number>) {
+  if (typeof window === "undefined") return;
+  const entries = Array.from(map.entries())
+    .filter(
+      ([sessionID, cursor]) =>
+        sessionID.trim() !== "" && Number.isFinite(cursor) && cursor > 0,
+    )
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_PERSISTED_SESSION_CURSORS);
+  const payload: Record<string, number> = {};
+  for (const [sessionID, cursor] of entries) {
+    payload[sessionID] = cursor;
+  }
+  window.localStorage.setItem(SESSION_EVENT_CURSOR_KEY, JSON.stringify(payload));
+}
+
+function loadPersistedCompletedRuns(): Set<string> {
+  if (typeof window === "undefined") {
+    return new Set();
+  }
+  const raw = window.localStorage.getItem(COMPLETED_RUNS_KEY);
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    const out = new Set<string>();
+    for (const value of parsed) {
+      if (typeof value !== "string") continue;
+      const normalized = value.trim();
+      if (!normalized) continue;
+      out.add(normalized);
+      if (out.size >= MAX_PERSISTED_COMPLETED_RUNS) break;
+    }
+    return out;
+  } catch {
+    return new Set();
+  }
+}
+
+function persistCompletedRuns(set: Set<string>) {
+  if (typeof window === "undefined") return;
+  const values = Array.from(set).filter((runID) => runID.trim() !== "");
+  const trimmed =
+    values.length > MAX_PERSISTED_COMPLETED_RUNS
+      ? values.slice(values.length - MAX_PERSISTED_COMPLETED_RUNS)
+      : values;
+  window.localStorage.setItem(COMPLETED_RUNS_KEY, JSON.stringify(trimmed));
+}
+
+function loadSessionTreePrefs(): SessionTreePrefs {
+  if (typeof window === "undefined") {
+    return { projectFilter: "", collapsedHostIDs: [] };
+  }
+  const raw = window.localStorage.getItem(SESSION_TREE_PREFS_KEY);
+  if (!raw) return { projectFilter: "", collapsedHostIDs: [] };
+  try {
+    const parsed = JSON.parse(raw) as Partial<SessionTreePrefs>;
+    const projectFilter =
+      typeof parsed.projectFilter === "string" ? parsed.projectFilter : "";
+    const collapsedHostIDs = Array.isArray(parsed.collapsedHostIDs)
+      ? parsed.collapsedHostIDs.filter(
+          (item): item is string => typeof item === "string" && item.trim() !== "",
+        )
+      : [];
+    return { projectFilter, collapsedHostIDs };
+  } catch {
+    return { projectFilter: "", collapsedHostIDs: [] };
+  }
+}
 
 function isJobActive(job: RunJobRecord | null | undefined): boolean {
   if (!job) return false;
@@ -87,7 +313,7 @@ function summarizeRunResponse(response: RunResponse): string {
   const lines = [
     `runtime=${response.runtime}`,
     `total=${response.summary.total} succeeded=${response.summary.succeeded} failed=${response.summary.failed}`,
-    `fanout=${response.summary.fanout} duration=${response.summary.duration_ms}ms`
+    `fanout=${response.summary.fanout} duration=${response.summary.duration_ms}ms`,
   ];
   for (const target of response.targets) {
     const status = target.ok ? "ok" : "failed";
@@ -108,7 +334,12 @@ function summarizeJobEventLine(event: RunJobEvent): string {
       if ((event.status ?? "").toLowerCase() === "ok") {
         return `${host} completed.`;
       }
-      return [host, "failed", typeof event.exit_code === "number" ? `exit ${event.exit_code}` : "", event.error || ""]
+      return [
+        host,
+        "failed",
+        typeof event.exit_code === "number" ? `exit ${event.exit_code}` : "",
+        event.error || "",
+      ]
         .filter((part) => part.trim() !== "")
         .join(" · ");
     case "job.cancel_requested":
@@ -124,17 +355,67 @@ function summarizeJobEventLine(event: RunJobEvent): string {
   }
 }
 
-function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): { suffix: string; body: string } {
+function sessionEventHostLabel(payload: Record<string, unknown>): string {
+  const hostName =
+    typeof payload.host_name === "string" ? payload.host_name.trim() : "";
+  if (hostName) return hostName;
+  const hostID = typeof payload.host_id === "string" ? payload.host_id.trim() : "";
+  if (hostID) return hostID;
+  return "target";
+}
+
+function lastUserPromptFromTimeline(timeline: TimelineEntry[]): string {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry.kind !== "user") continue;
+    const body = entry.body.trim();
+    if (body) return body;
+  }
+  return "";
+}
+
+function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): {
+  suffix: string;
+  body: string;
+} {
   switch (status) {
     case "succeeded":
       return { suffix: "completed", body: "New response is ready." };
     case "failed":
-      return { suffix: "failed", body: "Response failed. Open this session for details." };
+      return {
+        suffix: "failed",
+        body: "Response failed. Open this session for details.",
+      };
     case "canceled":
       return { suffix: "canceled", body: "Response was canceled." };
     default:
       return { suffix: "updated", body: "Session status changed." };
   }
+}
+
+function normalizeSessionTitle(raw: string): string {
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  if (/^session(\s+\d+)?$/i.test(collapsed)) return "";
+  if (collapsed.length <= 72) return collapsed;
+  return `${collapsed.slice(0, 69).trimEnd()}...`;
+}
+
+function isGenericSessionTitle(title: string): boolean {
+  return /^session(\s+\d+)?$/i.test(title.trim());
+}
+
+function deriveSessionTitleFromPrompt(prompt: string): string {
+  const normalized = prompt
+    .replace(/[`*_#>\[\]\(\){}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  const sentenceMatch = normalized.match(/^(.{1,88}?)([.!?。！？]|$)/);
+  const sentence = (sentenceMatch?.[1] ?? normalized).trim();
+  const words = sentence.split(" ").filter((word) => word.trim() !== "");
+  const compact = words.slice(0, 10).join(" ");
+  return normalizeSessionTitle(compact);
 }
 
 function clipStreamText(raw: string, maxChars = 3600): string {
@@ -188,23 +469,33 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
     ) {
       return "";
     }
-    return gatherMessageText(item)
-      .join("\n")
-      .trim();
+    return gatherMessageText(item).join("\n").trim();
   }
 
   if (eventType === "response.completed") {
     const response = asRecord(event.response);
     if (!response) return "";
-    return gatherMessageText(response)
-      .join("\n")
-      .trim();
+    return gatherMessageText(response).join("\n").trim();
   }
 
   return "";
 }
 
-function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallback = true): string {
+function isProtocolNoiseLine(line: string): boolean {
+  const normalized = line.trim();
+  if (!normalized) return true;
+  if (/^done\.?$/i.test(normalized)) return true;
+  if (normalized.includes(`"type":"thread.started"`)) return true;
+  if (normalized.includes(`"type":"turn.started"`)) return true;
+  if (normalized.includes(`"type":"turn.completed"`)) return true;
+  if (normalized.includes(`"type":"response.started"`)) return true;
+  return false;
+}
+
+function parseCodexAssistantTextFromStdout(
+  stdout: string,
+  allowPlainTextFallback = true,
+): string {
   if (!stdout.trim()) return "";
   const lines = stdout.split(/\r?\n/);
   const messages: string[] = [];
@@ -217,7 +508,9 @@ function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallbac
     try {
       parsed = JSON.parse(line);
     } catch {
-      plainLines.push(line);
+      if (!isProtocolNoiseLine(line)) {
+        plainLines.push(line);
+      }
       continue;
     }
     const event = asRecord(parsed);
@@ -247,9 +540,359 @@ function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallbac
   return "";
 }
 
+function pickSessionTitleFromEvent(event: Record<string, unknown>): string {
+  const direct = normalizeSessionTitle(
+    typeof event.title === "string" ? event.title : "",
+  );
+  if (direct) return direct;
+  const nestedKeys = ["thread", "session", "payload", "item", "data", "meta"];
+  for (const key of nestedKeys) {
+    const record = asRecord(event[key]);
+    if (!record) continue;
+    const title = normalizeSessionTitle(
+      typeof record.title === "string" ? record.title : "",
+    );
+    if (title) return title;
+  }
+  return "";
+}
+
+function parseCodexSessionTitleFromStdout(stdout: string): string {
+  if (!stdout.trim()) return "";
+  const lines = stdout.split(/\r?\n/);
+  let latest = "";
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const event = asRecord(parsed);
+    if (!event) continue;
+    const eventType =
+      typeof event.type === "string" ? event.type.toLowerCase() : "";
+    if (eventType.includes("title")) {
+      const titled = pickSessionTitleFromEvent(event);
+      if (titled) latest = titled;
+      continue;
+    }
+    if (eventType === "thread.started" || eventType === "session.started") {
+      const titled = pickSessionTitleFromEvent(event);
+      if (titled) latest = titled;
+    }
+  }
+  return latest;
+}
+
+function runtimeStateFromStatus(status: string): TimelineState {
+  const normalized = status.trim().toLowerCase();
+  if (
+    normalized === "failed" ||
+    normalized === "error" ||
+    normalized === "declined"
+  ) {
+    return "error";
+  }
+  if (normalized === "completed" || normalized === "succeeded") {
+    return "success";
+  }
+  return "running";
+}
+
+function codexEventIncludesApproval(text: string): boolean {
+  return /(approval|declined|rejected by user|approval settings)/i.test(text);
+}
+
+function summarizeCodexFileChanges(raw: unknown): string {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return "No file changes were reported.";
+  }
+  const lines: string[] = [];
+  for (const value of raw) {
+    const change = asRecord(value);
+    if (!change) continue;
+    const kind =
+      typeof change.kind === "string" && change.kind.trim() !== ""
+        ? change.kind.trim()
+        : "update";
+    const path =
+      typeof change.path === "string" && change.path.trim() !== ""
+        ? change.path.trim()
+        : "(unknown path)";
+    lines.push(`${kind} ${path}`);
+    if (lines.length >= 5) break;
+  }
+  if (lines.length === 0) {
+    return "No file changes were reported.";
+  }
+  if (Array.isArray(raw) && raw.length > lines.length) {
+    lines.push(`...and ${raw.length - lines.length} more`);
+  }
+  return lines.join("\n");
+}
+
+function buildCodexRuntimeCardFromEvent(
+  event: Record<string, unknown>,
+  runID: string,
+): CodexRuntimeCard | null {
+  const eventType =
+    typeof event.type === "string" ? event.type.trim().toLowerCase() : "";
+  if (!eventType) return null;
+
+  if (eventType === "error") {
+    const message =
+      typeof event.message === "string" ? event.message.trim() : "";
+    if (!message || !codexEventIncludesApproval(message)) {
+      return null;
+    }
+    return {
+      key: `${runID}:approval:error:${message}`,
+      title: "Approval Required",
+      body: message,
+      state: "error",
+    };
+  }
+
+  if (eventType === "turn.failed") {
+    const error = asRecord(event.error);
+    const message =
+      error && typeof error.message === "string"
+        ? error.message.trim()
+        : typeof event.message === "string"
+          ? event.message.trim()
+          : "";
+    if (!message || !codexEventIncludesApproval(message)) {
+      return null;
+    }
+    return {
+      key: `${runID}:approval:turn_failed:${message}`,
+      title: "Approval Required",
+      body: message,
+      state: "error",
+    };
+  }
+
+  if (
+    eventType !== "item.started" &&
+    eventType !== "item.updated" &&
+    eventType !== "item.completed"
+  ) {
+    return null;
+  }
+
+  const item = asRecord(event.item);
+  if (!item) return null;
+  const itemID =
+    typeof item.id === "string" && item.id.trim() !== ""
+      ? item.id.trim()
+      : "item";
+  const itemType =
+    typeof item.type === "string" ? item.type.trim().toLowerCase() : "";
+  if (!itemType) return null;
+
+  if (itemType === "command_execution") {
+    const command =
+      typeof item.command === "string" && item.command.trim() !== ""
+        ? item.command.trim()
+        : "command";
+    const status =
+      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
+    const effectiveStatus =
+      status || (eventType === "item.completed" ? "completed" : "in_progress");
+    const exitCode =
+      typeof item.exit_code === "number" ? ` exit=${item.exit_code}` : "";
+    const output =
+      typeof item.aggregated_output === "string"
+        ? item.aggregated_output.trim()
+        : "";
+    if (effectiveStatus === "declined") {
+      return {
+        key: `${runID}:approval:${itemID}:${effectiveStatus}`,
+        title: "Approval Required",
+        body: `Command was declined: ${command}`,
+        state: "error",
+      };
+    }
+    const title =
+      effectiveStatus === "failed"
+        ? "Command Failed"
+        : effectiveStatus === "completed"
+          ? "Command Completed"
+          : "Command Started";
+    const bodyParts = [`${command}${exitCode}`.trim()];
+    if (output) {
+      bodyParts.push(clipStreamText(output, 1200));
+    }
+    return {
+      key: `${runID}:command:${itemID}:${effectiveStatus}`,
+      title,
+      body: bodyParts.join("\n"),
+      state: runtimeStateFromStatus(effectiveStatus),
+    };
+  }
+
+  if (itemType === "file_change") {
+    const status =
+      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
+    const effectiveStatus =
+      status || (eventType === "item.completed" ? "completed" : "in_progress");
+    return {
+      key: `${runID}:patch:${itemID}:${effectiveStatus}`,
+      title:
+        effectiveStatus === "failed"
+          ? "Patch Failed"
+          : effectiveStatus === "completed"
+            ? "Patch Applied"
+            : "Patch Started",
+      body: summarizeCodexFileChanges(item.changes),
+      state: runtimeStateFromStatus(effectiveStatus),
+    };
+  }
+
+  if (itemType === "mcp_tool_call") {
+    const server =
+      typeof item.server === "string" && item.server.trim() !== ""
+        ? item.server.trim()
+        : "server";
+    const tool =
+      typeof item.tool === "string" && item.tool.trim() !== ""
+        ? item.tool.trim()
+        : "tool";
+    const status =
+      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
+    const effectiveStatus =
+      status || (eventType === "item.completed" ? "completed" : "in_progress");
+    const errorRecord = asRecord(item.error);
+    const errorMessage =
+      errorRecord && typeof errorRecord.message === "string"
+        ? errorRecord.message.trim()
+        : "";
+    const body = [`${server}.${tool}`];
+    if (errorMessage) body.push(errorMessage);
+    return {
+      key: `${runID}:tool:${itemID}:${effectiveStatus}`,
+      title:
+        effectiveStatus === "failed"
+          ? "Tool Failed"
+          : effectiveStatus === "completed"
+            ? "Tool Completed"
+            : "Tool Started",
+      body: body.join("\n"),
+      state: runtimeStateFromStatus(effectiveStatus),
+    };
+  }
+
+  if (itemType === "web_search") {
+    const status =
+      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
+    const effectiveStatus =
+      status || (eventType === "item.completed" ? "completed" : "in_progress");
+    const query =
+      typeof item.query === "string" && item.query.trim() !== ""
+        ? item.query.trim()
+        : "(empty query)";
+    return {
+      key: `${runID}:tool:${itemID}:web_search:${effectiveStatus}`,
+      title:
+        effectiveStatus === "completed" ? "Tool Completed" : "Tool Started",
+      body: `web_search\n${query}`,
+      state: runtimeStateFromStatus(effectiveStatus),
+    };
+  }
+
+  if (itemType === "collab_tool_call") {
+    const status =
+      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
+    const effectiveStatus =
+      status || (eventType === "item.completed" ? "completed" : "in_progress");
+    const tool =
+      typeof item.tool === "string" && item.tool.trim() !== ""
+        ? item.tool.trim()
+        : "collab_tool";
+    return {
+      key: `${runID}:tool:${itemID}:collab:${effectiveStatus}`,
+      title:
+        effectiveStatus === "failed"
+          ? "Tool Failed"
+          : effectiveStatus === "completed"
+            ? "Tool Completed"
+            : "Tool Started",
+      body: tool,
+      state: runtimeStateFromStatus(effectiveStatus),
+    };
+  }
+
+  if (itemType === "error") {
+    const message =
+      typeof item.message === "string" ? item.message.trim() : "";
+    if (!message || !codexEventIncludesApproval(message)) {
+      return null;
+    }
+    return {
+      key: `${runID}:approval:${itemID}:item_error`,
+      title: "Approval Required",
+      body: message,
+      state: "error",
+    };
+  }
+
+  return null;
+}
+
+function parseCodexEventsIncremental(
+  stdout: string,
+  offset: number,
+): { nextOffset: number; events: Array<Record<string, unknown>> } {
+  if (!stdout) return { nextOffset: 0, events: [] };
+  let cursor = Math.max(0, Math.min(offset, stdout.length));
+  if (cursor > 0 && stdout[cursor - 1] !== "\n") {
+    const nextBreak = stdout.indexOf("\n", cursor);
+    if (nextBreak < 0) {
+      return { nextOffset: cursor, events: [] };
+    }
+    cursor = nextBreak + 1;
+  }
+  const events: Array<Record<string, unknown>> = [];
+  let scan = cursor;
+  while (scan < stdout.length) {
+    const nextBreak = stdout.indexOf("\n", scan);
+    if (nextBreak < 0) break;
+    const line = stdout.slice(scan, nextBreak).trim();
+    scan = nextBreak + 1;
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const event = asRecord(parsed);
+    if (event) events.push(event);
+  }
+  return { nextOffset: scan, events };
+}
+
+function appendCodexStdoutChunk(state: SessionRunStreamState, chunk: string) {
+  if (!chunk) return;
+  state.stdout = `${state.stdout}${chunk}`;
+  if (state.stdout.length > 220000) {
+    const trim = state.stdout.length - 220000;
+    state.stdout = state.stdout.slice(trim);
+    state.eventParseOffset = Math.max(0, state.eventParseOffset - trim);
+  }
+}
+
 function extractAssistantTextFromJob(job: RunJobRecord): string {
   const response = job.response;
-  if (!response || !("targets" in response) || !Array.isArray(response.targets) || response.targets.length === 0) {
+  if (
+    !response ||
+    !("targets" in response) ||
+    !Array.isArray(response.targets) ||
+    response.targets.length === 0
+  ) {
     return "";
   }
   const targetMessages: string[] = [];
@@ -257,7 +900,9 @@ function extractAssistantTextFromJob(job: RunJobRecord): string {
   for (const target of response.targets) {
     const stdout = target?.result?.stdout;
     if (typeof stdout !== "string" || !stdout.trim()) continue;
-    const assistantText = parseCodexAssistantTextFromStdout(stdout);
+    const assistantText =
+      parseCodexAssistantTextFromStdout(stdout, false) ||
+      parseCodexAssistantTextFromStdout(stdout, true);
     if (!assistantText) continue;
     if (multiTarget) {
       const hostName = target.host?.name?.trim() || target.host?.id || "target";
@@ -271,8 +916,10 @@ function extractAssistantTextFromJob(job: RunJobRecord): string {
 
 function jobHasTargetFailures(job: RunJobRecord): boolean {
   const response = job.response;
-  if (!response || !("summary" in response) || !("targets" in response)) return false;
-  const failedCount = typeof response.summary?.failed === "number" ? response.summary.failed : 0;
+  if (!response || !("summary" in response) || !("targets" in response))
+    return false;
+  const failedCount =
+    typeof response.summary?.failed === "number" ? response.summary.failed : 0;
   if (failedCount > 0) return true;
   if (!Array.isArray(response.targets)) return false;
   return response.targets.some((target) => target?.ok === false);
@@ -280,7 +927,8 @@ function jobHasTargetFailures(job: RunJobRecord): boolean {
 
 function summarizeTargetFailures(job: RunJobRecord): string {
   const response = job.response;
-  if (!response || !("targets" in response) || !Array.isArray(response.targets)) return "";
+  if (!response || !("targets" in response) || !Array.isArray(response.targets))
+    return "";
   const lines: string[] = [];
   for (const target of response.targets) {
     if (target?.ok !== false) continue;
@@ -288,7 +936,10 @@ function summarizeTargetFailures(job: RunJobRecord): string {
     const parts = [`${hostName} failed`];
     if (target.error) parts.push(`error=${target.error}`);
     if (target.error_hint) parts.push(`hint=${target.error_hint}`);
-    if (typeof target.result?.stderr === "string" && target.result.stderr.trim()) {
+    if (
+      typeof target.result?.stderr === "string" &&
+      target.result.stderr.trim()
+    ) {
       parts.push(`stderr=${clipStreamText(target.result.stderr.trim(), 1000)}`);
     }
     lines.push(parts.join(" "));
@@ -309,6 +960,101 @@ function formatDateTime(ts: string | undefined): string {
   return d.toLocaleString();
 }
 
+function projectTitleFromPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return "Untitled Project";
+  const segments = trimmed.split("/").filter((part) => part.trim() !== "");
+  const tail = segments[segments.length - 1];
+  return tail?.trim() || trimmed;
+}
+
+function resolveProjectTitle(path: string, title?: string): string {
+  const explicit = title?.trim() ?? "";
+  if (explicit) return explicit;
+  return projectTitleFromPath(path);
+}
+
+function firstImageFile(
+  source: FileList | File[] | null | undefined,
+): File | null {
+  if (!source) return null;
+  const files = Array.from(source);
+  for (const file of files) {
+    if (file.type.toLowerCase().startsWith("image/")) {
+      return file;
+    }
+  }
+  return null;
+}
+
+function dataTransferHasImage(data: DataTransfer | null | undefined): boolean {
+  if (!data) return false;
+  const itemTypes = Array.from(data.items ?? []).map((item) =>
+    item.type.toLowerCase(),
+  );
+  if (itemTypes.some((type) => type.startsWith("image/"))) return true;
+  return Boolean(firstImageFile(data.files));
+}
+
+function normalizeSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+type MessageSegment =
+  | {
+      kind: "text";
+      content: string;
+    }
+  | {
+      kind: "code";
+      lang: string;
+      content: string;
+    };
+
+function parseMessageSegments(raw: string): MessageSegment[] {
+  const body = raw ?? "";
+  if (!body.trim()) {
+    return [{ kind: "text", content: "" }];
+  }
+  const fencePattern = /```([^\n`]*)\n([\s\S]*?)```/g;
+  const segments: MessageSegment[] = [];
+  let cursor = 0;
+  for (const match of body.matchAll(fencePattern)) {
+    const start = match.index ?? 0;
+    if (start > cursor) {
+      const text = body.slice(cursor, start);
+      if (text.length > 0) {
+        segments.push({ kind: "text", content: text });
+      }
+    }
+    const lang = (match[1] ?? "").trim();
+    const code = (match[2] ?? "").replace(/\n$/, "");
+    segments.push({ kind: "code", lang, content: code });
+    cursor = start + match[0].length;
+  }
+  if (cursor < body.length) {
+    const tail = body.slice(cursor);
+    if (tail.length > 0) {
+      segments.push({ kind: "text", content: tail });
+    }
+  }
+  if (segments.length === 0) {
+    segments.push({ kind: "text", content: body });
+  }
+  return segments;
+}
+
+function shouldCollapseMessageBody(raw: string): boolean {
+  if (!raw.trim()) return false;
+  const lines = raw.split(/\r?\n/);
+  if (lines.length > MESSAGE_COLLAPSE_LINE_LIMIT) return true;
+  return raw.length > 7000;
+}
+
 function statusTone(status: string): "ok" | "warn" | "err" {
   if (status === "succeeded") return "ok";
   if (status === "failed" || status === "canceled") return "err";
@@ -323,14 +1069,114 @@ function modeToHash(mode: AppMode): string {
   return mode === "ops" ? "#/ops" : "#/session";
 }
 
+function streamHealthTone(
+  state: SessionStreamHealthState,
+): "ok" | "warn" | "error" {
+  if (state === "live") return "ok";
+  if (state === "error") return "error";
+  if (state === "offline") return "warn";
+  return "warn";
+}
+
+function streamHealthCopy(
+  state: SessionStreamHealthState,
+  retries: number,
+): string {
+  if (state === "live") return "live";
+  if (state === "connecting") return "connecting";
+  if (state === "reconnecting")
+    return retries > 0 ? `reconnecting (${retries})` : "reconnecting";
+  if (state === "error")
+    return retries > 0 ? `stream error (${retries})` : "stream error";
+  return "offline";
+}
+
+function splitCSVValues(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+}
+
+function formatCodexPlatformResult(result: CodexPlatformResult | null): string {
+  if (!result) return "No command executed yet.";
+  const lines: string[] = [];
+  lines.push(`operation: ${result.operation}`);
+  lines.push(`status: ${result.ok ? "ok" : "error"}`);
+  const command = Array.isArray(result.command)
+    ? result.command.join(" ")
+    : "";
+  if (command) lines.push(`command: ${command}`);
+  if (result.workdir) lines.push(`workdir: ${result.workdir}`);
+  if (result.error) lines.push(`error: ${result.error}`);
+  if (result.error_hint) lines.push(`hint: ${result.error_hint}`);
+
+  const stdout = result.result?.stdout?.trim() ?? "";
+  const stderr = result.result?.stderr?.trim() ?? "";
+  if (stdout) {
+    lines.push("");
+    lines.push("[stdout]");
+    lines.push(stdout);
+  }
+  if (stderr) {
+    lines.push("");
+    lines.push("[stderr]");
+    lines.push(stderr);
+  }
+  if (typeof result.json !== "undefined") {
+    lines.push("");
+    lines.push("[json]");
+    try {
+      lines.push(JSON.stringify(result.json, null, 2));
+    } catch {
+      lines.push(String(result.json));
+    }
+  }
+  return lines.join("\n").trim();
+}
+
 export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
-  const [tokenInput, setTokenInput] = useState<string>(() => localStorage.getItem(TOKEN_KEY) ?? "");
+  const [tokenInput, setTokenInput] = useState<string>(
+    () => localStorage.getItem(TOKEN_KEY) ?? "",
+  );
   const [authError, setAuthError] = useState("");
   const [appMode, setAppMode] = useState<AppMode>(() =>
-    typeof window === "undefined" ? "session" : modeFromHash(window.location.hash)
+    typeof window === "undefined"
+      ? "session"
+      : modeFromHash(window.location.hash),
   );
+  const [platformHostID, setPlatformHostID] = useState("");
+  const [platformBusySection, setPlatformBusySection] = useState<
+    "" | "login" | "mcp" | "cloud"
+  >("");
+  const [platformNotice, setPlatformNotice] = useState("");
+  const [platformLoginResult, setPlatformLoginResult] =
+    useState<CodexPlatformResult | null>(null);
+  const [platformMCPAction, setPlatformMCPAction] =
+    useState<CodexPlatformMCPAction>("list");
+  const [platformMCPName, setPlatformMCPName] = useState("");
+  const [platformMCPURL, setPlatformMCPURL] = useState("");
+  const [platformMCPCommand, setPlatformMCPCommand] = useState("");
+  const [platformMCPEnvCSV, setPlatformMCPEnvCSV] = useState("");
+  const [platformMCPBearerTokenEnvVar, setPlatformMCPBearerTokenEnvVar] =
+    useState("");
+  const [platformMCPScopeCSV, setPlatformMCPScopeCSV] = useState("");
+  const [platformMCPResult, setPlatformMCPResult] =
+    useState<CodexPlatformResult | null>(null);
+  const [platformCloudAction, setPlatformCloudAction] =
+    useState<CodexPlatformCloudAction>("list");
+  const [platformCloudTaskID, setPlatformCloudTaskID] = useState("");
+  const [platformCloudEnvID, setPlatformCloudEnvID] = useState("");
+  const [platformCloudQuery, setPlatformCloudQuery] = useState("");
+  const [platformCloudAttempts, setPlatformCloudAttempts] = useState("1");
+  const [platformCloudBranch, setPlatformCloudBranch] = useState("");
+  const [platformCloudLimit, setPlatformCloudLimit] = useState("20");
+  const [platformCloudCursor, setPlatformCloudCursor] = useState("");
+  const [platformCloudAttempt, setPlatformCloudAttempt] = useState("1");
+  const [platformCloudResult, setPlatformCloudResult] =
+    useState<CodexPlatformResult | null>(null);
 
   const ops = useOpsDomain();
   const session = useSessionDomain();
@@ -390,7 +1236,7 @@ export function App() {
     setOpsAuditMethodFilter,
     opsAuditStatusFilter,
     setOpsAuditStatusFilter,
-    resetOpsDomain
+    resetOpsDomain,
   } = ops;
 
   const {
@@ -412,49 +1258,125 @@ export function App() {
     upsertAssistantStreamEntry,
     finalizeAssistantStreamEntry,
     createThread,
+    forkThread,
+    removeThread,
     switchThreadByOffset,
     setThreadModel,
+    setThreadCodexMode,
+    setThreadResumeLast,
+    setThreadResumeSessionID,
+    setThreadReviewUncommitted,
+    setThreadReviewBase,
+    setThreadReviewCommit,
+    setThreadReviewTitle,
     setThreadSandbox,
+    setThreadApprovalPolicy,
+    setThreadWebSearch,
+    addThreadAddDir,
+    removeThreadAddDir,
+    setThreadSkipGitRepoCheck,
+    setThreadEphemeral,
+    setThreadJSONOutput,
     addThreadImagePath,
     removeThreadImagePath,
     setThreadJobState,
     setThreadUnread,
     setThreadTitle,
+    setThreadPinned,
     runningThreadJobs,
     syncProjectsFromDiscovery,
-    resetSessionDomain
+    resetSessionDomain,
   } = session;
 
-  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
-    typeof Notification === "undefined" ? "denied" : Notification.permission
-  );
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermission>(
+      typeof Notification === "undefined" ? "denied" : Notification.permission,
+    );
   const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
+  const [sessionAlertsExpanded, setSessionAlertsExpanded] = useState(true);
+  const [sessionStreamHealthByID, setSessionStreamHealthByID] = useState<
+    Record<string, SessionStreamHealth>
+  >({});
   const [submittingThreadID, setSubmittingThreadID] = useState("");
+  const [cancelingThreadID, setCancelingThreadID] = useState("");
+  const [deletingThreadID, setDeletingThreadID] = useState("");
+  const [deletingProjectID, setDeletingProjectID] = useState("");
+  const [upsertingProjectID, setUpsertingProjectID] = useState("");
   const [sessionModelDefault, setSessionModelDefault] = useState("");
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
+  const [sourceProjectIDs, setSourceProjectIDs] = useState<string[]>([]);
+  const [projectComposerOpen, setProjectComposerOpen] = useState(false);
+  const [projectFormHostID, setProjectFormHostID] = useState("");
+  const [projectFormPath, setProjectFormPath] = useState("");
+  const [projectFormTitle, setProjectFormTitle] = useState("");
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
+  const [sessionAdvancedOpen, setSessionAdvancedOpen] = useState(false);
+  const [addDirDraft, setAddDirDraft] = useState("");
+  const [composerDropActive, setComposerDropActive] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
+  const [commandPaletteCursor, setCommandPaletteCursor] = useState(0);
+  const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
+  const [projectFilter, setProjectFilter] = useState(sessionTreePrefs.projectFilter);
+  const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
+    sessionTreePrefs.collapsedHostIDs,
+  );
+  const [treeCursorSessionID, setTreeCursorSessionID] = useState("");
+  const [expandedMessageIDs, setExpandedMessageIDs] = useState<string[]>([]);
+  const [copiedCodeKey, setCopiedCodeKey] = useState("");
 
   const timelineViewportRef = useRef<HTMLElement | null>(null);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
+  const timelineStickToBottomRef = useRef(true);
+  const timelineForceStickRef = useRef(false);
+  const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const commandPaletteInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const sessionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const composerDragDepthRef = useRef(0);
+  const copyResetTimerRef = useRef<number | null>(null);
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
   const jobNoTextFinalizeRetriesRef = useRef<Map<string, number>>(new Map());
-  const sessionEventCursorRef = useRef<Map<string, number>>(new Map());
-  const sessionStreamStateRef = useRef<Map<string, { controller: AbortController; ready: boolean; lastEventAt: number }>>(new Map());
-  const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(new Map());
+  const sessionEventCursorRef = useRef<Map<string, number>>(
+    loadPersistedSessionEventCursors(),
+  );
+  const sessionStreamStateRef = useRef<
+    Map<
+      string,
+      {
+        controller: AbortController;
+        ready: boolean;
+        lastEventAt: number;
+        suppressReplaySurface: boolean;
+      }
+    >
+  >(new Map());
+  const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(
+    new Map(),
+  );
   const streamAuthTokenRef = useRef("");
+  const completionAlertCutoffMSRef = useRef<number>(Date.now());
+  const completedRunsHydratedRef = useRef(false);
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
+  const runningSessionIDsRef = useRef<Set<string>>(new Set());
+  const previousAlertCountRef = useRef(0);
   const tokenRef = useRef(token);
 
   const activeRuntime = useMemo(
-    () => runtimes.find((runtime) => runtime.name === selectedRuntime) ?? runtimes[0] ?? null,
-    [runtimes, selectedRuntime]
+    () =>
+      runtimes.find((runtime) => runtime.name === selectedRuntime) ??
+      runtimes[0] ??
+      null,
+    [runtimes, selectedRuntime],
   );
+  const activeSessionStreamHealth = activeThreadID
+    ? sessionStreamHealthByID[activeThreadID]
+    : undefined;
   const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
   const threadWorkspaceMap = useMemo(() => {
     const out = new Map<string, string>();
@@ -474,16 +1396,68 @@ export function App() {
     }
     return out;
   }, [workspaces]);
-  const allSessionIDs = useMemo(() => {
-    const ids: string[] = [];
+  const sessionStreamTargetIDs = useMemo(() => {
+    type StreamTarget = {
+      id: string;
+      priority: number;
+      updatedAtMS: number;
+    };
+    const byID = new Map<string, StreamTarget>();
+    const touch = (idRaw: string, priority: number, updatedAtRaw: string) => {
+      const id = idRaw.trim();
+      if (!id) return;
+      const parsed = Date.parse(updatedAtRaw);
+      const updatedAtMS = Number.isFinite(parsed) ? parsed : 0;
+      const existing = byID.get(id);
+      if (
+        !existing ||
+        priority < existing.priority ||
+        (priority === existing.priority && updatedAtMS > existing.updatedAtMS)
+      ) {
+        byID.set(id, { id, priority, updatedAtMS });
+      }
+    };
+
     for (const workspace of workspaces) {
       for (const thread of workspace.sessions) {
-        const id = thread.id.trim();
-        if (id) ids.push(id);
+        const priority = thread.id === activeThreadID
+          ? 0
+          : thread.activeJobID.trim()
+            ? 1
+            : thread.pinned
+              ? 2
+              : thread.unreadDone
+                ? 3
+                : 9;
+        touch(thread.id, priority, thread.updatedAt);
       }
     }
-    return ids;
-  }, [workspaces]);
+
+    const ordered = Array.from(byID.values()).sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+      if (left.updatedAtMS !== right.updatedAtMS) {
+        return right.updatedAtMS - left.updatedAtMS;
+      }
+      return left.id.localeCompare(right.id);
+    });
+
+    const pinned = ordered.filter((item) => item.priority <= 3);
+    if (pinned.length >= MAX_SESSION_STREAMS) {
+      return pinned.slice(0, MAX_SESSION_STREAMS).map((item) => item.id);
+    }
+
+    const chosen = [...pinned];
+    const chosenIDs = new Set(chosen.map((item) => item.id));
+    for (const item of ordered) {
+      if (chosenIDs.has(item.id)) continue;
+      chosen.push(item);
+      chosenIDs.add(item.id);
+      if (chosen.length >= MAX_SESSION_STREAMS) break;
+    }
+    return chosen.map((item) => item.id);
+  }, [workspaces, activeThreadID]);
   const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
   const sessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
     const hostLookup = new Map<string, Host>();
@@ -495,27 +1469,43 @@ export function App() {
     for (const workspace of workspaces) {
       const hostID = workspace.hostID?.trim() || "unknown";
       const host = hostLookup.get(hostID);
-      const group =
-        groups.get(hostID) ??
-        {
-          hostID,
-          hostName: workspace.hostName || host?.name || hostID,
-          hostAddress: host ? `${host.user ? `${host.user}@` : ""}${host.host}:${host.port}` : "",
-          projects: []
-        };
+      const group = groups.get(hostID) ?? {
+        hostID,
+        hostName: workspace.hostName || host?.name || hostID,
+        hostAddress: host
+          ? `${host.user ? `${host.user}@` : ""}${host.host}:${host.port}`
+          : "",
+        projects: [],
+      };
 
       const project: SessionTreeProject = {
         id: workspace.id,
         hostID,
+        title: resolveProjectTitle(workspace.path, workspace.title),
         path: workspace.path,
-        sessions: workspace.sessions.map((sessionItem) => ({
-          id: sessionItem.id,
-          title: sessionItem.title,
-          activeJobID: sessionItem.activeJobID,
-          unreadDone: sessionItem.unreadDone,
-          lastJobStatus: sessionItem.lastJobStatus,
-          timelineSize: sessionItem.timeline.length
-        }))
+        sessions: [...workspace.sessions]
+          .sort((a, b) => {
+            if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+            if (a.unreadDone !== b.unreadDone) return a.unreadDone ? -1 : 1;
+            const aRunning = a.activeJobID.trim() !== "";
+            const bRunning = b.activeJobID.trim() !== "";
+            if (aRunning !== bRunning) return aRunning ? -1 : 1;
+            const aTS = Date.parse(a.updatedAt);
+            const bTS = Date.parse(b.updatedAt);
+            const safeA = Number.isFinite(aTS) ? aTS : 0;
+            const safeB = Number.isFinite(bTS) ? bTS : 0;
+            if (safeA !== safeB) return safeB - safeA;
+            return a.title.localeCompare(b.title);
+          })
+          .map((sessionItem) => ({
+            id: sessionItem.id,
+            title: sessionItem.title,
+            pinned: Boolean(sessionItem.pinned),
+            activeJobID: sessionItem.activeJobID,
+            unreadDone: sessionItem.unreadDone,
+            lastJobStatus: sessionItem.lastJobStatus,
+            updatedAt: sessionItem.updatedAt,
+          })),
       };
 
       group.projects.push(project);
@@ -524,10 +1514,102 @@ export function App() {
 
     return Array.from(groups.values()).map((group) => ({
       ...group,
-      projects: group.projects.sort((a, b) => a.path.localeCompare(b.path))
+      projects: group.projects.sort((a, b) => {
+        const titleDiff = a.title.localeCompare(b.title);
+        if (titleDiff !== 0) return titleDiff;
+        return a.path.localeCompare(b.path);
+      }),
     }));
   }, [hosts, workspaces]);
-  const activeThreadBusy = Boolean(activeThread?.activeJobID) || (activeThread ? submittingThreadID === activeThread.id : false);
+  const sourceProjectIDSet = useMemo(
+    () =>
+      new Set(
+        sourceProjectIDs
+          .map((id) => id.trim())
+          .filter((id) => id !== ""),
+      ),
+    [sourceProjectIDs],
+  );
+  const filteredSessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
+    const query = projectFilter.trim().toLowerCase();
+    if (!query) return sessionTreeHosts;
+    const nextHosts: SessionTreeHost[] = [];
+    for (const host of sessionTreeHosts) {
+      const hostText = `${host.hostName} ${host.hostAddress}`.toLowerCase();
+      if (hostText.includes(query)) {
+        nextHosts.push(host);
+        continue;
+      }
+      const projects: SessionTreeProject[] = [];
+      for (const project of host.projects) {
+        const projectText = `${project.title} ${project.path}`.toLowerCase();
+        if (projectText.includes(query)) {
+          projects.push(project);
+          continue;
+        }
+        const sessions = project.sessions.filter((sessionItem) => {
+          const text = `${sessionItem.title} ${sessionItem.id}`.toLowerCase();
+          return text.includes(query);
+        });
+        if (sessions.length === 0) continue;
+        projects.push({
+          ...project,
+          sessions,
+        });
+      }
+      if (projects.length === 0) continue;
+      nextHosts.push({
+        ...host,
+        projects,
+      });
+    }
+    return nextHosts;
+  }, [projectFilter, sessionTreeHosts]);
+  const visibleTreeSessionIDs = useMemo(() => {
+    const out: string[] = [];
+    for (const hostNode of filteredSessionTreeHosts) {
+      if (collapsedHostIDs.includes(hostNode.hostID)) continue;
+      for (const projectNode of hostNode.projects) {
+        for (const sessionNode of projectNode.sessions) {
+          out.push(sessionNode.id);
+        }
+      }
+    }
+    return out;
+  }, [collapsedHostIDs, filteredSessionTreeHosts]);
+  const activeThreadBusy =
+    Boolean(activeThread?.activeJobID) ||
+    (activeThread ? submittingThreadID === activeThread.id : false) ||
+    (activeThread ? deletingThreadID === activeThread.id : false) ||
+    (activeThread ? cancelingThreadID === activeThread.id : false);
+  const activeThreadMode: CodexSessionMode = activeThread?.codexMode ?? "exec";
+  const isResumeMode = activeThreadMode === "resume";
+  const isReviewMode = activeThreadMode === "review";
+  const isExecMode = activeThreadMode === "exec";
+  const activeThreadRunID = activeThread?.activeJobID.trim() ?? "";
+  const hasRegeneratePrompt =
+    activeThread !== null &&
+    isExecMode &&
+    lastUserPromptFromTimeline(activeThread.timeline).trim() !== "";
+  const activeThreadStatusCopy = activeThreadBusy
+    ? "Codex is thinking..."
+    : activeThread?.lastJobStatus === "failed"
+      ? "Last response failed."
+      : activeThread?.lastJobStatus === "canceled"
+        ? "Last response interrupted."
+        : "";
+  const activeStreamState: SessionStreamHealthState = activeSessionStreamHealth
+    ? activeSessionStreamHealth.state
+    : activeThreadID
+      ? "connecting"
+      : "offline";
+  const activeStreamRetries = activeSessionStreamHealth?.retries ?? 0;
+  const activeStreamCopy = streamHealthCopy(activeStreamState, activeStreamRetries);
+  const activeStreamTone = streamHealthTone(activeStreamState);
+  const activeStreamLastError =
+    activeSessionStreamHealth?.lastError.trim() ?? "";
+  const canReconnectActiveStream =
+    authPhase === "ready" && token.trim() !== "" && activeThreadID.trim() !== "";
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
@@ -549,19 +1631,184 @@ export function App() {
     return out;
   }, [sessionModelDefault, sessionModelOptions, activeThreadModelValue]);
   const hasSessionModelChoices = sessionModelChoices.length > 0;
+  const commandPaletteActions = useMemo<CommandPaletteAction[]>(() => {
+    if (appMode !== "session") return [];
+    const actions: CommandPaletteAction[] = [];
+    const pushAction = (
+      id: string,
+      label: string,
+      detail: string,
+      extraSearch: string,
+      run: () => void,
+    ) => {
+      actions.push({
+        id,
+        label,
+        detail,
+        searchText: normalizeSearchText(`${label} ${detail} ${extraSearch}`),
+        run,
+      });
+    };
+
+    pushAction(
+      "composer:focus",
+      "Focus Prompt",
+      "Cursor to composer",
+      "focus prompt composer input",
+      () => {
+        promptInputRef.current?.focus();
+      },
+    );
+    pushAction(
+      "session:new",
+      "New Session",
+      activeWorkspace?.title?.trim() || "current project",
+      "create add session",
+      () => {
+        createThreadAndFocus();
+      },
+    );
+    if (threads.length > 1) {
+      pushAction(
+        "session:previous",
+        "Previous Session",
+        "Switch to previous",
+        "session prev",
+        () => {
+          switchThreadByOffset(-1);
+        },
+      );
+      pushAction(
+        "session:next",
+        "Next Session",
+        "Switch to next",
+        "session next",
+        () => {
+          switchThreadByOffset(1);
+        },
+      );
+    }
+    if (activeThreadID.trim()) {
+      pushAction(
+        "session:fork",
+        "Fork Session",
+        activeThread?.title || "current session",
+        "fork branch duplicate session",
+        () => {
+          if (!activeThread) return;
+          forkThread(activeThread.id);
+        },
+      );
+      pushAction(
+        "session:pin",
+        activeThread?.pinned ? "Unpin Session" : "Pin Session",
+        activeThread?.title || "current session",
+        "pin favorite",
+        () => {
+          if (!activeThread) return;
+          setThreadPinned(activeThread.id, !activeThread.pinned);
+        },
+      );
+      if (!activeThreadBusy) {
+        pushAction(
+          "session:archive",
+          "Archive Session",
+          activeThread?.title || "current session",
+          "delete remove archive",
+          () => {
+            void onArchiveActiveSession();
+          },
+        );
+      }
+      pushAction(
+        "session:reconnect",
+        "Reconnect Stream",
+        activeThread?.title || "current session",
+        "stream reconnect",
+        () => {
+          onReconnectActiveStream();
+        },
+      );
+    }
+
+    for (const workspace of workspaces) {
+      const projectTitle = resolveProjectTitle(workspace.path, workspace.title);
+      pushAction(
+        `project:${workspace.id}`,
+        `Open Project: ${projectTitle}`,
+        `${workspace.hostName} · ${workspace.path}`,
+        "project workspace directory",
+        () => {
+          const preferredSession = workspace.activeSessionID.trim();
+          if (preferredSession) {
+            activateThread(preferredSession);
+            return;
+          }
+          setActiveWorkspaceID(workspace.id);
+        },
+      );
+    }
+
+    if (activeThread) {
+      for (const modelName of sessionModelChoices) {
+        const modelDetail =
+          modelName === sessionModelDefault
+            ? `${modelName} (default)`
+            : modelName;
+        pushAction(
+          `model:${modelName}`,
+          `Model: ${modelName}`,
+          modelDetail,
+          "model llm codex",
+          () => {
+            setThreadModel(activeThread.id, modelName);
+          },
+        );
+      }
+    }
+
+    return actions;
+  }, [
+    appMode,
+    activeWorkspace?.title,
+    threads.length,
+    activeThreadID,
+    activeThread,
+    activeThreadBusy,
+    workspaces,
+    sessionModelChoices,
+    sessionModelDefault,
+    setActiveWorkspaceID,
+    setThreadModel,
+    setThreadPinned,
+    forkThread,
+    switchThreadByOffset,
+    activateThread,
+  ]);
+  const filteredCommandPaletteActions = useMemo(() => {
+    const query = normalizeSearchText(commandPaletteQuery);
+    if (!query) return commandPaletteActions.slice(0, 48);
+    return commandPaletteActions
+      .filter((action) => action.searchText.includes(query))
+      .slice(0, 48);
+  }, [commandPaletteActions, commandPaletteQuery]);
   const activeTimelineTail = activeTimeline[activeTimeline.length - 1];
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
     const total = activeJob.total_hosts ?? 0;
     if (total <= 0) return isJobActive(activeJob) ? 0 : 100;
-    const done = (activeJob.succeeded_hosts ?? 0) + (activeJob.failed_hosts ?? 0);
+    const done =
+      (activeJob.succeeded_hosts ?? 0) + (activeJob.failed_hosts ?? 0);
     if (!isJobActive(activeJob)) return 100;
     return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
   }, [activeJob]);
 
   const filteredOpsJobs = useMemo(() => {
-    const byStatus = opsJobStatusFilter === "all" ? jobs : jobs.filter((job) => job.status === opsJobStatusFilter);
+    const byStatus =
+      opsJobStatusFilter === "all"
+        ? jobs
+        : jobs.filter((job) => job.status === opsJobStatusFilter);
     if (opsJobTypeFilter === "all") return byStatus;
     return byStatus.filter((job) => job.type === opsJobTypeFilter);
   }, [jobs, opsJobStatusFilter, opsJobTypeFilter]);
@@ -570,23 +1817,42 @@ export function App() {
     const query = hostFilter.trim().toLowerCase();
     if (!query) return hosts;
     return hosts.filter((host) => {
-      const text = `${host.name} ${host.host} ${host.user} ${host.workspace ?? ""} ${host.connection_mode ?? "ssh"}`.toLowerCase();
+      const text =
+        `${host.name} ${host.host} ${host.user} ${host.workspace ?? ""} ${host.connection_mode ?? "ssh"}`.toLowerCase();
       return text.includes(query);
     });
   }, [hosts, hostFilter]);
+  const platformHost = useMemo(
+    () => hosts.find((host) => host.id === platformHostID) ?? null,
+    [hosts, platformHostID],
+  );
 
   const filteredOpsRuns = useMemo(() => {
     if (opsRunStatusFilter === "all") return runs;
-    if (opsRunStatusFilter === "ok") return runs.filter((run) => run.status_code < 400);
+    if (opsRunStatusFilter === "ok")
+      return runs.filter((run) => run.status_code < 400);
     return runs.filter((run) => run.status_code >= 400);
   }, [runs, opsRunStatusFilter]);
 
   const filteredAuditEvents = useMemo(() => {
     return auditEvents.filter((evt) => {
-      if (opsAuditMethodFilter !== "all" && evt.method !== opsAuditMethodFilter) return false;
-      if (opsAuditStatusFilter === "2xx" && (evt.status_code < 200 || evt.status_code >= 300)) return false;
-      if (opsAuditStatusFilter === "4xx" && (evt.status_code < 400 || evt.status_code >= 500)) return false;
-      if (opsAuditStatusFilter === "5xx" && (evt.status_code < 500 || evt.status_code >= 600)) return false;
+      if (opsAuditMethodFilter !== "all" && evt.method !== opsAuditMethodFilter)
+        return false;
+      if (
+        opsAuditStatusFilter === "2xx" &&
+        (evt.status_code < 200 || evt.status_code >= 300)
+      )
+        return false;
+      if (
+        opsAuditStatusFilter === "4xx" &&
+        (evt.status_code < 400 || evt.status_code >= 500)
+      )
+        return false;
+      if (
+        opsAuditStatusFilter === "5xx" &&
+        (evt.status_code < 500 || evt.status_code >= 600)
+      )
+        return false;
       return true;
     });
   }, [auditEvents, opsAuditMethodFilter, opsAuditStatusFilter]);
@@ -595,8 +1861,38 @@ export function App() {
   const syncLabel = isRefreshing ? "syncing" : "live";
 
   useEffect(() => {
+    if (hosts.length === 0) {
+      if (platformHostID) {
+        setPlatformHostID("");
+      }
+      return;
+    }
+    if (platformHostID && hosts.some((host) => host.id === platformHostID)) {
+      return;
+    }
+    const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
+    if (workspaceHostID && hosts.some((host) => host.id === workspaceHostID)) {
+      setPlatformHostID(workspaceHostID);
+      return;
+    }
+    setPlatformHostID(hosts[0].id);
+  }, [hosts, activeWorkspace?.hostID, platformHostID]);
+
+  useEffect(() => {
     tokenRef.current = token;
   }, [token]);
+
+  useEffect(() => {
+    if (completedRunsHydratedRef.current) return;
+    completedRunsHydratedRef.current = true;
+    const persisted = loadPersistedCompletedRuns();
+    if (persisted.size === 0) return;
+    for (const runID of persisted) {
+      completedJobsRef.current.add(runID);
+    }
+    trimCompletedRunsStore();
+    persistCompletedRuns(completedJobsRef.current);
+  }, [completedJobsRef]);
 
   useEffect(() => {
     activeThreadIDRef.current = activeThreadID;
@@ -610,14 +1906,403 @@ export function App() {
     threadWorkspaceMapRef.current = threadWorkspaceMap;
   }, [threadWorkspaceMap]);
 
+  useEffect(() => {
+    const running = new Set<string>();
+    const validSessionIDs = new Set<string>();
+    for (const workspace of workspaces) {
+      for (const sessionItem of workspace.sessions) {
+        validSessionIDs.add(sessionItem.id);
+        if (sessionItem.activeJobID.trim()) {
+          running.add(sessionItem.id);
+        }
+      }
+    }
+    let cursorChanged = false;
+    for (const sessionID of Array.from(sessionEventCursorRef.current.keys())) {
+      if (validSessionIDs.has(sessionID)) continue;
+      sessionEventCursorRef.current.delete(sessionID);
+      cursorChanged = true;
+    }
+    if (cursorChanged) {
+      persistSessionEventCursors(sessionEventCursorRef.current);
+    }
+    runningSessionIDsRef.current = running;
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (sessionAlerts.length > previousAlertCountRef.current) {
+      setSessionAlertsExpanded(true);
+    }
+    previousAlertCountRef.current = sessionAlerts.length;
+  }, [sessionAlerts.length]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const title = activeThread?.title.trim() || "Session";
+    document.title = `${title} · Codex Control App`;
+  }, [activeThread?.title]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const runningSessionIDs = new Set<string>();
+      for (const workspace of workspaces) {
+        for (const thread of workspace.sessions) {
+          if (thread.activeJobID.trim()) {
+            runningSessionIDs.add(thread.id);
+          }
+        }
+      }
+      for (const [sessionID, state] of sessionStreamStateRef.current.entries()) {
+        if (!runningSessionIDs.has(sessionID)) continue;
+        if (state.lastEventAt <= 0) continue;
+        if (now - state.lastEventAt < 16_000) continue;
+        updateSessionStreamHealth(sessionID, "reconnecting", {
+          lastEventAt: state.lastEventAt,
+          lastError: "stream idle, retrying",
+          throttleMS: 0,
+        });
+      }
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const payload: SessionTreePrefs = {
+      projectFilter,
+      collapsedHostIDs,
+    };
+    window.localStorage.setItem(SESSION_TREE_PREFS_KEY, JSON.stringify(payload));
+  }, [projectFilter, collapsedHostIDs]);
+
+  useEffect(() => {
+    if (sessionTreeHosts.length === 0) return;
+    const validHostIDs = new Set(sessionTreeHosts.map((item) => item.hostID));
+    setCollapsedHostIDs((prev) => {
+      const next = prev.filter((hostID) => validHostIDs.has(hostID));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [sessionTreeHosts]);
+
+  useEffect(() => {
+    if (!projectComposerOpen) return;
+    const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
+    if (
+      !projectFormHostID ||
+      !hosts.some((host) => host.id === projectFormHostID)
+    ) {
+      setProjectFormHostID(fallbackHostID);
+    }
+    if (!projectFormPath.trim()) {
+      setProjectFormPath(activeWorkspace?.path?.trim() || "/home/ecs-user");
+    }
+  }, [
+    projectComposerOpen,
+    projectFormHostID,
+    projectFormPath,
+    activeWorkspace?.hostID,
+    activeWorkspace?.path,
+    hosts,
+  ]);
+
+  useEffect(() => {
+    if (activeThreadID.trim()) {
+      setTreeCursorSessionID(activeThreadID);
+    }
+  }, [activeThreadID]);
+
+  useEffect(() => {
+    composerDragDepthRef.current = 0;
+    setComposerDropActive(false);
+    setAddDirDraft("");
+    setSessionAdvancedOpen(false);
+  }, [activeThreadID]);
+
+  useEffect(() => {
+    if (visibleTreeSessionIDs.length === 0) {
+      setTreeCursorSessionID("");
+      return;
+    }
+    setTreeCursorSessionID((prev) =>
+      prev && visibleTreeSessionIDs.includes(prev) ? prev : visibleTreeSessionIDs[0],
+    );
+  }, [visibleTreeSessionIDs]);
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
   function createThreadAndFocus() {
     createThread();
     promptInputRef.current?.focus();
   }
 
+  function openCommandPalette(initialQuery = "") {
+    if (appMode !== "session") return;
+    setCommandPaletteQuery(initialQuery);
+    setCommandPaletteCursor(0);
+    setCommandPaletteOpen(true);
+  }
+
+  function closeCommandPalette(options?: { focusComposer?: boolean }) {
+    setCommandPaletteOpen(false);
+    setCommandPaletteQuery("");
+    setCommandPaletteCursor(0);
+    if (options?.focusComposer === false) return;
+    window.requestAnimationFrame(() => {
+      promptInputRef.current?.focus();
+    });
+  }
+
+  function runCommandPaletteAction(index: number) {
+    const action = filteredCommandPaletteActions[index];
+    if (!action) return;
+    action.run();
+    closeCommandPalette({ focusComposer: false });
+  }
+
+  function onCommandPaletteKeyDown(
+    event: ReactKeyboardEvent<HTMLInputElement>,
+  ) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCommandPalette();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setCommandPaletteCursor((prev) => {
+        if (filteredCommandPaletteActions.length === 0) return 0;
+        return (prev + 1) % filteredCommandPaletteActions.length;
+      });
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setCommandPaletteCursor((prev) => {
+        if (filteredCommandPaletteActions.length === 0) return 0;
+        return (
+          (prev - 1 + filteredCommandPaletteActions.length) %
+          filteredCommandPaletteActions.length
+        );
+      });
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runCommandPaletteAction(commandPaletteCursor);
+    }
+  }
+
+  function onAddDirDraftSubmit() {
+    if (!activeThread) return;
+    if (activeThread.codexMode !== "exec") return;
+    const trimmed = addDirDraft.trim();
+    if (!trimmed) return;
+    addThreadAddDir(activeThread.id, trimmed);
+    setAddDirDraft("");
+  }
+
+  function openProjectComposer() {
+    const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
+    const fallbackPath = activeWorkspace?.path?.trim() || "/home/ecs-user";
+    setProjectComposerOpen(true);
+    setProjectFormHostID(fallbackHostID);
+    setProjectFormPath(fallbackPath);
+    setProjectFormTitle("");
+  }
+
+  function closeProjectComposer() {
+    setProjectComposerOpen(false);
+    setProjectFormTitle("");
+  }
+
+  function registerSessionButtonRef(
+    sessionID: string,
+    node: HTMLButtonElement | null,
+  ) {
+    if (!sessionID) return;
+    if (node) {
+      sessionButtonRefs.current.set(sessionID, node);
+      return;
+    }
+    sessionButtonRefs.current.delete(sessionID);
+  }
+
+  function moveTreeCursor(step: number) {
+    if (visibleTreeSessionIDs.length === 0) return;
+    const currentIndex = Math.max(
+      0,
+      visibleTreeSessionIDs.findIndex((id) => id === treeCursorSessionID),
+    );
+    const nextIndex =
+      (currentIndex + step + visibleTreeSessionIDs.length) %
+      visibleTreeSessionIDs.length;
+    const nextID = visibleTreeSessionIDs[nextIndex];
+    setTreeCursorSessionID(nextID);
+    const node = sessionButtonRefs.current.get(nextID);
+    node?.focus();
+  }
+
+  function onSessionTreeKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    sessionID: string,
+    pinned: boolean,
+  ) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveTreeCursor(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveTreeCursor(-1);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      const nextID = visibleTreeSessionIDs[0];
+      if (!nextID) return;
+      setTreeCursorSessionID(nextID);
+      sessionButtonRefs.current.get(nextID)?.focus();
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      const nextID = visibleTreeSessionIDs[visibleTreeSessionIDs.length - 1];
+      if (!nextID) return;
+      setTreeCursorSessionID(nextID);
+      sessionButtonRefs.current.get(nextID)?.focus();
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setTreeCursorSessionID(sessionID);
+      activateThread(sessionID);
+      return;
+    }
+    if (event.key.toLowerCase() === "p") {
+      event.preventDefault();
+      setThreadPinned(sessionID, !pinned);
+    }
+  }
+
+  function toggleMessageExpanded(entryID: string) {
+    setExpandedMessageIDs((prev) =>
+      prev.includes(entryID)
+        ? prev.filter((id) => id !== entryID)
+        : [...prev, entryID],
+    );
+  }
+
+  async function copyToClipboard(content: string, key: string) {
+    const text = content ?? "";
+    if (!text) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.focus();
+        area.select();
+        document.execCommand("copy");
+        document.body.removeChild(area);
+      }
+      setCopiedCodeKey(key);
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopiedCodeKey("");
+      }, 1500);
+    } catch {
+      setCopiedCodeKey("");
+    }
+  }
+
+  function renderTimelineEntryBody(entry: TimelineEntry) {
+    const segments = parseMessageSegments(entry.body);
+    const collapsible = shouldCollapseMessageBody(entry.body);
+    const expanded = expandedMessageIDs.includes(entry.id);
+    const showCollapsed = collapsible && !expanded;
+    const wrapperClass = `message-body${showCollapsed ? " message-body-collapsed" : ""}`;
+    const canEditAndResend =
+      entry.kind === "user" && authPhase === "ready" && token.trim() !== "";
+    return (
+      <div className={wrapperClass}>
+        {segments.map((segment, index) =>
+          segment.kind === "text" ? (
+            <pre key={`${entry.id}_text_${index}`}>{segment.content}</pre>
+          ) : (
+            <section key={`${entry.id}_code_${index}`} className="message-code-block">
+              <header className="message-code-head">
+                <span>{segment.lang || "code"}</span>
+                <button
+                  type="button"
+                  className="ghost code-copy-btn"
+                  onClick={() => void copyToClipboard(segment.content, `${entry.id}_${index}`)}
+                >
+                  {copiedCodeKey === `${entry.id}_${index}` ? "Copied" : "Copy"}
+                </button>
+              </header>
+              <pre className="message-code-pre">{segment.content}</pre>
+            </section>
+          ),
+        )}
+        {showCollapsed ? <div className="message-collapse-mask" aria-hidden="true" /> : null}
+        {collapsible ? (
+          <div className="message-collapse-actions">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => toggleMessageExpanded(entry.id)}
+            >
+              {expanded ? "Collapse" : "Expand"}
+            </button>
+          </div>
+        ) : null}
+        {canEditAndResend ? (
+          <div className="message-user-actions">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => void onEditAndResend(entry)}
+              disabled={activeThreadBusy}
+            >
+              Edit & Resend
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function toggleHostCollapsed(hostID: string) {
+    setCollapsedHostIDs((prev) =>
+      prev.includes(hostID)
+        ? prev.filter((id) => id !== hostID)
+        : [...prev, hostID],
+    );
+  }
+
   function notifySessionDone(title: string, body: string) {
     if (typeof Notification === "undefined") return;
     if (notificationPermission !== "granted") return;
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible"
+    ) {
+      return;
+    }
     try {
       const note = new Notification(title, { body, silent: false });
       window.setTimeout(() => note.close(), 6000);
@@ -626,13 +2311,98 @@ export function App() {
     }
   }
 
+  function shouldSurfaceCompletion(createdAt?: string): boolean {
+    const ts = createdAt?.trim();
+    if (!ts) return false;
+    const parsed = Date.parse(ts);
+    if (!Number.isFinite(parsed)) return false;
+    return parsed >= completionAlertCutoffMSRef.current;
+  }
+
   function pushSessionAlert(alert: Omit<SessionAlert, "id">) {
     const id = `alert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const next: SessionAlert = { id, ...alert };
-    setSessionAlerts((prev) => [...prev, next]);
-    window.setTimeout(() => {
-      setSessionAlerts((prev) => prev.filter((item) => item.id !== id));
-    }, 7000);
+    setSessionAlerts((prev) => {
+      const duplicate = prev.some(
+        (item) =>
+          item.threadID === next.threadID &&
+          item.title === next.title &&
+          item.body === next.body,
+      );
+      if (duplicate) return prev;
+      const withNext = [...prev, next];
+      if (withNext.length <= 24) return withNext;
+      return withNext.slice(withNext.length - 24);
+    });
+  }
+
+  function dismissSessionAlert(alertID: string) {
+    setSessionAlerts((prev) => prev.filter((item) => item.id !== alertID));
+  }
+
+  function clearSessionAlerts() {
+    setSessionAlerts([]);
+  }
+
+  function updateSessionStreamHealth(
+    sessionID: string,
+    state: SessionStreamHealthState,
+    options?: {
+      retries?: number;
+      lastEventAt?: number;
+      lastError?: string;
+      throttleMS?: number;
+    },
+  ) {
+    const id = sessionID.trim();
+    if (!id) return;
+    setSessionStreamHealthByID((prev) => {
+      const current = prev[id] ?? {
+        state: "offline",
+        retries: 0,
+        lastEventAt: 0,
+        updatedAt: 0,
+        lastError: "",
+      };
+      const retries = options?.retries ?? current.retries;
+      const lastEventAt = options?.lastEventAt ?? current.lastEventAt;
+      const lastError = options?.lastError ?? current.lastError;
+      const now = Date.now();
+      const throttleMS = options?.throttleMS ?? 1100;
+      const stateChanged =
+        current.state !== state ||
+        current.retries !== retries ||
+        current.lastError !== lastError;
+      const eventAtChanged = current.lastEventAt !== lastEventAt;
+      if (
+        !stateChanged &&
+        (!eventAtChanged || now - current.updatedAt < throttleMS)
+      ) {
+        return prev;
+      }
+      const next: SessionStreamHealth = {
+        state,
+        retries,
+        lastEventAt,
+        updatedAt: now,
+        lastError,
+      };
+      return {
+        ...prev,
+        [id]: next,
+      };
+    });
+  }
+
+  function clearSessionStreamHealth(sessionID: string) {
+    const id = sessionID.trim();
+    if (!id) return;
+    setSessionStreamHealthByID((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   }
 
   function openSessionFromAlert(alert: SessionAlert) {
@@ -640,7 +2410,7 @@ export function App() {
       activateThread(alert.threadID);
       switchMode("session");
     }
-    setSessionAlerts((prev) => prev.filter((item) => item.id !== alert.id));
+    dismissSessionAlert(alert.id);
   }
 
   async function onEnableNotifications() {
@@ -652,7 +2422,10 @@ export function App() {
     setNotificationPermission(result);
   }
 
-  async function ensureLocalCodexHost(authToken: string, currentHosts: Host[]): Promise<Host[]> {
+  async function ensureLocalCodexHost(
+    authToken: string,
+    currentHosts: Host[],
+  ): Promise<Host[]> {
     if (currentHosts.some((host) => host.connection_mode === "local")) {
       return currentHosts;
     }
@@ -660,19 +2433,31 @@ export function App() {
       name: "local-default",
       connection_mode: "local",
       host: "localhost",
-      workspace: activeWorkspace?.path?.trim() || "/home/ecs-user"
+      workspace: activeWorkspace?.path?.trim() || "/home/ecs-user",
     });
     return listHosts(authToken);
   }
 
   function buildDiscoveredProjects(
     sourceHosts: Host[],
-    targets: Array<{ host: Host; ok: boolean; sessions?: Array<{ session_id: string; cwd?: string; thread_name?: string; updated_at: string }> }>
+    targets: Array<{
+      host: Host;
+      ok: boolean;
+      sessions?: Array<{
+        session_id: string;
+        cwd?: string;
+        thread_name?: string;
+        updated_at: string;
+      }>;
+    }>,
   ) {
     const hostMap = new Map<string, Host>();
     for (const host of sourceHosts) hostMap.set(host.id, host);
 
-    const grouped = new Map<string, Map<string, Array<{ id: string; title: string; updatedAt?: string }>>>();
+    const grouped = new Map<
+      string,
+      Map<string, Array<{ id: string; title: string; updatedAt?: string }>>
+    >();
     for (const target of targets) {
       const hostID = target.host?.id?.trim();
       if (!hostID) continue;
@@ -680,23 +2465,35 @@ export function App() {
       const pathMap = grouped.get(hostID)!;
       const sessions = Array.isArray(target.sessions) ? target.sessions : [];
       for (const sessionItem of sessions) {
-        const projectPath = sessionItem.cwd?.trim() || target.host.workspace?.trim() || hostMap.get(hostID)?.workspace?.trim() || "/home/ecs-user";
+        const projectPath =
+          sessionItem.cwd?.trim() ||
+          target.host.workspace?.trim() ||
+          hostMap.get(hostID)?.workspace?.trim() ||
+          "/home/ecs-user";
         if (!pathMap.has(projectPath)) pathMap.set(projectPath, []);
         pathMap.get(projectPath)!.push({
           id: sessionItem.session_id,
           title: sessionItem.thread_name?.trim() || sessionItem.session_id,
-          updatedAt: sessionItem.updated_at
+          updatedAt: sessionItem.updated_at,
         });
       }
       if (sessions.length === 0) {
-        const fallbackPath = target.host.workspace?.trim() || hostMap.get(hostID)?.workspace?.trim();
+        const fallbackPath =
+          target.host.workspace?.trim() ||
+          hostMap.get(hostID)?.workspace?.trim();
         if (fallbackPath && !pathMap.has(fallbackPath)) {
           pathMap.set(fallbackPath, []);
         }
       }
     }
 
-    const projects: Array<{ hostID: string; hostName: string; path: string; sessions: Array<{ id: string; title: string; updatedAt?: string }> }> = [];
+    const projects: Array<{
+      hostID: string;
+      hostName: string;
+      path: string;
+      title: string;
+      sessions: Array<{ id: string; title: string; updatedAt?: string }>;
+    }> = [];
     for (const [hostID, pathMap] of grouped.entries()) {
       const host = hostMap.get(hostID);
       const hostName = host?.name ?? hostID;
@@ -711,7 +2508,8 @@ export function App() {
           hostID,
           hostName,
           path: projectPath,
-          sessions: orderedSessions
+          title: resolveProjectTitle(projectPath),
+          sessions: orderedSessions,
         });
       }
     }
@@ -723,33 +2521,59 @@ export function App() {
       hostID: host.id,
       hostName: host.name,
       path: host.workspace?.trim() || "/home/ecs-user",
-      sessions: []
+      title: resolveProjectTitle(host.workspace?.trim() || "/home/ecs-user"),
+      sessions: [],
     }));
   }
 
-  function buildProjectsFromRecords(sourceHosts: Host[], projects: ProjectRecord[], sessions: SessionRecord[]) {
+  function buildProjectsFromRecords(
+    sourceHosts: Host[],
+    projects: ProjectRecord[],
+    sessions: SessionRecord[],
+  ) {
     const hostMap = new Map<string, Host>();
     for (const host of sourceHosts) {
       hostMap.set(host.id, host);
     }
 
     const projectKeyByID = new Map<string, string>();
-    const grouped = new Map<string, { hostID: string; hostName: string; path: string; sessions: Array<{ id: string; title: string; updatedAt?: string }> }>();
+    const grouped = new Map<
+      string,
+      {
+        hostID: string;
+        hostName: string;
+        path: string;
+        title: string;
+        sessions: Array<{ id: string; title: string; updatedAt?: string }>;
+      }
+    >();
     const sessionSeenByProjectKey = new Map<string, Set<string>>();
 
-    const ensureProjectBucket = (hostIDRaw: string, hostNameRaw: string, pathRaw: string) => {
+    const ensureProjectBucket = (
+      hostIDRaw: string,
+      hostNameRaw: string,
+      pathRaw: string,
+      titleRaw?: string,
+    ) => {
       const hostID = hostIDRaw.trim();
       const path = pathRaw.trim();
       if (!hostID || !path) return "";
       const key = `${hostID}::${path}`;
+      const resolvedTitle = resolveProjectTitle(path, titleRaw);
       if (!grouped.has(key)) {
         const host = hostMap.get(hostID);
         grouped.set(key, {
           hostID,
           hostName: hostNameRaw.trim() || host?.name || hostID,
           path,
-          sessions: []
+          title: resolvedTitle,
+          sessions: [],
         });
+      } else if (titleRaw?.trim()) {
+        const current = grouped.get(key);
+        if (current && current.title.trim() !== titleRaw.trim()) {
+          current.title = resolvedTitle;
+        }
       }
       if (!sessionSeenByProjectKey.has(key)) {
         sessionSeenByProjectKey.set(key, new Set<string>());
@@ -758,7 +2582,12 @@ export function App() {
     };
 
     for (const project of projects) {
-      const key = ensureProjectBucket(project.host_id, project.host_name ?? "", project.path);
+      const key = ensureProjectBucket(
+        project.host_id,
+        project.host_name ?? "",
+        project.path,
+        project.title,
+      );
       if (!key) continue;
       projectKeyByID.set(project.id, key);
     }
@@ -766,11 +2595,15 @@ export function App() {
     for (const sessionRecord of sessions) {
       const sessionID = sessionRecord.id.trim();
       if (!sessionID) continue;
-      const fromProjectID = projectKeyByID.get(sessionRecord.project_id.trim()) ?? "";
+      const fromProjectID =
+        projectKeyByID.get(sessionRecord.project_id.trim()) ?? "";
       const fallbackHostID = sessionRecord.host_id.trim();
       const fallbackPath = sessionRecord.path.trim();
-      const fallbackHostName = hostMap.get(fallbackHostID)?.name ?? fallbackHostID;
-      const key = fromProjectID || ensureProjectBucket(fallbackHostID, fallbackHostName, fallbackPath);
+      const fallbackHostName =
+        hostMap.get(fallbackHostID)?.name ?? fallbackHostID;
+      const key =
+        fromProjectID ||
+        ensureProjectBucket(fallbackHostID, fallbackHostName, fallbackPath);
       if (!key) continue;
       const bucket = grouped.get(key);
       const seen = sessionSeenByProjectKey.get(key);
@@ -779,7 +2612,7 @@ export function App() {
       bucket.sessions.push({
         id: sessionID,
         title: sessionRecord.title?.trim() || sessionID,
-        updatedAt: sessionRecord.updated_at
+        updatedAt: sessionRecord.updated_at,
       });
     }
 
@@ -798,7 +2631,12 @@ export function App() {
     }
     for (const host of sourceHosts) {
       if (byHost.has(host.id)) continue;
-      ensureProjectBucket(host.id, host.name, host.workspace?.trim() || "/home/ecs-user");
+      ensureProjectBucket(
+        host.id,
+        host.name,
+        host.workspace?.trim() || "/home/ecs-user",
+        "",
+      );
     }
 
     return Array.from(grouped.values());
@@ -808,9 +2646,10 @@ export function App() {
     authToken: string,
     sourceHosts: Host[],
     discoverEnabled: boolean,
-    preserveOnError = true
+    preserveOnError = true,
   ) {
     if (!discoverEnabled) {
+      setSourceProjectIDs([]);
       syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
       return;
     }
@@ -818,28 +2657,94 @@ export function App() {
       const discovered = await discoverCodexSessions(authToken, {
         all_hosts: true,
         fanout: Math.max(1, Math.min(8, sourceHosts.length || 1)),
-        limit_per_host: 120
+        limit_per_host: 120,
       });
-      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []));
+      setSourceProjectIDs([]);
+      syncProjectsFromDiscovery(
+        buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []),
+      );
     } catch {
+      setSourceProjectIDs([]);
       if (!preserveOnError) {
         syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
       }
     }
   }
 
-  async function refreshProjectsFromSource(authToken: string, sourceHosts: Host[], discoverEnabled: boolean, preserveOnError = true) {
+  async function refreshProjectsFromSource(
+    authToken: string,
+    sourceHosts: Host[],
+    discoverEnabled: boolean,
+    preserveOnError = true,
+  ) {
+    const normalizeLastStatus = (raw: string | undefined): SessionLastStatus => {
+      const value = (raw ?? "").trim().toLowerCase();
+      if (value === "running" || value === "pending") return "running";
+      if (value === "succeeded") return "succeeded";
+      if (value === "failed") return "failed";
+      if (value === "canceled") return "canceled";
+      return "idle";
+    };
+    const reconcileFromSessionRecords = (records: SessionRecord[]) => {
+      const currentByID = new Map<
+        string,
+        { activeJobID: string; lastJobStatus: SessionLastStatus }
+      >();
+      for (const workspace of workspaces) {
+        for (const thread of workspace.sessions) {
+          currentByID.set(thread.id, {
+            activeJobID: thread.activeJobID.trim(),
+            lastJobStatus: thread.lastJobStatus,
+          });
+        }
+      }
+
+      for (const record of records) {
+        const sessionID = record.id.trim();
+        if (!sessionID) continue;
+        const current = currentByID.get(sessionID);
+        if (!current) continue;
+        const nextStatus = normalizeLastStatus(record.last_status);
+        const nextJobID =
+          nextStatus === "running"
+            ? record.last_run_id?.trim() || current.activeJobID
+            : "";
+        if (
+          current.activeJobID === nextJobID &&
+          current.lastJobStatus === nextStatus
+        ) {
+          continue;
+        }
+        setThreadJobState(sessionID, nextJobID, nextStatus);
+      }
+    };
+
     try {
-      const [projects, sessions] = await Promise.all([listProjects(authToken, 600), listSessions(authToken, 1200)]);
+      const [projects, sessions] = await Promise.all([
+        listProjects(authToken, 600),
+        listSessions(authToken, 1200),
+      ]);
+      setSourceProjectIDs(
+        projects
+          .map((project) => project.id.trim())
+          .filter((id) => id !== ""),
+      );
       const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
       if (built.length > 0) {
-        syncProjectsFromDiscovery(built);
+        syncProjectsFromDiscovery(built, { preserveMissingSessions: false });
+        reconcileFromSessionRecords(sessions);
         return;
       }
     } catch {
+      setSourceProjectIDs([]);
       // fall through to discovery fallback
     }
-    await refreshProjectsFromDiscovery(authToken, sourceHosts, discoverEnabled, preserveOnError);
+    await refreshProjectsFromDiscovery(
+      authToken,
+      sourceHosts,
+      discoverEnabled,
+      preserveOnError,
+    );
   }
 
   function waitWithAbort(ms: number, signal: AbortSignal): Promise<void> {
@@ -864,7 +2769,43 @@ export function App() {
     });
   }
 
-  function sessionPayloadRecord(event: SessionEventRecord): Record<string, unknown> {
+  function trimCompletedRunsStore() {
+    while (completedJobsRef.current.size > MAX_PERSISTED_COMPLETED_RUNS) {
+      const oldest = completedJobsRef.current.values().next().value;
+      if (typeof oldest !== "string" || !oldest.trim()) break;
+      completedJobsRef.current.delete(oldest);
+    }
+  }
+
+  function markRunCompleted(runID: string): boolean {
+    const normalized = runID.trim();
+    if (!normalized) return false;
+    if (completedJobsRef.current.has(normalized)) return false;
+    completedJobsRef.current.add(normalized);
+    trimCompletedRunsStore();
+    persistCompletedRuns(completedJobsRef.current);
+    return true;
+  }
+
+  function setSessionEventCursor(sessionID: string, cursor: number) {
+    const normalizedSessionID = sessionID.trim();
+    if (!normalizedSessionID || !Number.isFinite(cursor) || cursor <= 0) return;
+    const current = sessionEventCursorRef.current.get(normalizedSessionID) ?? 0;
+    if (cursor <= current) return;
+    sessionEventCursorRef.current.set(normalizedSessionID, cursor);
+    persistSessionEventCursors(sessionEventCursorRef.current);
+  }
+
+  function deleteSessionEventCursor(sessionID: string) {
+    const normalizedSessionID = sessionID.trim();
+    if (!normalizedSessionID) return;
+    if (!sessionEventCursorRef.current.delete(normalizedSessionID)) return;
+    persistSessionEventCursors(sessionEventCursorRef.current);
+  }
+
+  function sessionPayloadRecord(
+    event: SessionEventRecord,
+  ): Record<string, unknown> {
     return asRecord(event.payload) ?? {};
   }
 
@@ -872,11 +2813,15 @@ export function App() {
     const direct = event.run_id?.trim() ?? "";
     if (direct) return direct;
     const payload = sessionPayloadRecord(event);
-    const fromPayload = typeof payload.job_id === "string" ? payload.job_id.trim() : "";
+    const fromPayload =
+      typeof payload.job_id === "string" ? payload.job_id.trim() : "";
     return fromPayload;
   }
 
-  function ensureSessionRunState(sessionID: string, runID: string): SessionRunStreamState {
+  function ensureSessionRunState(
+    sessionID: string,
+    runID: string,
+  ): SessionRunStreamState {
     const existing = sessionRunStateRef.current.get(sessionID);
     if (existing && existing.runID === runID) return existing;
     const next: SessionRunStreamState = {
@@ -884,31 +2829,74 @@ export function App() {
       stdout: "",
       streamSeen: false,
       assistantFinalized: false,
-      failureHints: []
+      failureHints: [],
+      eventParseOffset: 0,
+      surfacedEventKeys: new Set(),
     };
     sessionRunStateRef.current.set(sessionID, next);
     return next;
   }
 
-  function markSessionDone(sessionID: string, runID: string, status: "succeeded" | "failed" | "canceled") {
-    if (!runID || completedJobsRef.current.has(runID)) return;
-    completedJobsRef.current.add(runID);
+  function surfaceRuntimeCardsFromRunState(
+    sessionID: string,
+    runID: string,
+    state: SessionRunStreamState,
+    surface: boolean,
+  ) {
+    const parsed = parseCodexEventsIncremental(state.stdout, state.eventParseOffset);
+    state.eventParseOffset = parsed.nextOffset;
+    if (parsed.events.length === 0) return;
+    for (const event of parsed.events) {
+      const card = buildCodexRuntimeCardFromEvent(event, runID);
+      if (!card) continue;
+      if (state.surfacedEventKeys.has(card.key)) continue;
+      state.surfacedEventKeys.add(card.key);
+      if (!surface) continue;
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: card.state,
+          title: card.title,
+          body: card.body,
+        },
+        sessionID,
+      );
+    }
+  }
+
+  function markSessionDone(
+    sessionID: string,
+    runID: string,
+    status: "succeeded" | "failed" | "canceled",
+    options?: { surface?: boolean },
+  ): boolean {
+    if (!runID || !markRunCompleted(runID)) return false;
+    if (!options?.surface) return false;
     const sessionTitle = threadTitleMapRef.current.get(sessionID) ?? "Session";
     const completion = sessionCompletionCopy(status);
     notifySessionDone(`${sessionTitle} ${completion.suffix}`, completion.body);
     pushSessionAlert({
       threadID: sessionID,
       title: `${sessionTitle} ${completion.suffix}`,
-      body: completion.body
+      body: completion.body,
     });
+    return true;
   }
 
-  function stopSessionStream(sessionID: string) {
+  function stopSessionStream(
+    sessionID: string,
+    options?: { preserveRunState?: boolean; preserveHealth?: boolean },
+  ) {
     const state = sessionStreamStateRef.current.get(sessionID);
     if (!state) return;
     state.controller.abort();
     sessionStreamStateRef.current.delete(sessionID);
-    sessionRunStateRef.current.delete(sessionID);
+    if (!options?.preserveRunState) {
+      sessionRunStateRef.current.delete(sessionID);
+    }
+    if (!options?.preserveHealth) {
+      clearSessionStreamHealth(sessionID);
+    }
   }
 
   function stopAllSessionStreams() {
@@ -917,14 +2905,22 @@ export function App() {
     }
     sessionStreamStateRef.current.clear();
     sessionRunStateRef.current.clear();
+    setSessionStreamHealthByID({});
   }
 
-  async function finalizeStreamCompleted(sessionID: string, runID: string) {
+  async function finalizeStreamCompleted(
+    sessionID: string,
+    runID: string,
+    completedAt?: string,
+    options?: { surfaceCompletions?: boolean },
+  ) {
     if (runID && completedJobsRef.current.has(runID)) {
       return;
     }
     const state = sessionRunStateRef.current.get(sessionID);
-    let assistantText = state ? parseCodexAssistantTextFromStdout(state.stdout, false) : "";
+    let assistantText = state
+      ? parseCodexAssistantTextFromStdout(state.stdout, false)
+      : "";
     let failureSummary = state?.failureHints.join("\n") ?? "";
     let failed = failureSummary.trim() !== "";
 
@@ -944,11 +2940,20 @@ export function App() {
           if (jobHasTargetFailures(job)) {
             failed = true;
             if (!failureSummary) {
-              failureSummary = summarizeTargetFailures(job) || (job.error ? String(job.error) : "");
+              failureSummary =
+                summarizeTargetFailures(job) ||
+                (job.error ? String(job.error) : "");
             }
           }
-          const hasResponseTargets = Boolean(job.response && "targets" in job.response && Array.isArray(job.response.targets));
-          const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
+          const hasResponseTargets = Boolean(
+            job.response &&
+            "targets" in job.response &&
+            Array.isArray(job.response.targets),
+          );
+          const terminal =
+            job.status === "succeeded" ||
+            job.status === "failed" ||
+            job.status === "canceled";
           if (assistantText || failed || (terminal && hasResponseTargets)) {
             break;
           }
@@ -968,14 +2973,18 @@ export function App() {
         {
           kind: "system",
           state: "error",
-          title: "System",
-          body: failureSummary || "Session failed."
+          title: "Failed",
+          body: failureSummary || "Session failed.",
         },
-        sessionID
+        sessionID,
       );
       setThreadJobState(sessionID, "", "failed");
-      markSessionDone(sessionID, runID, "failed");
-      if (sessionID !== activeThreadIDRef.current) {
+      const surfaced = markSessionDone(sessionID, runID, "failed", {
+        surface:
+          options?.surfaceCompletions !== false &&
+          shouldSurfaceCompletion(completedAt),
+      });
+      if (surfaced && sessionID !== activeThreadIDRef.current) {
         setThreadUnread(sessionID, true);
       }
       sessionRunStateRef.current.delete(sessionID);
@@ -984,36 +2993,54 @@ export function App() {
 
     setThreadJobState(sessionID, "", "succeeded");
     if (assistantText.trim()) {
-      if (state?.streamSeen) {
-        finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(assistantText));
+      if (state?.streamSeen && !state.assistantFinalized) {
+        finalizeAssistantStreamEntry(
+          sessionID,
+          "success",
+          clipStreamText(assistantText),
+        );
       } else if (!state?.assistantFinalized) {
         addTimelineEntry(
           {
             kind: "assistant",
             state: "success",
             title: "Assistant",
-            body: assistantText
+            body: assistantText,
           },
-          sessionID
+          sessionID,
         );
       }
     } else if (state?.streamSeen && !state?.assistantFinalized) {
-      finalizeAssistantStreamEntry(sessionID, "success", EMPTY_ASSISTANT_FALLBACK);
+      finalizeAssistantStreamEntry(
+        sessionID,
+        "success",
+        EMPTY_ASSISTANT_FALLBACK,
+      );
     }
-    markSessionDone(sessionID, runID, "succeeded");
-    if (sessionID !== activeThreadIDRef.current) {
+    const surfaced = markSessionDone(sessionID, runID, "succeeded", {
+      surface:
+        options?.surfaceCompletions !== false &&
+        shouldSurfaceCompletion(completedAt),
+    });
+    if (surfaced && sessionID !== activeThreadIDRef.current) {
       setThreadUnread(sessionID, true);
     }
     sessionRunStateRef.current.delete(sessionID);
   }
 
-  async function handleSessionEventRecord(sessionID: string, event: SessionEventRecord) {
+  async function handleSessionEventRecord(
+    sessionID: string,
+    event: SessionEventRecord,
+    options?: SessionEventHandleOptions,
+  ) {
     const payload = sessionPayloadRecord(event);
     const runID = sessionEventRunID(event);
+    const surfaceLifecycle = options?.surfaceLifecycle !== false;
 
     switch (event.type) {
       case "session.title.updated": {
-        const title = typeof payload.title === "string" ? payload.title.trim() : "";
+        const title =
+          typeof payload.title === "string" ? payload.title.trim() : "";
         if (title) {
           setThreadTitle(sessionID, title);
         }
@@ -1023,8 +3050,34 @@ export function App() {
         const id = runID || `run_${Date.now()}`;
         ensureSessionRunState(sessionID, id);
         setThreadJobState(sessionID, id, "running");
+        if (surfaceLifecycle) {
+          addTimelineEntry(
+            {
+              kind: "system",
+              state: "running",
+              title: "Response Started",
+              body: "Assistant is working on your request.",
+            },
+            sessionID,
+          );
+        }
         if (sessionID === activeThreadIDRef.current) {
           setActiveJobID(id);
+        }
+        return;
+      }
+      case "target.started": {
+        if (surfaceLifecycle) {
+          const host = sessionEventHostLabel(payload);
+          addTimelineEntry(
+            {
+              kind: "system",
+              state: "running",
+              title: "Server Processing",
+              body: host,
+            },
+            sessionID,
+          );
         }
         return;
       }
@@ -1033,15 +3086,28 @@ export function App() {
         const state = ensureSessionRunState(sessionID, runID);
         const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
         if (!chunk.trim()) return;
-        state.stdout = `${state.stdout}${chunk}`;
-        if (state.stdout.length > 220000) {
-          state.stdout = state.stdout.slice(state.stdout.length - 220000);
+        appendCodexStdoutChunk(state, chunk);
+        surfaceRuntimeCardsFromRunState(
+          sessionID,
+          runID,
+          state,
+          surfaceLifecycle,
+        );
+        const nextTitle = parseCodexSessionTitleFromStdout(state.stdout);
+        if (nextTitle) {
+          setThreadTitle(sessionID, nextTitle);
         }
-        const contentOnly = parseCodexAssistantTextFromStdout(state.stdout, false);
+        const contentOnly = parseCodexAssistantTextFromStdout(
+          state.stdout,
+          false,
+        );
         if (contentOnly.trim()) {
           state.streamSeen = true;
           upsertAssistantStreamEntry(sessionID, clipStreamText(contentOnly));
-        } else if (state.stdout.includes('"type":"turn.started"') || state.stdout.includes('"type":"thread.started"')) {
+        } else if (
+          state.stdout.includes('"type":"turn.started"') ||
+          state.stdout.includes('"type":"thread.started"')
+        ) {
           state.streamSeen = true;
           upsertAssistantStreamEntry(sessionID, "Thinking...");
         }
@@ -1050,10 +3116,17 @@ export function App() {
       case "assistant.completed": {
         if (!runID) return;
         const state = ensureSessionRunState(sessionID, runID);
-        const contentOnly = parseCodexAssistantTextFromStdout(state.stdout, false);
+        const contentOnly = parseCodexAssistantTextFromStdout(
+          state.stdout,
+          false,
+        );
         if (contentOnly.trim()) {
           state.streamSeen = true;
-          finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(contentOnly));
+          finalizeAssistantStreamEntry(
+            sessionID,
+            "success",
+            clipStreamText(contentOnly),
+          );
           state.assistantFinalized = true;
           return;
         }
@@ -1065,13 +3138,47 @@ export function App() {
       case "target.done": {
         if (!runID) return;
         const state = ensureSessionRunState(sessionID, runID);
-        const status = typeof payload.status === "string" ? payload.status.trim() : "";
+        const status =
+          typeof payload.status === "string" ? payload.status.trim() : "";
+        const host = sessionEventHostLabel(payload);
+        const exitCode = payload.exit_code;
+        const codeText =
+          typeof exitCode === "number" ? ` exit=${exitCode}` : "";
+        const errorText =
+          typeof payload.error === "string" && payload.error.trim()
+            ? ` error=${payload.error.trim()}`
+            : "";
+        if (surfaceLifecycle) {
+          addTimelineEntry(
+            {
+              kind: "system",
+              state: status && status !== "ok" ? "error" : "success",
+              title:
+                status && status !== "ok" ? "Server Failed" : "Server Completed",
+              body:
+                status && status !== "ok"
+                  ? `${host} failed${codeText}${errorText}`
+                  : `${host} completed${codeText}`,
+            },
+            sessionID,
+          );
+        }
         if (status && status !== "ok") {
-          const host = (typeof payload.host_name === "string" && payload.host_name.trim()) || (typeof payload.host_id === "string" && payload.host_id.trim()) || "target";
-          const exitCode = payload.exit_code;
-          const codeText = typeof exitCode === "number" ? ` exit=${exitCode}` : "";
-          const errorText = typeof payload.error === "string" && payload.error.trim() ? ` error=${payload.error.trim()}` : "";
           state.failureHints.push(`${host} failed${codeText}${errorText}`);
+        }
+        return;
+      }
+      case "job.cancel_requested": {
+        if (surfaceLifecycle) {
+          addTimelineEntry(
+            {
+              kind: "system",
+              state: "running",
+              title: "Stopping",
+              body: "Stopping current response...",
+            },
+            sessionID,
+          );
         }
         return;
       }
@@ -1079,7 +3186,10 @@ export function App() {
       case "job.failed": {
         const id = runID || `run_${Date.now()}`;
         const state = ensureSessionRunState(sessionID, id);
-        const errText = typeof payload.error === "string" && payload.error.trim() ? payload.error.trim() : "Session failed.";
+        const errText =
+          typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : "Session failed.";
         if (state.streamSeen) {
           finalizeAssistantStreamEntry(sessionID, "error");
         }
@@ -1087,14 +3197,18 @@ export function App() {
           {
             kind: "system",
             state: "error",
-            title: "System",
-            body: errText
+            title: "Failed",
+            body: errText,
           },
-          sessionID
+          sessionID,
         );
         setThreadJobState(sessionID, "", "failed");
-        markSessionDone(sessionID, id, "failed");
-        if (sessionID !== activeThreadIDRef.current) {
+        const surfaced = markSessionDone(sessionID, id, "failed", {
+          surface:
+            options?.surfaceCompletions !== false &&
+            shouldSurfaceCompletion(event.created_at),
+        });
+        if (surfaced && sessionID !== activeThreadIDRef.current) {
           setThreadUnread(sessionID, true);
         }
         sessionRunStateRef.current.delete(sessionID);
@@ -1111,14 +3225,18 @@ export function App() {
           {
             kind: "system",
             state: "error",
-            title: "System",
-            body: "Session canceled."
+            title: "Interrupted",
+            body: "Session interrupted.",
           },
-          sessionID
+          sessionID,
         );
         setThreadJobState(sessionID, "", "canceled");
-        markSessionDone(sessionID, id, "canceled");
-        if (sessionID !== activeThreadIDRef.current) {
+        const surfaced = markSessionDone(sessionID, id, "canceled", {
+          surface:
+            options?.surfaceCompletions !== false &&
+            shouldSurfaceCompletion(event.created_at),
+        });
+        if (surfaced && sessionID !== activeThreadIDRef.current) {
           setThreadUnread(sessionID, true);
         }
         sessionRunStateRef.current.delete(sessionID);
@@ -1127,7 +3245,9 @@ export function App() {
       case "run.completed":
       case "job.succeeded": {
         if (!runID) return;
-        await finalizeStreamCompleted(sessionID, runID);
+        await finalizeStreamCompleted(sessionID, runID, event.created_at, {
+          surfaceCompletions: options?.surfaceCompletions !== false,
+        });
         return;
       }
       default:
@@ -1138,49 +3258,73 @@ export function App() {
   function decodeSessionEventRecord(input: unknown): SessionEventRecord | null {
     const payload = asRecord(input);
     if (!payload) return null;
-    const seq = typeof payload.seq === "number" ? payload.seq : Number(payload.seq);
+    const seq =
+      typeof payload.seq === "number" ? payload.seq : Number(payload.seq);
     if (!Number.isFinite(seq) || seq <= 0) return null;
-    const sessionID = typeof payload.session_id === "string" ? payload.session_id.trim() : "";
-    const eventType = typeof payload.type === "string" ? payload.type.trim() : "";
+    const sessionID =
+      typeof payload.session_id === "string" ? payload.session_id.trim() : "";
+    const eventType =
+      typeof payload.type === "string" ? payload.type.trim() : "";
     if (!sessionID || !eventType) return null;
-    const createdAt = typeof payload.created_at === "string" && payload.created_at.trim() ? payload.created_at : new Date().toISOString();
-    const runID = typeof payload.run_id === "string" ? payload.run_id : undefined;
+    const createdAt =
+      typeof payload.created_at === "string" && payload.created_at.trim()
+        ? payload.created_at
+        : new Date().toISOString();
+    const runID =
+      typeof payload.run_id === "string" ? payload.run_id : undefined;
     return {
       seq,
       session_id: sessionID,
       run_id: runID,
       type: eventType,
       payload: payload.payload,
-      created_at: createdAt
+      created_at: createdAt,
     };
   }
 
-  function handleSessionStreamFrame(sessionID: string, frame: SessionStreamFrame) {
+  function handleSessionStreamFrame(
+    sessionID: string,
+    frame: SessionStreamFrame,
+  ) {
     const state = sessionStreamStateRef.current.get(sessionID);
     if (!state) return;
-    state.lastEventAt = Date.now();
+    const receivedAt = Date.now();
+    state.lastEventAt = receivedAt;
 
     if (frame.event === "session.ready") {
       state.ready = true;
+      state.suppressReplaySurface = false;
+      updateSessionStreamHealth(sessionID, "live", {
+        lastEventAt: receivedAt,
+        lastError: "",
+      });
       const data = asRecord(frame.data);
       const cursor = data ? Number(data.cursor) : NaN;
-      if (Number.isFinite(cursor) && cursor > (sessionEventCursorRef.current.get(sessionID) ?? 0)) {
-        sessionEventCursorRef.current.set(sessionID, cursor);
+      if (Number.isFinite(cursor)) {
+        setSessionEventCursor(sessionID, cursor);
       }
       return;
     }
 
     if (frame.event === "session.reset") {
       state.ready = false;
+      updateSessionStreamHealth(sessionID, "reconnecting", {
+        lastEventAt: receivedAt,
+        throttleMS: 0,
+      });
       const data = asRecord(frame.data);
       const nextAfter = data ? Number(data.next_after) : NaN;
-      if (Number.isFinite(nextAfter) && nextAfter > (sessionEventCursorRef.current.get(sessionID) ?? 0)) {
-        sessionEventCursorRef.current.set(sessionID, nextAfter);
+      state.suppressReplaySurface = !(Number.isFinite(nextAfter) && nextAfter > 0);
+      if (Number.isFinite(nextAfter)) {
+        setSessionEventCursor(sessionID, nextAfter);
       }
       return;
     }
 
     if (frame.event === "heartbeat") {
+      updateSessionStreamHealth(sessionID, "live", {
+        lastEventAt: receivedAt,
+      });
       return;
     }
 
@@ -1188,14 +3332,23 @@ export function App() {
       return;
     }
 
-    state.ready = true;
+    updateSessionStreamHealth(sessionID, "live", {
+      lastEventAt: receivedAt,
+      lastError: "",
+    });
     const event = decodeSessionEventRecord(frame.data);
     if (!event) return;
+
     const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
-    if (event.seq > current) {
-      sessionEventCursorRef.current.set(sessionID, event.seq);
-    }
-    void handleSessionEventRecord(sessionID, event);
+    if (event.seq <= current) return;
+    setSessionEventCursor(sessionID, event.seq);
+    const surfaceByReplay = !state.suppressReplaySurface;
+    const surfaceCompletions = state.ready || surfaceByReplay;
+    const surfaceLifecycle = state.ready || surfaceByReplay;
+    void handleSessionEventRecord(sessionID, event, {
+      surfaceCompletions,
+      surfaceLifecycle,
+    });
   }
 
   function startSessionStream(sessionID: string, authToken: string) {
@@ -1207,24 +3360,75 @@ export function App() {
     sessionStreamStateRef.current.set(trimmedSessionID, {
       controller,
       ready: false,
-      lastEventAt: 0
+      lastEventAt: 0,
+      suppressReplaySurface: true,
+    });
+    updateSessionStreamHealth(trimmedSessionID, "connecting", {
+      retries: 0,
+      lastEventAt: 0,
+      lastError: "",
+      throttleMS: 0,
     });
 
     const run = async () => {
       let backoff = 700;
+      let retries = 0;
       while (!controller.signal.aborted) {
+        if (retries > 0) {
+          updateSessionStreamHealth(trimmedSessionID, "reconnecting", {
+            retries,
+            throttleMS: 0,
+          });
+        }
         const after = sessionEventCursorRef.current.get(trimmedSessionID) ?? 0;
+        const streamState = sessionStreamStateRef.current.get(trimmedSessionID);
+        if (streamState && streamState.controller === controller) {
+          streamState.suppressReplaySurface = after <= 0;
+        }
         try {
           await streamSessionEvents(authToken, trimmedSessionID, {
             after,
             signal: controller.signal,
-            onFrame: (frame) => handleSessionStreamFrame(trimmedSessionID, frame)
+            onFrame: (frame) =>
+              handleSessionStreamFrame(trimmedSessionID, frame),
           });
+          if (controller.signal.aborted) break;
+          const isRunning = runningSessionIDsRef.current.has(trimmedSessionID);
+          if (isRunning) {
+            retries += 1;
+            updateSessionStreamHealth(trimmedSessionID, "reconnecting", {
+              retries,
+              lastError: "stream closed, retrying",
+              throttleMS: 0,
+            });
+          } else {
+            retries = 0;
+            updateSessionStreamHealth(trimmedSessionID, "live", {
+              retries: 0,
+              lastError: "",
+              throttleMS: 0,
+            });
+          }
         } catch {
           if (controller.signal.aborted) break;
+          retries += 1;
+          updateSessionStreamHealth(
+            trimmedSessionID,
+            retries >= 3 ? "error" : "reconnecting",
+            {
+              retries,
+              lastError: "stream interrupted, retrying",
+              throttleMS: 0,
+            },
+          );
         }
         const active = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (!active || active.controller !== controller || controller.signal.aborted) break;
+        if (
+          !active ||
+          active.controller !== controller ||
+          controller.signal.aborted
+        )
+          break;
         active.ready = false;
         await waitWithAbort(backoff, controller.signal);
         backoff = Math.min(6000, Math.round(backoff * 1.7));
@@ -1232,22 +3436,34 @@ export function App() {
       const active = sessionStreamStateRef.current.get(trimmedSessionID);
       if (active && active.controller === controller) {
         sessionStreamStateRef.current.delete(trimmedSessionID);
+        updateSessionStreamHealth(trimmedSessionID, "offline", {
+          throttleMS: 0,
+        });
       }
     };
     void run();
   }
 
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
+    const refreshStartedAtMS = Date.now();
     setIsRefreshing(true);
     try {
-      const [healthBody, fetchedHosts, nextRuntimes, nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
+      const [
+        healthBody,
+        fetchedHosts,
+        nextRuntimes,
+        nextJobs,
+        nextRuns,
+        nextAudit,
+        nextMetrics,
+      ] = await Promise.all([
         healthz(),
         listHosts(authToken),
         listRuntimes(authToken),
         listRunJobs(authToken, 20),
         listRuns(authToken, 20),
         listAudit(authToken, 80),
-        getMetrics(authToken)
+        getMetrics(authToken),
       ]);
       const nextHosts = await ensureLocalCodexHost(authToken, fetchedHosts);
 
@@ -1259,29 +3475,37 @@ export function App() {
       setAuditEvents(nextAudit);
       setMetrics(nextMetrics);
 
-      const localHost = nextHosts.find((host) => host.connection_mode === "local");
+      const localHost = nextHosts.find(
+        (host) => host.connection_mode === "local",
+      );
       if (localHost) {
         setAllHosts(false);
         setSelectedHostIDs([localHost.id]);
       } else {
         setSelectedHostIDs((prev) => {
-          const nextSelected = prev.filter((id) => nextHosts.some((host) => host.id === id));
+          const nextSelected = prev.filter((id) =>
+            nextHosts.some((host) => host.id === id),
+          );
           if (nextSelected.length > 0) return nextSelected;
           if (nextHosts.length > 0) return [nextHosts[0].id];
           return [];
         });
       }
-      const codexRuntime = nextRuntimes.find((runtime) => runtime.name === "codex");
+      const codexRuntime = nextRuntimes.find(
+        (runtime) => runtime.name === "codex",
+      );
       if (codexRuntime) {
         setSelectedRuntime("codex");
-      } else if (!nextRuntimes.some((runtime) => runtime.name === selectedRuntime)) {
+      } else if (
+        !nextRuntimes.some((runtime) => runtime.name === selectedRuntime)
+      ) {
         setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
       }
       await refreshProjectsFromSource(
         authToken,
         nextHosts,
         nextRuntimes.some((runtime) => runtime.name === "codex"),
-        workspaces.length > 0
+        workspaces.length > 0,
       );
 
       const running = nextJobs.find((job) => isJobActive(job));
@@ -1308,11 +3532,13 @@ export function App() {
             kind: "system",
             state: "success",
             title: "Connected",
-            body: `Connected. hosts=${nextHosts.length} runtimes=${nextRuntimes.length} queue_depth=${nextMetrics.queue.depth}`
+            body: `Connected. hosts=${nextHosts.length} runtimes=${nextRuntimes.length} queue_depth=${nextMetrics.queue.depth}`,
           },
-          activeThreadID
+          activeThreadID,
         );
       }
+      // Only surface completion alerts for events that happen after this sync starts.
+      completionAlertCutoffMSRef.current = refreshStartedAtMS;
     } catch (error) {
       setHealth(`error: ${String(error)}`);
       if (emitConnectedNote) {
@@ -1321,9 +3547,9 @@ export function App() {
             kind: "system",
             state: "error",
             title: "Connection Failed",
-            body: String(error)
+            body: String(error),
           },
-          activeThreadID
+          activeThreadID,
         );
       }
       throw error;
@@ -1379,7 +3605,7 @@ export function App() {
       streamAuthTokenRef.current = token;
     }
 
-    const expected = new Set(allSessionIDs);
+    const expected = new Set(sessionStreamTargetIDs);
     for (const sessionID of expected) {
       if (!sessionStreamStateRef.current.has(sessionID)) {
         startSessionStream(sessionID, token);
@@ -1389,7 +3615,7 @@ export function App() {
       if (expected.has(sessionID)) continue;
       stopSessionStream(sessionID);
     }
-  }, [authPhase, token, allSessionIDs]);
+  }, [authPhase, token, sessionStreamTargetIDs]);
 
   useEffect(() => {
     return () => {
@@ -1406,7 +3632,9 @@ export function App() {
       .then((catalog) => {
         if (canceled) return;
         const nextDefault = catalog.default_model?.trim() || "";
-        const nextModels = Array.isArray(catalog.models) ? catalog.models.filter((name) => name.trim() !== "") : [];
+        const nextModels = Array.isArray(catalog.models)
+          ? catalog.models.filter((name) => name.trim() !== "")
+          : [];
         setSessionModelDefault(nextDefault);
         setSessionModelOptions(nextModels);
       })
@@ -1445,7 +3673,15 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, appMode, hosts, runtimes, runningThreadJobs.length, submittingThreadID]);
+  }, [
+    authPhase,
+    token,
+    appMode,
+    hosts,
+    runtimes,
+    runningThreadJobs.length,
+    submittingThreadID,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1460,19 +3696,90 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (appMode === "session") return;
+    if (!commandPaletteOpen) return;
+    setCommandPaletteOpen(false);
+    setCommandPaletteQuery("");
+    setCommandPaletteCursor(0);
+  }, [appMode, commandPaletteOpen]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      commandPaletteInputRef.current?.focus();
+      commandPaletteInputRef.current?.select();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [commandPaletteOpen]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (!commandPaletteOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [commandPaletteOpen]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen) return;
+    setCommandPaletteCursor((prev) => {
+      if (filteredCommandPaletteActions.length === 0) return 0;
+      if (prev < filteredCommandPaletteActions.length) return prev;
+      return filteredCommandPaletteActions.length - 1;
+    });
+  }, [commandPaletteOpen, filteredCommandPaletteActions.length]);
+
+  useEffect(() => {
     const node = timelineViewportRef.current;
     if (!node) return;
+    const threadChanged = lastTimelineThreadIDRef.current !== activeThreadID;
+    if (threadChanged) {
+      lastTimelineThreadIDRef.current = activeThreadID;
+      timelineForceStickRef.current = true;
+    }
+    const shouldStick =
+      timelineForceStickRef.current ||
+      timelineStickToBottomRef.current ||
+      threadChanged;
+    if (!shouldStick) return;
     const frame = window.requestAnimationFrame(() => {
       if (timelineBottomRef.current) {
         timelineBottomRef.current.scrollIntoView({ block: "end" });
       } else {
         node.scrollTop = node.scrollHeight;
       }
+      timelineForceStickRef.current = false;
     });
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [activeThreadID, activeTimeline.length, activeTimelineTail?.body, activeTimelineTail?.state]);
+  }, [
+    activeThreadID,
+    activeTimeline.length,
+    activeTimelineTail?.body,
+    activeTimelineTail?.state,
+  ]);
+
+  function onTimelineScroll() {
+    const node = timelineViewportRef.current;
+    if (!node) return;
+    const gap = Math.abs(
+      node.scrollHeight - node.clientHeight - node.scrollTop,
+    );
+    timelineStickToBottomRef.current = gap <= 72;
+  }
+
+  useEffect(() => {
+    const node = promptInputRef.current;
+    if (!node) return;
+    node.style.height = "0px";
+    const nextHeight = Math.max(92, Math.min(240, node.scrollHeight));
+    node.style.height = `${nextHeight}px`;
+  }, [activeThreadID, activeDraft]);
 
   useEffect(() => {
     if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
@@ -1498,25 +3805,49 @@ export function App() {
     const handleGlobalKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        promptInputRef.current?.focus();
+        if (commandPaletteOpen) {
+          closeCommandPalette();
+          return;
+        }
+        openCommandPalette();
+        return;
+      }
+
+      if (commandPaletteOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeCommandPalette();
+        }
         return;
       }
 
       if (appMode !== "session") return;
 
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "n"
+      ) {
         event.preventDefault();
         createThreadAndFocus();
         return;
       }
 
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "ArrowUp" || event.key === "[")) {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        (event.key === "ArrowUp" || event.key === "[")
+      ) {
         event.preventDefault();
         switchThreadByOffset(-1);
         return;
       }
 
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "ArrowDown" || event.key === "]")) {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        (event.key === "ArrowDown" || event.key === "]")
+      ) {
         event.preventDefault();
         switchThreadByOffset(1);
       }
@@ -1526,7 +3857,7 @@ export function App() {
     return () => {
       window.removeEventListener("keydown", handleGlobalKeydown);
     };
-  }, [authPhase, appMode, threads, activeThreadID]);
+  }, [authPhase, appMode, threads, activeThreadID, commandPaletteOpen]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim()) return;
@@ -1543,19 +3874,28 @@ export function App() {
               const after = jobEventCursorRef.current.get(item.jobID) ?? 0;
               const [job, eventFeed] = await Promise.all([
                 getRunJob(token, item.jobID),
-                listRunJobEvents(token, item.jobID, after, 240).catch(() => ({ events: [] as RunJobEvent[], next_after: after }))
+                listRunJobEvents(token, item.jobID, after, 240).catch(() => ({
+                  events: [] as RunJobEvent[],
+                  next_after: after,
+                })),
               ]);
-              return { item, job, error: "", events: eventFeed.events, nextAfter: eventFeed.next_after };
+              return {
+                item,
+                job,
+                error: "",
+                events: eventFeed.events,
+                nextAfter: eventFeed.next_after,
+              };
             } catch (error) {
               return {
                 item,
                 job: null as RunJobRecord | null,
                 error: String(error),
                 events: [] as RunJobEvent[],
-                nextAfter: jobEventCursorRef.current.get(item.jobID) ?? 0
+                nextAfter: jobEventCursorRef.current.get(item.jobID) ?? 0,
               };
             }
-          })
+          }),
         );
         if (canceled) return;
 
@@ -1567,57 +3907,109 @@ export function App() {
               {
                 kind: "system",
                 state: "error",
-                title: "Session Sync Failed",
-                body: error
+                title: "Session Update Failed",
+                body: error,
               },
-              item.threadID
+              item.threadID,
             );
             setThreadJobState(item.threadID, "", "failed");
             continue;
           }
           jobEventCursorRef.current.set(item.jobID, nextAfter);
           const alreadyCompleted = completedJobsRef.current.has(item.jobID);
+          const streamRunState = sessionRunStateRef.current.get(item.threadID);
+          const preferSessionStream =
+            streamRunState?.runID === item.jobID &&
+            (streamRunState?.streamSeen || streamRunState?.assistantFinalized);
 
           let stdoutStream = "";
           const terminalHints: string[] = [];
-          const showLiveStream = appMode === "session" && item.threadID === activeThreadID;
+          const showLiveStream =
+            !preferSessionStream &&
+            appMode === "session" &&
+            item.threadID === activeThreadID;
+          const fallbackRunState =
+            !preferSessionStream && job.runtime === "codex"
+              ? ensureSessionRunState(item.threadID, item.jobID)
+              : null;
           for (const event of events) {
-            if (event.type === "target.stdout" && typeof event.chunk === "string") {
+            if (
+              event.type === "target.stdout" &&
+              typeof event.chunk === "string"
+            ) {
               stdoutStream += event.chunk;
+              if (fallbackRunState) {
+                appendCodexStdoutChunk(fallbackRunState, event.chunk);
+              }
             }
-            if (event.type === "target.done" && event.status && event.status !== "ok") {
+            if (
+              event.type === "target.done" &&
+              event.status &&
+              event.status !== "ok"
+            ) {
               const line = summarizeJobEventLine(event);
               if (line) terminalHints.push(line);
             }
-            if (event.type === "job.failed" || event.type === "job.canceled" || event.type === "job.cancel_requested") {
+            if (
+              event.type === "job.failed" ||
+              event.type === "job.canceled" ||
+              event.type === "job.cancel_requested"
+            ) {
               const line = summarizeJobEventLine(event);
               if (line) terminalHints.push(line);
             }
           }
+          if (!alreadyCompleted && showLiveStream && fallbackRunState) {
+            surfaceRuntimeCardsFromRunState(
+              item.threadID,
+              item.jobID,
+              fallbackRunState,
+              true,
+            );
+          }
           if (!alreadyCompleted && showLiveStream && stdoutStream.trim()) {
             if (job.runtime === "codex") {
-              const contentOnly = parseCodexAssistantTextFromStdout(stdoutStream, false);
+              const sourceStdout = fallbackRunState
+                ? fallbackRunState.stdout
+                : stdoutStream;
+              const nextTitle = parseCodexSessionTitleFromStdout(sourceStdout);
+              if (nextTitle) {
+                setThreadTitle(item.threadID, nextTitle);
+              }
+              const contentOnly = parseCodexAssistantTextFromStdout(
+                sourceStdout,
+                false,
+              );
               if (contentOnly.trim()) {
                 jobStreamSeenRef.current.set(item.jobID, true);
-                upsertAssistantStreamEntry(item.threadID, clipStreamText(contentOnly));
-              } else if (stdoutStream.includes('"type":"turn.started"') || stdoutStream.includes('"type":"thread.started"')) {
+                upsertAssistantStreamEntry(
+                  item.threadID,
+                  clipStreamText(contentOnly),
+                );
+              } else if (
+                sourceStdout.includes('"type":"turn.started"') ||
+                sourceStdout.includes('"type":"thread.started"')
+              ) {
                 jobStreamSeenRef.current.set(item.jobID, true);
                 upsertAssistantStreamEntry(item.threadID, "Thinking...");
               }
             } else {
               jobStreamSeenRef.current.set(item.jobID, true);
-              upsertAssistantStreamEntry(item.threadID, clipStreamText(stdoutStream));
+              upsertAssistantStreamEntry(
+                item.threadID,
+                clipStreamText(stdoutStream),
+              );
             }
           }
-          if (terminalHints.length > 0) {
+          if (!preferSessionStream && terminalHints.length > 0) {
             addTimelineEntry(
               {
                 kind: "system",
                 state: "error",
-                title: "System",
-                body: terminalHints.join("\n")
+                title: "Failed",
+                body: terminalHints.join("\n"),
               },
-              item.threadID
+              item.threadID,
             );
           }
 
@@ -1632,9 +4024,16 @@ export function App() {
           }
 
           const responseFailed = jobHasTargetFailures(job);
-          const assistantText = job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
-          if (job.runtime === "codex" && job.status === "succeeded" && !responseFailed && !assistantText.trim()) {
-            const retries = jobNoTextFinalizeRetriesRef.current.get(job.id) ?? 0;
+          const assistantText =
+            job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
+          if (
+            job.runtime === "codex" &&
+            job.status === "succeeded" &&
+            !responseFailed &&
+            !assistantText.trim()
+          ) {
+            const retries =
+              jobNoTextFinalizeRetriesRef.current.get(job.id) ?? 0;
             if (retries < 4) {
               jobNoTextFinalizeRetriesRef.current.set(job.id, retries + 1);
               setThreadJobState(item.threadID, job.id, "running");
@@ -1655,12 +4054,19 @@ export function App() {
                 : job.status === "succeeded"
                   ? "succeeded"
                   : "failed";
+          const shouldSurfaceJobCompletion = shouldSurfaceCompletion(
+            job.finished_at || job.started_at || job.queued_at,
+          );
           setThreadJobState(item.threadID, "", terminalStatus);
           jobEventCursorRef.current.delete(item.jobID);
           jobNoTextFinalizeRetriesRef.current.delete(job.id);
+          const pollRunState = sessionRunStateRef.current.get(item.threadID);
+          if (!preferSessionStream && pollRunState?.runID === item.jobID) {
+            sessionRunStateRef.current.delete(item.threadID);
+          }
           const sawStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
           jobStreamSeenRef.current.delete(item.jobID);
-          if (item.threadID !== activeThreadID) {
+          if (shouldSurfaceJobCompletion && item.threadID !== activeThreadID) {
             setThreadUnread(item.threadID, true);
           }
 
@@ -1668,19 +4074,31 @@ export function App() {
             if (job.status === "succeeded") {
               if (assistantText) {
                 if (sawStream) {
-                  finalizeAssistantStreamEntry(item.threadID, "success", assistantText);
+                  finalizeAssistantStreamEntry(
+                    item.threadID,
+                    "success",
+                    assistantText,
+                  );
                 }
               } else if (sawStream) {
-                finalizeAssistantStreamEntry(item.threadID, "success", EMPTY_ASSISTANT_FALLBACK);
+                finalizeAssistantStreamEntry(
+                  item.threadID,
+                  "success",
+                  EMPTY_ASSISTANT_FALLBACK,
+                );
               }
             }
             continue;
           }
 
-          completedJobsRef.current.add(job.id);
+          markRunCompleted(job.id);
           {
             const failedSummary = summarizeTargetFailures(job);
-            if (job.status === "failed" || job.status === "canceled" || responseFailed) {
+            if (
+              job.status === "failed" ||
+              job.status === "canceled" ||
+              responseFailed
+            ) {
               if (sawStream) {
                 finalizeAssistantStreamEntry(item.threadID, "error");
               }
@@ -1688,54 +4106,84 @@ export function App() {
                 {
                   kind: "system",
                   state: "error",
-                  title: "System",
-                  body: failedSummary || (job.error ? String(job.error) : "Session failed.")
+                  title: job.status === "canceled" ? "Interrupted" : "Failed",
+                  body:
+                    failedSummary ||
+                    (job.status === "canceled"
+                      ? "Session interrupted."
+                      : job.error
+                        ? String(job.error)
+                        : "Session failed."),
                 },
-                item.threadID
+                item.threadID,
               );
             } else if (assistantText) {
               if (sawStream) {
-                finalizeAssistantStreamEntry(item.threadID, "success", assistantText);
+                finalizeAssistantStreamEntry(
+                  item.threadID,
+                  "success",
+                  assistantText,
+                );
               } else {
                 addTimelineEntry(
                   {
                     kind: "assistant",
                     state: "success",
                     title: "Assistant",
-                    body: assistantText
+                    body: assistantText,
                   },
-                  item.threadID
+                  item.threadID,
                 );
               }
             } else if (sawStream) {
-              finalizeAssistantStreamEntry(item.threadID, "success", EMPTY_ASSISTANT_FALLBACK);
+              finalizeAssistantStreamEntry(
+                item.threadID,
+                "success",
+                EMPTY_ASSISTANT_FALLBACK,
+              );
             }
-            const sessionTitle = threadTitleMapRef.current.get(item.threadID) ?? "Session";
+            const sessionTitle =
+              threadTitleMapRef.current.get(item.threadID) ?? "Session";
             const completionStatus: "succeeded" | "failed" | "canceled" =
-              job.status === "canceled" ? "canceled" : job.status === "succeeded" && !responseFailed ? "succeeded" : "failed";
+              job.status === "canceled"
+                ? "canceled"
+                : job.status === "succeeded" && !responseFailed
+                  ? "succeeded"
+                  : "failed";
             const completion = sessionCompletionCopy(completionStatus);
-            notifySessionDone(`${sessionTitle} ${completion.suffix}`, completion.body);
-            pushSessionAlert({
-              threadID: item.threadID,
-              title: `${sessionTitle} ${completion.suffix}`,
-              body: completion.body
-            });
+            if (shouldSurfaceJobCompletion) {
+              notifySessionDone(
+                `${sessionTitle} ${completion.suffix}`,
+                completion.body,
+              );
+              pushSessionAlert({
+                threadID: item.threadID,
+                title: `${sessionTitle} ${completion.suffix}`,
+                body: completion.body,
+              });
+            }
           }
         }
 
-        const [nextJobs, nextRuns, nextAudit, refreshedMetrics] = await Promise.all([
-          listRunJobs(token, 20),
-          listRuns(token, 20),
-          listAudit(token, 80),
-          getMetrics(token)
-        ]);
+        const [nextJobs, nextRuns, nextAudit, refreshedMetrics] =
+          await Promise.all([
+            listRunJobs(token, 20),
+            listRuns(token, 20),
+            listAudit(token, 80),
+            getMetrics(token),
+          ]);
         if (canceled) return;
         setJobs(nextJobs);
         setRuns(nextRuns);
         setAuditEvents(nextAudit);
         setMetrics(refreshedMetrics);
         if (needsProjectRefresh) {
-          await refreshProjectsFromSource(token, hosts, runtimes.some((runtime) => runtime.name === "codex"), true);
+          await refreshProjectsFromSource(
+            token,
+            hosts,
+            runtimes.some((runtime) => runtime.name === "codex"),
+            true,
+          );
           if (canceled) return;
         }
       } catch {
@@ -1752,7 +4200,15 @@ export function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [authPhase, token, appMode, runningThreadJobs, activeThreadID, hosts, runtimes]);
+  }, [
+    authPhase,
+    token,
+    appMode,
+    runningThreadJobs,
+    activeThreadID,
+    hosts,
+    runtimes,
+  ]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
@@ -1764,7 +4220,7 @@ export function App() {
           listRunJobs(token, 20),
           listRuns(token, 20),
           listAudit(token, 80),
-          getMetrics(token)
+          getMetrics(token),
         ]);
         if (canceled) return;
         setJobs(nextJobs);
@@ -1807,6 +4263,8 @@ export function App() {
 
   function onLogout() {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(SESSION_EVENT_CURSOR_KEY);
+    localStorage.removeItem(COMPLETED_RUNS_KEY);
     stopAllSessionStreams();
     streamAuthTokenRef.current = "";
     resetOpsDomain();
@@ -1816,10 +4274,13 @@ export function App() {
     jobNoTextFinalizeRetriesRef.current.clear();
     sessionEventCursorRef.current.clear();
     sessionRunStateRef.current.clear();
+    completedJobsRef.current.clear();
     setSubmittingThreadID("");
+    setCancelingThreadID("");
     setSessionAlerts([]);
     setSessionModelDefault("");
     setSessionModelOptions([]);
+    setSourceProjectIDs([]);
     setToken("");
     setTokenInput("");
     setAuthError("");
@@ -1839,8 +4300,224 @@ export function App() {
     await loadWorkspace(token, false);
   }
 
-  async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
+  async function onCreateProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (authPhase !== "ready" || !token.trim()) return;
+    const hostID = projectFormHostID.trim();
+    const path = projectFormPath.trim();
+    const title = projectFormTitle.trim();
+    if (!hostID || !path) {
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Project Validation",
+        body: "Server and project path are required.",
+      });
+      return;
+    }
+
+    setUpsertingProjectID("__create__");
+    try {
+      const saved = await upsertProject(token, {
+        host_id: hostID,
+        path,
+        title: title || undefined,
+        runtime: "codex",
+      });
+      await refreshProjectsFromSource(token, hosts, false, true);
+      if (saved.id.trim()) {
+        setActiveWorkspaceID(saved.id.trim());
+      }
+      closeProjectComposer();
+      addTimelineEntry({
+        kind: "system",
+        state: "success",
+        title: "Project Created",
+        body: `${resolveProjectTitle(path, title)} · ${path}`,
+      });
+    } catch (error) {
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Create Project Failed",
+        body: String(error),
+      });
+    } finally {
+      setUpsertingProjectID("");
+    }
+  }
+
+  async function onRenameProject(project: SessionTreeProject) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const currentTitle = resolveProjectTitle(project.path, project.title);
+    const next = window.prompt("Project name", currentTitle);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed) {
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Rename Project Failed",
+        body: "Project name is required.",
+      });
+      return;
+    }
+    if (trimmed === currentTitle) return;
+
+    setUpsertingProjectID(project.id);
+    try {
+      const saved = await upsertProject(token, {
+        id: project.id,
+        host_id: project.hostID,
+        path: project.path,
+        title: trimmed,
+        runtime: "codex",
+      });
+      await refreshProjectsFromSource(token, hosts, false, true);
+      if (saved.id.trim()) {
+        setActiveWorkspaceID(saved.id.trim());
+      }
+      addTimelineEntry({
+        kind: "system",
+        state: "success",
+        title: "Project Renamed",
+        body: `${currentTitle} -> ${trimmed}`,
+      });
+    } catch (error) {
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Rename Project Failed",
+        body: String(error),
+      });
+    } finally {
+      setUpsertingProjectID("");
+    }
+  }
+
+  async function onArchiveProject(
+    projectID: string,
+    projectPath: string,
+    sessionCount: number,
+  ) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const targetProjectID = projectID.trim();
+    if (!targetProjectID) return;
+    if (!sourceProjectIDSet.has(targetProjectID)) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Archive Unavailable",
+          body: "Project is local-only and cannot be archived remotely.",
+        },
+        activeThreadID,
+      );
+      return;
+    }
+    if (sessionCount > 0) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Archive Blocked",
+          body: "Project is not empty. Archive its sessions first.",
+        },
+        activeThreadID,
+      );
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Archive empty project "${projectPath}"?`,
+    );
+    if (!confirmed) return;
+
+    setDeletingProjectID(targetProjectID);
+    try {
+      await deleteProject(token, targetProjectID);
+      await refreshProjectsFromSource(token, hosts, false, true);
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "success",
+          title: "Project Archived",
+          body: projectPath,
+        },
+        activeThreadID,
+      );
+    } catch (error) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Project Archive Failed",
+          body: String(error),
+        },
+        activeThreadID,
+      );
+    } finally {
+      setDeletingProjectID("");
+    }
+  }
+
+  async function onArchiveActiveSession() {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    const targetSessionID = activeThread.id.trim();
+    if (!targetSessionID) return;
+    if (activeThread.activeJobID || submittingThreadID === targetSessionID) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Archive Blocked",
+          body: "Session is running. Stop it before archiving.",
+        },
+        targetSessionID,
+      );
+      return;
+    }
+    const confirmed = window.confirm(
+      `Archive session "${activeThread.title}" on host "${activeWorkspace?.hostName || "unknown"}"?`,
+    );
+    if (!confirmed) return;
+
+    setDeletingThreadID(targetSessionID);
+    try {
+      await archiveSession(token, targetSessionID);
+      stopSessionStream(targetSessionID);
+      deleteSessionEventCursor(targetSessionID);
+      sessionRunStateRef.current.delete(targetSessionID);
+      removeThread(targetSessionID);
+      await refreshProjectsFromSource(token, hosts, false, true);
+    } catch (error) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Archive Failed",
+          body: String(error),
+        },
+        targetSessionID,
+      );
+    } finally {
+      setDeletingThreadID("");
+    }
+  }
+
+  function onReconnectActiveStream() {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const sessionID = activeThreadID.trim();
+    if (!sessionID) return;
+    stopSessionStream(sessionID, { preserveRunState: true, preserveHealth: true });
+    updateSessionStreamHealth(sessionID, "connecting", {
+      throttleMS: 0,
+      lastError: "",
+    });
+    startSessionStream(sessionID, token);
+  }
+
+  async function submitPromptForActiveThread(trimmedPrompt: string) {
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
     if (activeThread.activeJobID || submittingThreadID === activeThread.id) {
       addTimelineEntry(
@@ -1848,22 +4525,54 @@ export function App() {
           kind: "system",
           state: "running",
           title: "Session Busy",
-          body: "This session is already running. Wait for completion or switch to another session."
+          body: "This session is already running. Wait for completion or switch to another session.",
         },
-        activeThread.id
+        activeThread.id,
       );
       return;
     }
 
-    const editorValue = promptInputRef.current?.value ?? "";
-    const trimmedPrompt = activeThread.draft.trim() || editorValue.trim();
-    if (!trimmedPrompt) {
-      addTimelineEntry({ kind: "system", state: "error", title: "Prompt Missing", body: "Prompt is required." }, activeThread.id);
+    const mode: CodexSessionMode = activeThread.codexMode ?? "exec";
+    const prompt = trimmedPrompt.trim();
+    if (mode === "exec" && !prompt) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Prompt Missing",
+          body: "Prompt is required in exec mode.",
+        },
+        activeThread.id,
+      );
       return;
+    }
+    if (
+      mode === "resume" &&
+      !activeThread.resumeLast &&
+      !activeThread.resumeSessionID.trim()
+    ) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Resume Config Missing",
+          body: "Enable resume last or provide a session ID.",
+        },
+        activeThread.id,
+      );
+      return;
+    }
+    if (prompt && mode === "exec" && isGenericSessionTitle(activeThread.title)) {
+      const nextTitle = deriveSessionTitleFromPrompt(prompt);
+      if (nextTitle) {
+        setThreadTitle(activeThread.id, nextTitle);
+      }
     }
 
     const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
-    const localHostIDs = hosts.filter((host) => host.connection_mode === "local").map((host) => host.id);
+    const localHostIDs = hosts
+      .filter((host) => host.connection_mode === "local")
+      .map((host) => host.id);
     const targetHostIDs =
       workspaceHostID !== ""
         ? [workspaceHostID]
@@ -1879,66 +4588,140 @@ export function App() {
         {
           kind: "system",
           state: "error",
-          title: "No Target Host",
-          body: "No target server available for this session."
+          title: "No Server Available",
+          body: "No server is available for this session.",
         },
-        activeThread.id
+        activeThread.id,
       );
       return;
     }
 
-    const selectedHosts = hosts.filter((host) => targetHostIDs.includes(host.id));
-    const hasNonLocalTarget = selectedHosts.some((host) => host.connection_mode !== "local");
-    const safeImagePaths = hasNonLocalTarget ? [] : activeThread.imagePaths;
-    if (hasNonLocalTarget && activeThread.imagePaths.length > 0) {
+    const selectedHosts = hosts.filter((host) =>
+      targetHostIDs.includes(host.id),
+    );
+    const hasNonLocalTarget = selectedHosts.some(
+      (host) => host.connection_mode !== "local",
+    );
+    const allowImageAttach = mode !== "review";
+    const safeImagePaths =
+      allowImageAttach && !hasNonLocalTarget ? activeThread.imagePaths : [];
+    if (allowImageAttach && hasNonLocalTarget && activeThread.imagePaths.length > 0) {
       addTimelineEntry(
         {
           kind: "system",
           state: "running",
           title: "Image Attachment Skipped",
-          body: "Image attachments are only applied to local-mode targets."
+          body: "Image attachments are only applied to local-mode targets.",
         },
-        activeThread.id
+        activeThread.id,
       );
     }
 
     const fanout = Math.max(1, Number.parseInt(fanoutValue, 10) || 1);
     const outputCap = Math.max(32, Number.parseInt(maxOutputKB, 10) || 256);
-    const effectiveModel = activeThread.model.trim() || sessionModelDefault.trim() || sessionModelChoices[0]?.trim() || undefined;
-    const effectiveSandbox = activeThread.sandbox || runSandbox || "workspace-write";
+    const effectiveModel =
+      activeThread.model.trim() ||
+      sessionModelDefault.trim() ||
+      sessionModelChoices[0]?.trim() ||
+      undefined;
+    const effectiveSandbox =
+      activeThread.sandbox || runSandbox || "workspace-write";
     const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
+    const reviewBase = activeThread.reviewBase.trim();
+    const reviewCommit = activeThread.reviewCommit.trim();
+    const reviewTitle = activeThread.reviewTitle.trim();
+
+    const codexRequest: RunRequest["codex"] =
+      (activeRuntime?.name ?? selectedRuntime) === "codex"
+        ? {
+            mode,
+            model: effectiveModel,
+            ask_for_approval: activeThread.approvalPolicy || undefined,
+            search: activeThread.webSearch ? true : undefined,
+            json_output: activeThread.jsonOutput,
+            skip_git_repo_check: activeThread.skipGitRepoCheck,
+            ephemeral: activeThread.ephemeral,
+            ...(mode === "exec"
+              ? {
+                  sandbox: effectiveSandbox,
+                  add_dirs:
+                    activeThread.addDirs.length > 0
+                      ? activeThread.addDirs
+                      : undefined,
+                  images:
+                    safeImagePaths.length > 0 ? safeImagePaths : undefined,
+                }
+              : {}),
+            ...(mode === "resume"
+              ? {
+                  resume_last: activeThread.resumeLast,
+                  session_id: activeThread.resumeLast
+                    ? undefined
+                    : activeThread.resumeSessionID.trim() || undefined,
+                  images:
+                    safeImagePaths.length > 0 ? safeImagePaths : undefined,
+                }
+              : {}),
+            ...(mode === "review"
+              ? {
+                  review_uncommitted: activeThread.reviewUncommitted,
+                  review_base: reviewBase || undefined,
+                  review_commit: reviewCommit || undefined,
+                  review_title: reviewTitle || undefined,
+                }
+              : {}),
+          }
+        : undefined;
 
     const request: RunRequest = {
       runtime: activeRuntime?.name ?? selectedRuntime,
-      prompt: trimmedPrompt,
+      prompt,
       session_id: activeThread.id,
       all_hosts: false,
       host_ids: targetHostIDs,
       workdir: effectiveWorkdir,
       fanout,
       max_output_kb: outputCap,
-      codex:
-        (activeRuntime?.name ?? selectedRuntime) === "codex"
-          ? {
-              mode: "exec",
-              model: effectiveModel,
-              sandbox: effectiveSandbox,
-              images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
-              json_output: true,
-              skip_git_repo_check: true,
-              ephemeral: false
-            }
-          : undefined
+      codex: codexRequest,
     };
 
-    addTimelineEntry(
-      {
-        kind: "user",
-        title: "You",
-        body: trimmedPrompt
-      },
-      activeThread.id
-    );
+    if (prompt) {
+      addTimelineEntry(
+        {
+          kind: "user",
+          title: "You",
+          body: prompt,
+        },
+        activeThread.id,
+      );
+    } else if (mode === "resume") {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "running",
+          title: "Resume Requested",
+          body: activeThread.resumeLast
+            ? "Continuing from latest session."
+            : `Continuing from ${activeThread.resumeSessionID.trim() || "specified session"}.`,
+        },
+        activeThread.id,
+      );
+    } else if (mode === "review") {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "running",
+          title: "Review Requested",
+          body: "Starting code review.",
+        },
+        activeThread.id,
+      );
+    }
+    if (runAsyncMode) {
+      upsertAssistantStreamEntry(activeThread.id, "Thinking...");
+    }
+    timelineForceStickRef.current = true;
+    timelineStickToBottomRef.current = true;
     updateThreadDraft(activeThread.id, "");
 
     setSubmittingThreadID(activeThread.id);
@@ -1952,7 +4735,10 @@ export function App() {
         setActiveJobThreadID(activeThread.id);
         setActiveJob(body.job);
         setThreadJobState(activeThread.id, body.job.id, "running");
-        setJobs((prev) => [body.job, ...prev.filter((job) => job.id !== body.job.id)]);
+        setJobs((prev) => [
+          body.job,
+          ...prev.filter((job) => job.id !== body.job.id),
+        ]);
         setSubmittingThreadID("");
       } else {
         const { status, body } = await runFanout(token, request);
@@ -1960,29 +4746,284 @@ export function App() {
           {
             kind: "assistant",
             state: status >= 400 ? "error" : "success",
-            title: `Run Finished (HTTP ${status})`,
-            body: summarizeRunResponse(body)
+            title: `Response Finished (HTTP ${status})`,
+            body: summarizeRunResponse(body),
           },
-          activeThread.id
+          activeThread.id,
         );
 
         const [nextRuns, nextJobs, nextAudit, nextMetrics] = await Promise.all([
           listRuns(token, 20),
           listRunJobs(token, 20),
           listAudit(token, 80),
-          getMetrics(token)
+          getMetrics(token),
         ]);
         setRuns(nextRuns);
         setJobs(nextJobs);
         setAuditEvents(nextAudit);
         setMetrics(nextMetrics);
-        setThreadJobState(activeThread.id, "", status >= 400 ? "failed" : "succeeded");
+        setThreadJobState(
+          activeThread.id,
+          "",
+          status >= 400 ? "failed" : "succeeded",
+        );
         setSubmittingThreadID("");
       }
     } catch (error) {
-      addTimelineEntry({ kind: "system", state: "error", title: "Run Failed", body: String(error) }, activeThread.id);
+      finalizeAssistantStreamEntry(activeThread.id, "error");
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Response Failed",
+          body: String(error),
+        },
+        activeThread.id,
+      );
       setThreadJobState(activeThread.id, "", "failed");
       setSubmittingThreadID("");
+    }
+  }
+
+  async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    const editorValue = promptInputRef.current?.value ?? "";
+    const trimmedPrompt = activeThread.draft.trim() || editorValue.trim();
+    await submitPromptForActiveThread(trimmedPrompt);
+  }
+
+  async function onStopActiveSessionRun() {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    const runID = activeThread.activeJobID.trim();
+    if (!runID) return;
+    if (cancelingThreadID === activeThread.id) return;
+    setCancelingThreadID(activeThread.id);
+    try {
+      await cancelRunJob(token, runID);
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "running",
+          title: "Stopping",
+          body: "Stopping current response...",
+        },
+        activeThread.id,
+      );
+    } catch (error) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Stop Failed",
+          body: String(error),
+        },
+        activeThread.id,
+      );
+    } finally {
+      setCancelingThreadID("");
+    }
+  }
+
+  async function onRegenerateActiveSession() {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    if (activeThread.codexMode !== "exec") {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Regenerate Unavailable",
+          body: "Regenerate is available only in exec mode.",
+        },
+        activeThread.id,
+      );
+      return;
+    }
+    const prompt = lastUserPromptFromTimeline(activeThread.timeline);
+    if (!prompt) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Regenerate Unavailable",
+          body: "No previous user prompt in this session.",
+        },
+        activeThread.id,
+      );
+      return;
+    }
+    await submitPromptForActiveThread(prompt);
+  }
+
+  function onForkActiveSession() {
+    if (!activeThread) return;
+    forkThread(activeThread.id);
+  }
+
+  async function onEditAndResend(entry: TimelineEntry) {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    if (entry.kind !== "user") return;
+    const edited = window.prompt("Edit prompt before resend", entry.body);
+    if (edited === null) return;
+    const trimmed = edited.trim();
+    if (!trimmed) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Prompt Missing",
+          body: "Prompt is required.",
+        },
+        activeThread.id,
+      );
+      return;
+    }
+    await submitPromptForActiveThread(trimmed);
+  }
+
+  async function onRunPlatformLogin(action: "status" | "login_device" | "logout") {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const hostID = platformHostID.trim();
+    if (!hostID) {
+      setPlatformNotice("Select a target host first.");
+      return;
+    }
+    setPlatformBusySection("login");
+    setPlatformNotice(`Running login ${action} on ${platformHost?.name ?? hostID}...`);
+    try {
+      const result = await codexPlatformLogin(token, {
+        host_id: hostID,
+        action,
+      });
+      setPlatformLoginResult(result);
+      setPlatformNotice(`Login ${action} finished on ${result.host.name}.`);
+    } catch (error) {
+      setPlatformNotice(String(error));
+    } finally {
+      setPlatformBusySection("");
+    }
+  }
+
+  async function onRunPlatformMCP() {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const hostID = platformHostID.trim();
+    if (!hostID) {
+      setPlatformNotice("Select a target host first.");
+      return;
+    }
+    const command = platformMCPCommand
+      .trim()
+      .split(/\s+/)
+      .filter((item) => item !== "");
+    const request: {
+      host_id: string;
+      action: CodexPlatformMCPAction;
+      name?: string;
+      url?: string;
+      command?: string[];
+      env?: string[];
+      bearer_token_env_var?: string;
+      scopes?: string[];
+    } = {
+      host_id: hostID,
+      action: platformMCPAction,
+    };
+    if (platformMCPName.trim()) {
+      request.name = platformMCPName.trim();
+    }
+    if (platformMCPURL.trim()) {
+      request.url = platformMCPURL.trim();
+    }
+    if (command.length > 0) {
+      request.command = command;
+    }
+    const envValues = splitCSVValues(platformMCPEnvCSV);
+    if (envValues.length > 0) {
+      request.env = envValues;
+    }
+    if (platformMCPBearerTokenEnvVar.trim()) {
+      request.bearer_token_env_var = platformMCPBearerTokenEnvVar.trim();
+    }
+    const scopeValues = splitCSVValues(platformMCPScopeCSV);
+    if (scopeValues.length > 0) {
+      request.scopes = scopeValues;
+    }
+
+    setPlatformBusySection("mcp");
+    setPlatformNotice(`Running mcp ${platformMCPAction} on ${platformHost?.name ?? hostID}...`);
+    try {
+      const result = await codexPlatformMCP(token, request);
+      setPlatformMCPResult(result);
+      setPlatformNotice(`MCP ${platformMCPAction} finished on ${result.host.name}.`);
+    } catch (error) {
+      setPlatformNotice(String(error));
+    } finally {
+      setPlatformBusySection("");
+    }
+  }
+
+  async function onRunPlatformCloud() {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const hostID = platformHostID.trim();
+    if (!hostID) {
+      setPlatformNotice("Select a target host first.");
+      return;
+    }
+    const attempts = Number.parseInt(platformCloudAttempts, 10);
+    const limit = Number.parseInt(platformCloudLimit, 10);
+    const attempt = Number.parseInt(platformCloudAttempt, 10);
+    const request: {
+      host_id: string;
+      action: CodexPlatformCloudAction;
+      task_id?: string;
+      env_id?: string;
+      query?: string;
+      attempts?: number;
+      branch?: string;
+      limit?: number;
+      cursor?: string;
+      attempt?: number;
+    } = {
+      host_id: hostID,
+      action: platformCloudAction,
+    };
+    if (platformCloudTaskID.trim()) {
+      request.task_id = platformCloudTaskID.trim();
+    }
+    if (platformCloudEnvID.trim()) {
+      request.env_id = platformCloudEnvID.trim();
+    }
+    if (platformCloudQuery.trim()) {
+      request.query = platformCloudQuery.trim();
+    }
+    if (Number.isFinite(attempts) && attempts > 0) {
+      request.attempts = attempts;
+    }
+    if (platformCloudBranch.trim()) {
+      request.branch = platformCloudBranch.trim();
+    }
+    if (Number.isFinite(limit) && limit > 0) {
+      request.limit = limit;
+    }
+    if (platformCloudCursor.trim()) {
+      request.cursor = platformCloudCursor.trim();
+    }
+    if (Number.isFinite(attempt) && attempt > 0) {
+      request.attempt = attempt;
+    }
+
+    setPlatformBusySection("cloud");
+    setPlatformNotice(`Running cloud ${platformCloudAction} on ${platformHost?.name ?? hostID}...`);
+    try {
+      const result = await codexPlatformCloud(token, request);
+      setPlatformCloudResult(result);
+      setPlatformNotice(
+        `Cloud ${platformCloudAction} finished on ${result.host.name}.`,
+      );
+    } catch (error) {
+      setPlatformNotice(String(error));
+    } finally {
+      setPlatformBusySection("");
     }
   }
 
@@ -1992,8 +5033,16 @@ export function App() {
 
     const mode = hostForm.connectionMode ?? "ssh";
     if (!hostForm.name.trim() || (mode === "ssh" && !hostForm.host.trim())) {
-      const validationMessage = mode === "ssh" ? "name and host are required for ssh mode." : "name is required.";
-      addTimelineEntry({ kind: "system", state: "error", title: "Host Validation", body: validationMessage });
+      const validationMessage =
+        mode === "ssh"
+          ? "name and host are required for ssh mode."
+          : "name is required.";
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Host Validation",
+        body: validationMessage,
+      });
       return;
     }
 
@@ -2008,20 +5057,31 @@ export function App() {
         connection_mode: mode,
         host: hostForm.host.trim() || undefined,
         user: hostForm.user.trim() || undefined,
-        workspace: hostForm.workspace.trim() || undefined
+        workspace: hostForm.workspace.trim() || undefined,
       });
-      setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
+      setHostForm({
+        name: "",
+        connectionMode: "ssh",
+        host: "",
+        user: "",
+        workspace: "",
+      });
       setEditingHostID("");
       await loadWorkspace(token, false);
       addTimelineEntry({
         kind: "system",
         state: "success",
         title: editing ? "Host Updated" : "Host Saved",
-        body: `${editing ? "Updated" : "Saved"} host ${hostName}.`
+        body: `${editing ? "Updated" : "Saved"} host ${hostName}.`,
       });
       setOpsNotice(`${editing ? "Updated" : "Saved"} host ${hostName}.`);
     } catch (error) {
-      addTimelineEntry({ kind: "system", state: "error", title: "Host Save Failed", body: String(error) });
+      addTimelineEntry({
+        kind: "system",
+        state: "error",
+        title: "Host Save Failed",
+        body: String(error),
+      });
     } finally {
       setAddingHost(false);
     }
@@ -2034,14 +5094,20 @@ export function App() {
       connectionMode: host.connection_mode === "local" ? "local" : "ssh",
       host: host.host,
       user: host.user ?? "",
-      workspace: host.workspace ?? ""
+      workspace: host.workspace ?? "",
     });
     setOpsNotice(`Editing host ${host.name}.`);
   }
 
   function onCancelHostEdit() {
     setEditingHostID("");
-    setHostForm({ name: "", connectionMode: "ssh", host: "", user: "", workspace: "" });
+    setHostForm({
+      name: "",
+      connectionMode: "ssh",
+      host: "",
+      user: "",
+      workspace: "",
+    });
     setOpsNotice("Canceled host edit.");
   }
 
@@ -2055,9 +5121,15 @@ export function App() {
       const codex = result.codex?.ok ? "ok" : "fail";
       const login = result.codex_login?.ok ? "ok" : "fail";
       const sshErr = result.ssh?.error ? ` ssh_error=${result.ssh.error}` : "";
-      const codexErr = result.codex?.error ? ` codex_error=${result.codex.error}` : "";
-      const loginErr = result.codex_login?.error ? ` login_error=${result.codex_login.error}` : "";
-      setOpsNotice(`Probe ${host.name}: ssh=${ssh} codex=${codex} login=${login}${sshErr}${codexErr}${loginErr}`);
+      const codexErr = result.codex?.error
+        ? ` codex_error=${result.codex.error}`
+        : "";
+      const loginErr = result.codex_login?.error
+        ? ` login_error=${result.codex_login.error}`
+        : "";
+      setOpsNotice(
+        `Probe ${host.name}: ssh=${ssh} codex=${codex} login=${login}${sshErr}${codexErr}${loginErr}`,
+      );
     } catch (error) {
       setOpsNotice(`Probe failed for ${host.name}: ${String(error)}`);
     } finally {
@@ -2108,18 +5180,72 @@ export function App() {
     }
   }
 
-  async function onUploadSessionImage(file: File) {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+  async function onUploadSessionImage(
+    file: File,
+    threadID = activeThread?.id ?? "",
+  ) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const targetThreadID = threadID.trim();
+    if (!targetThreadID) return;
+    if (!file.type.toLowerCase().startsWith("image/")) {
+      setImageUploadError("Only image files are supported.");
+      return;
+    }
     setUploadingImage(true);
     setImageUploadError("");
     try {
       const uploaded = await uploadImage(token, file);
-      addThreadImagePath(activeThread.id, uploaded.path);
+      addThreadImagePath(targetThreadID, uploaded.path);
     } catch (error) {
       setImageUploadError(String(error));
     } finally {
       setUploadingImage(false);
     }
+  }
+
+  function onComposerPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    if (!activeThread || activeThreadBusy) return;
+    const imageFile = firstImageFile(event.clipboardData?.files);
+    if (!imageFile) return;
+    event.preventDefault();
+    void onUploadSessionImage(imageFile, activeThread.id);
+  }
+
+  function onComposerDragEnter(event: ReactDragEvent<HTMLElement>) {
+    if (!activeThread || activeThreadBusy) return;
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    event.preventDefault();
+    composerDragDepthRef.current += 1;
+    setComposerDropActive(true);
+  }
+
+  function onComposerDragOver(event: ReactDragEvent<HTMLElement>) {
+    if (!activeThread || activeThreadBusy) return;
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    if (!composerDropActive) {
+      setComposerDropActive(true);
+    }
+  }
+
+  function onComposerDragLeave(event: ReactDragEvent<HTMLElement>) {
+    if (!composerDropActive) return;
+    event.preventDefault();
+    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1);
+    if (composerDragDepthRef.current > 0) return;
+    setComposerDropActive(false);
+  }
+
+  function onComposerDrop(event: ReactDragEvent<HTMLElement>) {
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    event.preventDefault();
+    composerDragDepthRef.current = 0;
+    setComposerDropActive(false);
+    if (!activeThread || activeThreadBusy) return;
+    const imageFile = firstImageFile(event.dataTransfer?.files);
+    if (!imageFile) return;
+    void onUploadSessionImage(imageFile, activeThread.id);
   }
 
   if (authPhase !== "ready") {
@@ -2129,7 +5255,10 @@ export function App() {
         <section className="gate-card">
           <p className="gate-eyebrow">remote-llm workspace</p>
           <h1>Token Required</h1>
-          <p className="gate-copy">Use your access token to unlock the operator console. No token means no workspace access.</p>
+          <p className="gate-copy">
+            Use your access token to unlock the operator console. No token means
+            no workspace access.
+          </p>
           <form onSubmit={onSubmitToken} className="gate-form">
             <label>
               Access Token
@@ -2160,15 +5289,30 @@ export function App() {
         </div>
         <div className="topbar-controls">
           <div className="mode-switch">
-            <button type="button" className={appMode === "session" ? "mode-btn active" : "mode-btn"} onClick={() => switchMode("session")}>
+            <button
+              type="button"
+              className={appMode === "session" ? "mode-btn active" : "mode-btn"}
+              onClick={() => switchMode("session")}
+            >
               Session
             </button>
-            <button type="button" className={appMode === "ops" ? "mode-btn active" : "mode-btn"} onClick={() => switchMode("ops")}>
+            <button
+              type="button"
+              className={appMode === "ops" ? "mode-btn active" : "mode-btn"}
+              onClick={() => switchMode("ops")}
+            >
               Ops
             </button>
           </div>
-          <span className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}>{syncLabel}</span>
-          <button onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+          <span
+            className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}
+          >
+            {syncLabel}
+          </span>
+          <button
+            onClick={() => void onRefreshWorkspace()}
+            disabled={isRefreshing}
+          >
             {isRefreshing ? "Syncing..." : "Sync"}
           </button>
           <button className="ghost" onClick={onLogout}>
@@ -2177,7 +5321,11 @@ export function App() {
         </div>
       </header>
 
-      {healthIsError ? <section className="workspace-alert">Controller state degraded: {health}</section> : null}
+      {healthIsError ? (
+        <section className="workspace-alert">
+          Controller state degraded: {health}
+        </section>
+      ) : null}
 
       {appMode === "session" ? (
         <div className="session-stage">
@@ -2185,83 +5333,345 @@ export function App() {
             <section className="inspect-block focus-block">
               <div className="pane-title-line">
                 <h3>Projects</h3>
-                <button type="button" className="ghost new-thread" onClick={createThreadAndFocus}>
-                  New
-                </button>
+                <div className="pane-title-actions">
+                  <button
+                    type="button"
+                    className="ghost new-thread"
+                    onClick={openProjectComposer}
+                  >
+                    New Project
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost new-thread"
+                    onClick={createThreadAndFocus}
+                  >
+                    New Session
+                  </button>
+                </div>
               </div>
+              {projectComposerOpen ? (
+                <form className="project-create-form" onSubmit={onCreateProject}>
+                  <label className="project-create-field">
+                    <span>Server</span>
+                    <select
+                      value={projectFormHostID}
+                      onChange={(event) => setProjectFormHostID(event.target.value)}
+                      disabled={
+                        authPhase !== "ready" ||
+                        !token.trim() ||
+                        upsertingProjectID !== ""
+                      }
+                    >
+                      {hosts.map((host) => (
+                        <option key={host.id} value={host.id}>
+                          {host.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="project-create-field">
+                    <span>Path</span>
+                    <input
+                      placeholder="/home/ecs-user/project"
+                      value={projectFormPath}
+                      onChange={(event) => setProjectFormPath(event.target.value)}
+                      disabled={
+                        authPhase !== "ready" ||
+                        !token.trim() ||
+                        upsertingProjectID !== ""
+                      }
+                    />
+                  </label>
+                  <label className="project-create-field">
+                    <span>Name</span>
+                    <input
+                      placeholder="My Project"
+                      value={projectFormTitle}
+                      onChange={(event) => setProjectFormTitle(event.target.value)}
+                      disabled={
+                        authPhase !== "ready" ||
+                        !token.trim() ||
+                        upsertingProjectID !== ""
+                      }
+                    />
+                  </label>
+                  <div className="project-create-actions">
+                    <button
+                      type="submit"
+                      disabled={
+                        authPhase !== "ready" ||
+                        !token.trim() ||
+                        upsertingProjectID !== "" ||
+                        !projectFormHostID.trim() ||
+                        !projectFormPath.trim()
+                      }
+                    >
+                      {upsertingProjectID === "__create__" ? "Creating..." : "Create"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={closeProjectComposer}
+                      disabled={upsertingProjectID !== ""}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+              <label className="tree-filter">
+                <input
+                  value={projectFilter}
+                  onChange={(event) => setProjectFilter(event.target.value)}
+                  placeholder="Filter projects or sessions"
+                />
+              </label>
               <div className="project-tree">
                 {sessionTreeHosts.length === 0 ? (
-                  <p className="pane-subtle-light">No servers/projects discovered yet.</p>
+                  <p className="pane-subtle-light">
+                    No servers/projects discovered yet.
+                  </p>
+                ) : filteredSessionTreeHosts.length === 0 ? (
+                  <p className="pane-subtle-light">
+                    No matching projects or sessions.
+                  </p>
                 ) : (
-                  sessionTreeHosts.map((hostNode) => (
-                    <article key={hostNode.hostID} className="project-host-group">
-                      <header className="project-host-head">
-                        <strong>{hostNode.hostName}</strong>
-                        {hostNode.hostAddress ? <small>{hostNode.hostAddress}</small> : null}
-                      </header>
-                      {hostNode.projects.length === 0 ? (
-                        <p className="pane-subtle-light compact-empty">No projects available.</p>
-                      ) : (
-                        hostNode.projects.map((projectNode) => (
-                          <div key={projectNode.id} className="project-node">
-                            <button
-                              type="button"
-                              className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
-                              onClick={() => setActiveWorkspaceID(projectNode.id)}
-                              title={projectNode.path}
-                            >
-                              <span>{projectNode.path}</span>
-                              <small>{projectNode.sessions.length}</small>
-                            </button>
-                            <div className="project-session-list">
-                              {projectNode.sessions.length === 0 ? (
-                                <p className="pane-subtle-light compact-empty">No sessions in this project.</p>
-                              ) : (
-                                projectNode.sessions.map((sessionNode) => (
-                                  <button
-                                    key={sessionNode.id}
-                                    type="button"
-                                    className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
-                                    data-session-id={sessionNode.id}
-                                    onClick={() => activateThread(sessionNode.id)}
-                                    title={sessionNode.title}
-                                  >
-                                    <span>
-                                      {sessionNode.activeJobID
-                                        ? `● ${sessionNode.title}`
-                                        : sessionNode.unreadDone
-                                          ? `* ${sessionNode.title}`
-                                          : sessionNode.title}
-                                    </span>
-                                    <small>
-                                      {sessionNode.activeJobID
-                                        ? "running"
-                                        : sessionNode.unreadDone
-                                          ? "done"
-                                          : sessionNode.lastJobStatus === "idle"
-                                            ? sessionNode.timelineSize
-                                            : sessionNode.lastJobStatus}
-                                    </small>
-                                  </button>
-                                ))
-                              )}
-                            </div>
+                  filteredSessionTreeHosts.map((hostNode) => {
+                    const isCollapsed = collapsedHostIDs.includes(
+                      hostNode.hostID,
+                    );
+                    return (
+                      <article
+                        key={hostNode.hostID}
+                        className="project-host-group"
+                      >
+                        <header className="project-host-head">
+                          <div className="project-host-headline">
+                            <strong>{hostNode.hostName}</strong>
+                            {hostNode.hostAddress ? (
+                              <small>{hostNode.hostAddress}</small>
+                            ) : null}
                           </div>
-                        ))
-                      )}
-                    </article>
-                  ))
+                          <button
+                            type="button"
+                            className="ghost host-toggle"
+                            onClick={() => toggleHostCollapsed(hostNode.hostID)}
+                          >
+                            {isCollapsed ? "Expand" : "Collapse"}
+                          </button>
+                        </header>
+                        {isCollapsed ? null : hostNode.projects.length === 0 ? (
+                          <p className="pane-subtle-light compact-empty">
+                            No projects available.
+                          </p>
+                        ) : (
+                          hostNode.projects.map((projectNode) => (
+                            <div key={projectNode.id} className="project-node">
+                              <button
+                                type="button"
+                                className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
+                                onClick={() =>
+                                  setActiveWorkspaceID(projectNode.id)
+                                }
+                                title={projectNode.path}
+                              >
+                                <span className="project-chip-main">
+                                  <strong>
+                                    {projectNode.title}
+                                  </strong>
+                                  <em>{projectNode.path}</em>
+                                </span>
+                                <small>
+                                  {projectNode.sessions.length === 0
+                                    ? "empty"
+                                    : `${projectNode.sessions.length}`}
+                                </small>
+                              </button>
+                              <div className="project-node-actions">
+                                <button
+                                  type="button"
+                                  className="ghost project-archive-btn"
+                                  disabled={
+                                    authPhase !== "ready" ||
+                                    !token.trim() ||
+                                    upsertingProjectID !== ""
+                                  }
+                                  onClick={() => void onRenameProject(projectNode)}
+                                >
+                                  {upsertingProjectID === projectNode.id
+                                    ? "Saving..."
+                                    : "Rename"}
+                                </button>
+                                {sourceProjectIDSet.has(projectNode.id) ? (
+                                  <button
+                                    type="button"
+                                    className="ghost danger-ghost project-archive-btn"
+                                    disabled={
+                                      authPhase !== "ready" ||
+                                      !token.trim() ||
+                                      upsertingProjectID !== "" ||
+                                      deletingProjectID === projectNode.id ||
+                                      deletingProjectID !== "" ||
+                                      projectNode.sessions.length > 0
+                                    }
+                                    title={
+                                      projectNode.sessions.length > 0
+                                        ? "Archive sessions first"
+                                        : "Archive empty project"
+                                    }
+                                    onClick={() =>
+                                      void onArchiveProject(
+                                        projectNode.id,
+                                        projectNode.path,
+                                        projectNode.sessions.length,
+                                      )
+                                    }
+                                  >
+                                    {deletingProjectID === projectNode.id
+                                      ? "Archiving..."
+                                      : "Archive"}
+                                  </button>
+                                ) : null}
+                              </div>
+                              <div className="project-session-list">
+                                {projectNode.sessions.length === 0 ? (
+                                  <p className="pane-subtle-light compact-empty">
+                                    No sessions in this project.
+                                  </p>
+                                ) : (
+                                  projectNode.sessions.map((sessionNode) => (
+                                    <button
+                                      key={sessionNode.id}
+                                      type="button"
+                                      ref={(node) =>
+                                        registerSessionButtonRef(sessionNode.id, node)
+                                      }
+                                      className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
+                                      data-session-id={sessionNode.id}
+                                      data-pinned={sessionNode.pinned ? "true" : "false"}
+                                      tabIndex={
+                                        treeCursorSessionID === sessionNode.id ? 0 : -1
+                                      }
+                                      onClick={(event) => {
+                                        if (event.metaKey || event.ctrlKey) {
+                                          event.preventDefault();
+                                          setThreadPinned(
+                                            sessionNode.id,
+                                            !sessionNode.pinned,
+                                          );
+                                          return;
+                                        }
+                                        setTreeCursorSessionID(sessionNode.id);
+                                        activateThread(sessionNode.id);
+                                      }}
+                                      onFocus={() =>
+                                        setTreeCursorSessionID(sessionNode.id)
+                                      }
+                                      onKeyDown={(event) =>
+                                        onSessionTreeKeyDown(
+                                          event,
+                                          sessionNode.id,
+                                          sessionNode.pinned,
+                                        )
+                                      }
+                                      title={sessionNode.title}
+                                    >
+                                      <span className="session-chip-label">
+                                        {sessionNode.title}
+                                      </span>
+                                      <span className="session-chip-state">
+                                        {sessionNode.pinned ? (
+                                          <small className="session-chip-badge pinned">
+                                            pin
+                                          </small>
+                                        ) : null}
+                                        {sessionNode.activeJobID ? (
+                                          <small className="session-chip-badge running">
+                                            running
+                                          </small>
+                                        ) : null}
+                                        {sessionNode.unreadDone ? (
+                                          <small className="session-chip-badge unread">
+                                            new
+                                          </small>
+                                        ) : null}
+                                        {!sessionNode.activeJobID &&
+                                        !sessionNode.unreadDone &&
+                                        sessionNode.lastJobStatus !== "idle" ? (
+                                          <small className="session-chip-badge status">
+                                            {sessionNode.lastJobStatus}
+                                          </small>
+                                        ) : null}
+                                      </span>
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </article>
+                    );
+                  })
                 )}
               </div>
             </section>
 
             <section className="inspect-block compact-session-meta">
-              <p className="pane-subtle-light">Ctrl/Cmd+K focus · Enter send · Shift+Enter newline · Ctrl/Cmd+Shift+N new session</p>
+              <p className="pane-subtle-light">
+                Ctrl/Cmd+K palette · Enter send · Shift+Enter newline ·
+                Ctrl/Cmd+Shift+N new session · P pin (on focused session)
+              </p>
               <div className="ops-actions-row">
-                <button type="button" className="ghost" onClick={() => void onEnableNotifications()}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void onEnableNotifications()}
+                >
                   Alerts: {notificationPermission}
                 </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setSessionAlertsExpanded((prev) => !prev)}
+                  disabled={sessionAlerts.length === 0}
+                >
+                  Notifications {sessionAlerts.length > 0 ? `(${sessionAlerts.length})` : ""}
+                </button>
               </div>
+              {sessionAlerts.length === 0 ? (
+                <p className="pane-subtle-light">No notifications yet.</p>
+              ) : sessionAlertsExpanded ? (
+                <div className="notification-center">
+                  <div className="notification-head">
+                    <strong>Recent</strong>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={clearSessionAlerts}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="notification-list" role="status" aria-live="polite">
+                    {sessionAlerts
+                      .slice(Math.max(0, sessionAlerts.length - 8))
+                      .reverse()
+                      .map((alert) => (
+                        <button
+                          key={alert.id}
+                          type="button"
+                          className="session-alert"
+                          onClick={() => openSessionFromAlert(alert)}
+                        >
+                          <strong>{alert.title}</strong>
+                          <span>{alert.body}</span>
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
             </section>
           </aside>
 
@@ -2269,10 +5679,47 @@ export function App() {
             <header className="chat-head">
               <div>
                 <h1>{activeThread?.title ?? "Session"}</h1>
+                <p className="chat-context">
+                  {(activeWorkspace?.hostName?.trim() || "local-default") +
+                    " · " +
+                    (activeWorkspace?.path?.trim() || "/home/ecs-user")}
+                </p>
+              </div>
+              <div className="chat-head-side">
+                <span
+                  className={`stream-pill ${activeStreamTone}`}
+                  data-testid="stream-status"
+                  title={activeStreamLastError || `stream ${activeStreamCopy}`}
+                >
+                  stream {activeStreamCopy}
+                </span>
+                <button
+                  type="button"
+                  className="ghost danger-ghost stream-reconnect-btn"
+                  disabled={!activeThread || activeThreadBusy}
+                  onClick={() => void onArchiveActiveSession()}
+                >
+                  {activeThread && deletingThreadID === activeThread.id
+                    ? "Archiving..."
+                    : "Archive"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost stream-reconnect-btn"
+                  disabled={!canReconnectActiveStream}
+                  onClick={onReconnectActiveStream}
+                >
+                  Reconnect
+                </button>
               </div>
             </header>
 
-            <section className="timeline" aria-live="polite" ref={timelineViewportRef}>
+            <section
+              className="timeline"
+              aria-live="polite"
+              ref={timelineViewportRef}
+              onScroll={onTimelineScroll}
+            >
               {activeTimeline.length === 0 ? (
                 <article className="message message-system">
                   <div className="message-title-row">
@@ -2286,25 +5733,70 @@ export function App() {
                 </article>
               ) : (
                 activeTimeline.map((entry) => (
-                  <article key={entry.id} className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}>
+                  <article
+                    key={entry.id}
+                    className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}
+                  >
                     <div className="message-title-row">
                       <h4>{entry.title}</h4>
                       <time>{formatClock(entry.createdAt)}</time>
                     </div>
-                    <pre>{entry.body}</pre>
+                    {renderTimelineEntryBody(entry)}
                   </article>
                 ))
               )}
               <div ref={timelineBottomRef} />
             </section>
 
-            <form ref={composerFormRef} className="composer" onSubmit={onSendPrompt}>
+            <form
+              ref={composerFormRef}
+              className={`composer ${composerDropActive ? "drop-active" : ""}`}
+              onSubmit={onSendPrompt}
+              onDragEnter={onComposerDragEnter}
+              onDragOver={onComposerDragOver}
+              onDragLeave={onComposerDragLeave}
+              onDrop={onComposerDrop}
+            >
+              {activeThreadStatusCopy ? (
+                <p className="composer-status" role="status">
+                  {activeThreadStatusCopy}
+                </p>
+              ) : null}
+              {composerDropActive ? (
+                <p className="composer-drop-indicator" role="status">
+                  Drop image to attach.
+                </p>
+              ) : null}
               <div className="session-inline-settings">
+                <label className="session-setting-row">
+                  mode
+                  <select
+                    data-testid="lifecycle-mode-select"
+                    value={activeThreadMode}
+                    disabled={!activeThread || activeThreadBusy}
+                    onChange={(event) => {
+                      if (!activeThread) return;
+                      setThreadCodexMode(
+                        activeThread.id,
+                        event.target.value as CodexSessionMode,
+                      );
+                    }}
+                  >
+                    {CODEX_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label className="session-setting-row">
                   model
                   <select
+                    data-testid="session-model-select"
                     value={activeThreadModelValue}
-                    disabled={!activeThread || !hasSessionModelChoices}
+                    disabled={
+                      !activeThread || !hasSessionModelChoices || activeThreadBusy
+                    }
                     onChange={(event) => {
                       if (!activeThread) return;
                       setThreadModel(activeThread.id, event.target.value);
@@ -2313,42 +5805,326 @@ export function App() {
                     {hasSessionModelChoices ? (
                       sessionModelChoices.map((modelName) => (
                         <option key={modelName} value={modelName}>
-                          {modelName === sessionModelDefault ? `${modelName} (default)` : modelName}
+                          {modelName === sessionModelDefault
+                            ? `${modelName} (default)`
+                            : modelName}
                         </option>
                       ))
                     ) : (
                       <option value="">model unavailable</option>
                     )}
                   </select>
-                  {!hasSessionModelChoices ? <small className="pane-subtle-light">No models discovered on this server.</small> : null}
+                  {!hasSessionModelChoices ? (
+                    <small className="pane-subtle-light">
+                      No models discovered on this server.
+                    </small>
+                  ) : null}
                 </label>
                 <label className="session-setting-row">
                   sandbox
                   <select
+                    data-testid="session-sandbox-select"
                     value={activeThread?.sandbox ?? "workspace-write"}
-                    disabled={!activeThread}
+                    disabled={!activeThread || activeThreadBusy || !isExecMode}
                     onChange={(event) =>
                       activeThread &&
-                      setThreadSandbox(activeThread.id, event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                      setThreadSandbox(
+                        activeThread.id,
+                        event.target.value as
+                          | ""
+                          | "read-only"
+                          | "workspace-write"
+                          | "danger-full-access",
+                      )
                     }
                   >
                     <option value="read-only">read-only</option>
                     <option value="workspace-write">workspace-write</option>
-                    <option value="danger-full-access">danger-full-access</option>
+                    <option value="danger-full-access">
+                      danger-full-access
+                    </option>
                   </select>
+                  {!isExecMode ? (
+                    <small className="pane-subtle-light">
+                      Sandbox applies in exec mode.
+                    </small>
+                  ) : null}
                 </label>
               </div>
 
+              <div className="session-controls-row">
+                <button
+                  type="button"
+                  className="ghost advanced-toggle-btn"
+                  data-testid="fork-session-btn"
+                  onClick={onForkActiveSession}
+                  disabled={!activeThread || activeThreadBusy}
+                >
+                  Fork Session
+                </button>
+                <button
+                  type="button"
+                  className="ghost advanced-toggle-btn"
+                  data-testid="advanced-toggle-btn"
+                  onClick={() => setSessionAdvancedOpen((prev) => !prev)}
+                  disabled={!activeThread}
+                >
+                  {sessionAdvancedOpen ? "Hide Advanced" : "Advanced"}
+                </button>
+              </div>
+
+              {isResumeMode ? (
+                <div className="session-lifecycle-panel">
+                  <label className="session-setting-row toggle-setting-row">
+                    <span>resume latest</span>
+                    <input
+                      type="checkbox"
+                      data-testid="resume-last-toggle"
+                      checked={Boolean(activeThread?.resumeLast)}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadResumeLast(activeThread.id, event.target.checked)
+                      }
+                    />
+                  </label>
+                  <label className="session-setting-row">
+                    session id
+                    <input
+                      data-testid="resume-session-id-input"
+                      placeholder="019cb3d9-..."
+                      value={activeThread?.resumeSessionID ?? ""}
+                      disabled={
+                        !activeThread ||
+                        activeThreadBusy ||
+                        Boolean(activeThread?.resumeLast)
+                      }
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadResumeSessionID(
+                          activeThread.id,
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              {isReviewMode ? (
+                <div className="session-lifecycle-panel">
+                  <label className="session-setting-row toggle-setting-row">
+                    <span>uncommitted</span>
+                    <input
+                      type="checkbox"
+                      data-testid="review-uncommitted-toggle"
+                      checked={Boolean(activeThread?.reviewUncommitted)}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadReviewUncommitted(
+                          activeThread.id,
+                          event.target.checked,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="session-setting-row">
+                    base branch
+                    <input
+                      data-testid="review-base-input"
+                      placeholder="main"
+                      value={activeThread?.reviewBase ?? ""}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadReviewBase(activeThread.id, event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="session-setting-row">
+                    commit sha
+                    <input
+                      data-testid="review-commit-input"
+                      placeholder="a1b2c3d4"
+                      value={activeThread?.reviewCommit ?? ""}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadReviewCommit(activeThread.id, event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="session-setting-row">
+                    review title
+                    <input
+                      data-testid="review-title-input"
+                      placeholder="Release review"
+                      value={activeThread?.reviewTitle ?? ""}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadReviewTitle(activeThread.id, event.target.value)
+                      }
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              {sessionAdvancedOpen ? (
+                <div className="session-advanced-panel">
+                  <label className="session-setting-row">
+                    approval
+                    <select
+                      data-testid="advanced-approval-select"
+                      value={activeThread?.approvalPolicy ?? ""}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadApprovalPolicy(
+                          activeThread.id,
+                          event.target.value as CodexApprovalPolicy,
+                        )
+                      }
+                    >
+                      {APPROVAL_POLICY_OPTIONS.map((option) => (
+                        <option key={option.label} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="session-setting-row toggle-setting-row">
+                    <span>web search</span>
+                    <input
+                      type="checkbox"
+                      data-testid="advanced-web-search-toggle"
+                      checked={Boolean(activeThread?.webSearch)}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadWebSearch(activeThread.id, event.target.checked)
+                      }
+                    />
+                  </label>
+
+                  <label className="session-setting-row">
+                    add dir
+                    <div className="add-dir-row">
+                      <input
+                        data-testid="advanced-add-dir-input"
+                        placeholder="/opt/shared"
+                        value={addDirDraft}
+                        disabled={
+                          !activeThread || activeThreadBusy || !isExecMode
+                        }
+                        onChange={(event) => setAddDirDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") return;
+                          event.preventDefault();
+                          onAddDirDraftSubmit();
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={
+                          !activeThread ||
+                          activeThreadBusy ||
+                          !isExecMode ||
+                          !addDirDraft.trim()
+                        }
+                        onClick={onAddDirDraftSubmit}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="add-dir-list">
+                      {(activeThread?.addDirs ?? []).map((dir) => (
+                        <button
+                          key={dir}
+                          type="button"
+                          className="quick-chip ghost"
+                          disabled={!activeThread || activeThreadBusy || !isExecMode}
+                          onClick={() =>
+                            activeThread && removeThreadAddDir(activeThread.id, dir)
+                          }
+                        >
+                          {dir} ×
+                        </button>
+                      ))}
+                    </div>
+                    {!isExecMode ? (
+                      <small className="pane-subtle-light">
+                        add-dir applies in exec mode.
+                      </small>
+                    ) : null}
+                  </label>
+
+                  <div className="advanced-toggle-grid">
+                    <label className="session-setting-row toggle-setting-row">
+                      <span>skip repo check</span>
+                      <input
+                        type="checkbox"
+                        data-testid="advanced-skip-git-toggle"
+                        checked={activeThread?.skipGitRepoCheck ?? true}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          activeThread &&
+                          setThreadSkipGitRepoCheck(
+                            activeThread.id,
+                            event.target.checked,
+                          )
+                        }
+                      />
+                    </label>
+                    <label className="session-setting-row toggle-setting-row">
+                      <span>json output</span>
+                      <input
+                        type="checkbox"
+                        data-testid="advanced-json-output-toggle"
+                        checked={activeThread?.jsonOutput ?? true}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          activeThread &&
+                          setThreadJSONOutput(activeThread.id, event.target.checked)
+                        }
+                      />
+                    </label>
+                    <label className="session-setting-row toggle-setting-row">
+                      <span>ephemeral</span>
+                      <input
+                        type="checkbox"
+                        data-testid="advanced-ephemeral-toggle"
+                        checked={activeThread?.ephemeral ?? false}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          activeThread &&
+                          setThreadEphemeral(activeThread.id, event.target.checked)
+                        }
+                      />
+                    </label>
+                  </div>
+                </div>
+              ) : null}
+
               <div className="quick-strip">
-                <label className="quick-chip ghost file-chip">
+                <label
+                  className={`quick-chip ghost file-chip ${
+                    uploadingImage || !activeThread || activeThreadBusy
+                      ? "disabled"
+                      : ""
+                  }`}
+                >
                   <input
                     type="file"
                     accept="image/*"
-                    disabled={uploadingImage || !activeThread}
+                    disabled={uploadingImage || !activeThread || activeThreadBusy}
                     onChange={(event) => {
                       const file = event.target.files?.[0];
                       if (!file) return;
-                      void onUploadSessionImage(file);
+                      void onUploadSessionImage(file, activeThread?.id ?? "");
                       event.currentTarget.value = "";
                     }}
                   />
@@ -2359,13 +6135,19 @@ export function App() {
                     key={imagePath}
                     type="button"
                     className="quick-chip ghost"
-                    onClick={() => activeThread && removeThreadImagePath(activeThread.id, imagePath)}
+                    onClick={() =>
+                      activeThread &&
+                      removeThreadImagePath(activeThread.id, imagePath)
+                    }
                   >
                     {imagePath.split("/").pop() ?? imagePath} ×
                   </button>
                 ))}
-                {imageUploadError ? <span className="shortcut-hint">{imageUploadError}</span> : null}
-                <span className="shortcut-hint">Enter send · Shift+Enter newline</span>
+                {imageUploadError ? (
+                  <span className="shortcut-hint">{imageUploadError}</span>
+                ) : (
+                  <span className="shortcut-hint">Paste or drop image to attach.</span>
+                )}
               </div>
 
               <textarea
@@ -2376,11 +6158,26 @@ export function App() {
                     updateThreadDraft(activeThread.id, event.target.value);
                   }
                 }}
-                rows={5}
-                placeholder={activeThread ? "Tell codex what to do in this workspace..." : "Select a session to start"}
+                rows={1}
+                placeholder={
+                  activeThread
+                    ? isResumeMode
+                      ? "Optional follow-up prompt for resume..."
+                      : isReviewMode
+                        ? "Optional review prompt..."
+                        : "Tell codex what to do in this workspace..."
+                    : "Select a session to start"
+                }
                 disabled={!activeThread}
+                onPaste={onComposerPaste}
                 onKeyDown={(event) => {
-                  const composing = "isComposing" in event.nativeEvent ? Boolean((event.nativeEvent as { isComposing?: boolean }).isComposing) : false;
+                  const composing =
+                    "isComposing" in event.nativeEvent
+                      ? Boolean(
+                          (event.nativeEvent as { isComposing?: boolean })
+                            .isComposing,
+                        )
+                      : false;
                   if (event.key === "Enter" && !event.shiftKey && !composing) {
                     event.preventDefault();
                     composerFormRef.current?.requestSubmit();
@@ -2389,7 +6186,36 @@ export function App() {
               />
 
               <div className="composer-actions">
-                <button type="submit" disabled={activeThreadBusy || !activeThread}>
+                {activeThreadRunID ? (
+                  <button
+                    type="button"
+                    className="ghost danger-ghost"
+                    disabled={
+                      !activeThread ||
+                      !activeThreadRunID ||
+                      cancelingThreadID === activeThread.id
+                    }
+                    onClick={() => void onStopActiveSessionRun()}
+                  >
+                    {activeThread &&
+                    cancelingThreadID === activeThread.id
+                      ? "Stopping..."
+                      : "Stop"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!activeThread || !hasRegeneratePrompt || activeThreadBusy}
+                    onClick={() => void onRegenerateActiveSession()}
+                  >
+                    Regenerate
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={activeThreadBusy || !activeThread}
+                >
                   {activeThreadBusy ? "Running..." : "Send"}
                 </button>
               </div>
@@ -2409,7 +6235,11 @@ export function App() {
               <div className="pane-title-line">
                 <h3>Targets</h3>
                 <label className="switch-inline">
-                  <input type="checkbox" checked={allHosts} onChange={(event) => setAllHosts(event.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={allHosts}
+                    onChange={(event) => setAllHosts(event.target.checked)}
+                  />
                   all
                 </label>
               </div>
@@ -2434,7 +6264,9 @@ export function App() {
                         <input
                           type="checkbox"
                           disabled={allHosts}
-                          checked={allHosts || selectedHostIDs.includes(host.id)}
+                          checked={
+                            allHosts || selectedHostIDs.includes(host.id)
+                          }
                           onChange={() => toggleHostSelection(host.id)}
                         />
                         <span className="target-meta">
@@ -2447,10 +6279,20 @@ export function App() {
                         </span>
                       </label>
                       <div className="target-actions">
-                        <button type="button" className="ghost" disabled={opsHostBusyID === host.id} onClick={() => void onProbeHost(host)}>
+                        <button
+                          type="button"
+                          className="ghost"
+                          disabled={opsHostBusyID === host.id}
+                          onClick={() => void onProbeHost(host)}
+                        >
                           {opsHostBusyID === host.id ? "..." : "Probe"}
                         </button>
-                        <button type="button" className="ghost" disabled={opsHostBusyID === host.id} onClick={() => onStartEditHost(host)}>
+                        <button
+                          type="button"
+                          className="ghost"
+                          disabled={opsHostBusyID === host.id}
+                          onClick={() => onStartEditHost(host)}
+                        >
                           Edit
                         </button>
                         <button
@@ -2472,7 +6314,10 @@ export function App() {
               <h3>Runtime</h3>
               <label>
                 runtime
-                <select value={selectedRuntime} onChange={(event) => setSelectedRuntime(event.target.value)}>
+                <select
+                  value={selectedRuntime}
+                  onChange={(event) => setSelectedRuntime(event.target.value)}
+                >
                   {runtimes.map((runtime) => (
                     <option key={runtime.name} value={runtime.name}>
                       {runtime.name}
@@ -2485,7 +6330,13 @@ export function App() {
                 <select
                   value={runSandbox}
                   onChange={(event) =>
-                    setRunSandbox(event.target.value as "" | "read-only" | "workspace-write" | "danger-full-access")
+                    setRunSandbox(
+                      event.target.value as
+                        | ""
+                        | "read-only"
+                        | "workspace-write"
+                        | "danger-full-access",
+                    )
                   }
                 >
                   <option value="">default</option>
@@ -2495,7 +6346,11 @@ export function App() {
                 </select>
               </label>
               <label className="switch-inline">
-                <input type="checkbox" checked={runAsyncMode} onChange={(event) => setRunAsyncMode(event.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={runAsyncMode}
+                  onChange={(event) => setRunAsyncMode(event.target.checked)}
+                />
                 async queue
               </label>
             </section>
@@ -2508,14 +6363,21 @@ export function App() {
                 <li>depth={metrics?.queue.depth ?? "-"}</li>
               </ul>
               <div className="ops-actions-row">
-                <button type="button" className="ghost" onClick={() => void onRefreshWorkspace()} disabled={isRefreshing}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void onRefreshWorkspace()}
+                  disabled={isRefreshing}
+                >
                   {isRefreshing ? "Refreshing..." : "Refresh Queue"}
                 </button>
                 <button
                   type="button"
                   className="ghost danger-ghost"
                   disabled={!activeJob || !isJobActive(activeJob)}
-                  onClick={() => (activeJob ? void onCancelJob(activeJob) : undefined)}
+                  onClick={() =>
+                    activeJob ? void onCancelJob(activeJob) : undefined
+                  }
                 >
                   Cancel Active
                 </button>
@@ -2529,13 +6391,18 @@ export function App() {
                 <li>jobs={jobs.length}</li>
                 <li>runs={runs.length}</li>
                 <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
-                <li>workers={metrics?.queue.workers_active ?? "-"}/{metrics?.queue.workers_total ?? "-"}</li>
+                <li>
+                  workers={metrics?.queue.workers_active ?? "-"}/
+                  {metrics?.queue.workers_total ?? "-"}
+                </li>
                 <li>threads={threads.length}</li>
               </ul>
             </section>
 
             {opsNotice ? (
-              <section className={`pane-block ops-notice ${opsNoticeIsError ? "ops-notice-error" : ""}`}>
+              <section
+                className={`pane-block ops-notice ${opsNoticeIsError ? "ops-notice-error" : ""}`}
+              >
                 <h3>Ops Notice</h3>
                 <p>{opsNotice}</p>
               </section>
@@ -2546,9 +6413,310 @@ export function App() {
             {isRefreshing ? (
               <section className="inspect-block">
                 <h3>Loading</h3>
-                <p className="pane-subtle-light">Refreshing hosts, queue, runs, and audit timeline...</p>
+                <p className="pane-subtle-light">
+                  Refreshing hosts, queue, runs, and audit timeline...
+                </p>
               </section>
             ) : null}
+
+            <section className="inspect-block codex-platform-block">
+              <h3>Codex Platform</h3>
+              <label>
+                target host
+                <select
+                  data-testid="platform-host-select"
+                  value={platformHostID}
+                  onChange={(event) => setPlatformHostID(event.target.value)}
+                  disabled={hosts.length === 0 || platformBusySection !== ""}
+                >
+                  {hosts.length === 0 ? (
+                    <option value="">no host</option>
+                  ) : (
+                    hosts.map((host) => (
+                      <option key={host.id} value={host.id}>
+                        {host.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              {platformNotice ? (
+                <p className="pane-subtle-light platform-notice">
+                  {platformNotice}
+                </p>
+              ) : null}
+              <div className="platform-grid">
+                <article className="platform-card">
+                  <h4>Auth</h4>
+                  <div className="platform-actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-testid="platform-login-status-btn"
+                      onClick={() => void onRunPlatformLogin("status")}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Status
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-testid="platform-login-device-btn"
+                      onClick={() => void onRunPlatformLogin("login_device")}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Device Login
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost danger-ghost"
+                      data-testid="platform-logout-btn"
+                      onClick={() => void onRunPlatformLogin("logout")}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Logout
+                    </button>
+                  </div>
+                  <pre
+                    className="platform-output"
+                    data-testid="platform-login-output"
+                  >
+                    {formatCodexPlatformResult(platformLoginResult)}
+                  </pre>
+                </article>
+
+                <article className="platform-card">
+                  <h4>MCP</h4>
+                  <label>
+                    action
+                    <select
+                      data-testid="platform-mcp-action-select"
+                      value={platformMCPAction}
+                      onChange={(event) =>
+                        setPlatformMCPAction(
+                          event.target.value as CodexPlatformMCPAction,
+                        )
+                      }
+                      disabled={platformBusySection !== ""}
+                    >
+                      {CODEX_PLATFORM_MCP_ACTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {platformMCPAction === "get" ||
+                  platformMCPAction === "add" ||
+                  platformMCPAction === "remove" ||
+                  platformMCPAction === "login" ||
+                  platformMCPAction === "logout" ? (
+                    <input
+                      data-testid="platform-mcp-name-input"
+                      placeholder="server name"
+                      value={platformMCPName}
+                      onChange={(event) => setPlatformMCPName(event.target.value)}
+                      disabled={platformBusySection !== ""}
+                    />
+                  ) : null}
+                  {platformMCPAction === "add" ? (
+                    <>
+                      <input
+                        data-testid="platform-mcp-url-input"
+                        placeholder="url (for streamable server)"
+                        value={platformMCPURL}
+                        onChange={(event) => setPlatformMCPURL(event.target.value)}
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-mcp-command-input"
+                        placeholder="stdio command (space separated)"
+                        value={platformMCPCommand}
+                        onChange={(event) =>
+                          setPlatformMCPCommand(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-mcp-env-input"
+                        placeholder="env KEY=VALUE,KEY2=VALUE2"
+                        value={platformMCPEnvCSV}
+                        onChange={(event) => setPlatformMCPEnvCSV(event.target.value)}
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-mcp-bearer-env-input"
+                        placeholder="bearer token env var"
+                        value={platformMCPBearerTokenEnvVar}
+                        onChange={(event) =>
+                          setPlatformMCPBearerTokenEnvVar(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                    </>
+                  ) : null}
+                  {platformMCPAction === "login" ? (
+                    <input
+                      data-testid="platform-mcp-scopes-input"
+                      placeholder="scopes (comma separated)"
+                      value={platformMCPScopeCSV}
+                      onChange={(event) => setPlatformMCPScopeCSV(event.target.value)}
+                      disabled={platformBusySection !== ""}
+                    />
+                  ) : null}
+                  <div className="platform-actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-testid="platform-mcp-run-btn"
+                      onClick={() => void onRunPlatformMCP()}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Run MCP
+                    </button>
+                  </div>
+                  <pre className="platform-output" data-testid="platform-mcp-output">
+                    {formatCodexPlatformResult(platformMCPResult)}
+                  </pre>
+                </article>
+
+                <article className="platform-card">
+                  <h4>Cloud</h4>
+                  <label>
+                    action
+                    <select
+                      data-testid="platform-cloud-action-select"
+                      value={platformCloudAction}
+                      onChange={(event) =>
+                        setPlatformCloudAction(
+                          event.target.value as CodexPlatformCloudAction,
+                        )
+                      }
+                      disabled={platformBusySection !== ""}
+                    >
+                      {CODEX_PLATFORM_CLOUD_ACTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {platformCloudAction === "status" ||
+                  platformCloudAction === "diff" ||
+                  platformCloudAction === "apply" ? (
+                    <input
+                      data-testid="platform-cloud-task-id-input"
+                      placeholder="task id"
+                      value={platformCloudTaskID}
+                      onChange={(event) =>
+                        setPlatformCloudTaskID(event.target.value)
+                      }
+                      disabled={platformBusySection !== ""}
+                    />
+                  ) : null}
+                  {platformCloudAction === "exec" ? (
+                    <>
+                      <input
+                        data-testid="platform-cloud-env-id-input"
+                        placeholder="env id"
+                        value={platformCloudEnvID}
+                        onChange={(event) =>
+                          setPlatformCloudEnvID(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-query-input"
+                        placeholder="query"
+                        value={platformCloudQuery}
+                        onChange={(event) =>
+                          setPlatformCloudQuery(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-attempts-input"
+                        placeholder="attempts"
+                        value={platformCloudAttempts}
+                        onChange={(event) =>
+                          setPlatformCloudAttempts(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-branch-input"
+                        placeholder="branch"
+                        value={platformCloudBranch}
+                        onChange={(event) =>
+                          setPlatformCloudBranch(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                    </>
+                  ) : null}
+                  {platformCloudAction === "list" ? (
+                    <>
+                      <input
+                        data-testid="platform-cloud-list-env-input"
+                        placeholder="env id (optional)"
+                        value={platformCloudEnvID}
+                        onChange={(event) =>
+                          setPlatformCloudEnvID(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-limit-input"
+                        placeholder="limit"
+                        value={platformCloudLimit}
+                        onChange={(event) =>
+                          setPlatformCloudLimit(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-cursor-input"
+                        placeholder="cursor"
+                        value={platformCloudCursor}
+                        onChange={(event) =>
+                          setPlatformCloudCursor(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                    </>
+                  ) : null}
+                  {platformCloudAction === "diff" ||
+                  platformCloudAction === "apply" ? (
+                    <input
+                      data-testid="platform-cloud-attempt-input"
+                      placeholder="attempt (optional)"
+                      value={platformCloudAttempt}
+                      onChange={(event) =>
+                        setPlatformCloudAttempt(event.target.value)
+                      }
+                      disabled={platformBusySection !== ""}
+                    />
+                  ) : null}
+                  <div className="platform-actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-testid="platform-cloud-run-btn"
+                      onClick={() => void onRunPlatformCloud()}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Run Cloud
+                    </button>
+                  </div>
+                  <pre
+                    className="platform-output"
+                    data-testid="platform-cloud-output"
+                  >
+                    {formatCodexPlatformResult(platformCloudResult)}
+                  </pre>
+                </article>
+              </div>
+            </section>
 
             <section className="inspect-block">
               <h3>Active Job</h3>
@@ -2556,19 +6724,25 @@ export function App() {
                 <div className="job-card">
                   <div className="job-head">
                     <strong>{activeJob.id}</strong>
-                    <span className={`tone-${statusTone(activeJob.status)}`}>{activeJob.status}</span>
+                    <span className={`tone-${statusTone(activeJob.status)}`}>
+                      {activeJob.status}
+                    </span>
                   </div>
                   <p>runtime={activeJob.runtime}</p>
                   <p>thread={activeJobThreadID}</p>
                   <p>queued={formatDateTime(activeJob.queued_at)}</p>
                   <p>
-                    hosts total={activeJob.total_hosts ?? 0} ok={activeJob.succeeded_hosts ?? 0} failed={activeJob.failed_hosts ?? 0}
+                    hosts total={activeJob.total_hosts ?? 0} ok=
+                    {activeJob.succeeded_hosts ?? 0} failed=
+                    {activeJob.failed_hosts ?? 0}
                   </p>
                   <div className="progress-track" aria-label="job progress">
                     <span style={{ width: `${activeProgress}%` }} />
                   </div>
                   <p>http={activeJob.result_status ?? "n/a"}</p>
-                  {activeJob.error ? <p className="tone-err">{activeJob.error}</p> : null}
+                  {activeJob.error ? (
+                    <p className="tone-err">{activeJob.error}</p>
+                  ) : null}
                 </div>
               ) : (
                 <p className="pane-subtle-light">No active async job.</p>
@@ -2584,7 +6758,13 @@ export function App() {
                     value={opsJobStatusFilter}
                     onChange={(event) =>
                       setOpsJobStatusFilter(
-                        event.target.value as "all" | "pending" | "running" | "succeeded" | "failed" | "canceled"
+                        event.target.value as
+                          | "all"
+                          | "pending"
+                          | "running"
+                          | "succeeded"
+                          | "failed"
+                          | "canceled",
                       )
                     }
                   >
@@ -2598,7 +6778,14 @@ export function App() {
                 </label>
                 <label>
                   type
-                  <select value={opsJobTypeFilter} onChange={(event) => setOpsJobTypeFilter(event.target.value as "all" | "run" | "sync")}>
+                  <select
+                    value={opsJobTypeFilter}
+                    onChange={(event) =>
+                      setOpsJobTypeFilter(
+                        event.target.value as "all" | "run" | "sync",
+                      )
+                    }
+                  >
                     <option value="all">all</option>
                     <option value="run">run</option>
                     <option value="sync">sync</option>
@@ -2621,12 +6808,18 @@ export function App() {
                         >
                           {job.id}
                         </button>
-                        <span className={`tone-${statusTone(job.status)}`}>{job.status}</span>
+                        <span className={`tone-${statusTone(job.status)}`}>
+                          {job.status}
+                        </span>
                         <span>{job.type}</span>
                       </div>
                       <div className="history-item-actions">
                         {isJobActive(job) ? (
-                          <button type="button" className="ghost danger-ghost" onClick={() => void onCancelJob(job)}>
+                          <button
+                            type="button"
+                            className="ghost danger-ghost"
+                            onClick={() => void onCancelJob(job)}
+                          >
                             Cancel
                           </button>
                         ) : null}
@@ -2642,7 +6835,14 @@ export function App() {
               <div className="ops-filter-row">
                 <label>
                   status
-                  <select value={opsRunStatusFilter} onChange={(event) => setOpsRunStatusFilter(event.target.value as "all" | "ok" | "error")}>
+                  <select
+                    value={opsRunStatusFilter}
+                    onChange={(event) =>
+                      setOpsRunStatusFilter(
+                        event.target.value as "all" | "ok" | "error",
+                      )
+                    }
+                  >
                     <option value="all">all</option>
                     <option value="ok">ok</option>
                     <option value="error">error</option>
@@ -2656,8 +6856,12 @@ export function App() {
                   {filteredOpsRuns.slice(0, 8).map((run) => (
                     <li key={run.id}>
                       <span>{run.id}</span>
-                      <span className={`tone-${run.status_code < 400 ? "ok" : "err"}`}>
-                        {run.status_code < 400 ? "ok" : `http_${run.status_code}`}
+                      <span
+                        className={`tone-${run.status_code < 400 ? "ok" : "err"}`}
+                      >
+                        {run.status_code < 400
+                          ? "ok"
+                          : `http_${run.status_code}`}
                       </span>
                     </li>
                   ))}
@@ -2672,7 +6876,11 @@ export function App() {
                   method
                   <select
                     value={opsAuditMethodFilter}
-                    onChange={(event) => setOpsAuditMethodFilter(event.target.value as "all" | "GET" | "POST" | "DELETE")}
+                    onChange={(event) =>
+                      setOpsAuditMethodFilter(
+                        event.target.value as "all" | "GET" | "POST" | "DELETE",
+                      )
+                    }
                   >
                     <option value="all">all</option>
                     <option value="GET">GET</option>
@@ -2684,7 +6892,11 @@ export function App() {
                   status
                   <select
                     value={opsAuditStatusFilter}
-                    onChange={(event) => setOpsAuditStatusFilter(event.target.value as "all" | "2xx" | "4xx" | "5xx")}
+                    onChange={(event) =>
+                      setOpsAuditStatusFilter(
+                        event.target.value as "all" | "2xx" | "4xx" | "5xx",
+                      )
+                    }
                   >
                     <option value="all">all</option>
                     <option value="2xx">2xx</option>
@@ -2694,7 +6906,9 @@ export function App() {
                 </label>
               </div>
               {filteredAuditEvents.length === 0 ? (
-                <p className="pane-subtle-light">No audit events with current filters.</p>
+                <p className="pane-subtle-light">
+                  No audit events with current filters.
+                </p>
               ) : (
                 <ul className="history-list">
                   {filteredAuditEvents.slice(0, 12).map((evt) => (
@@ -2705,7 +6919,11 @@ export function App() {
                           {evt.method} {evt.path}
                         </span>
                       </div>
-                      <span className={`tone-${evt.status_code < 400 ? "ok" : "err"}`}>{evt.status_code}</span>
+                      <span
+                        className={`tone-${evt.status_code < 400 ? "ok" : "err"}`}
+                      >
+                        {evt.status_code}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -2718,39 +6936,76 @@ export function App() {
                 <input
                   placeholder="name"
                   value={hostForm.name}
-                  onChange={(event) => setHostForm((prev) => ({ ...prev, name: event.target.value }))}
+                  onChange={(event) =>
+                    setHostForm((prev) => ({
+                      ...prev,
+                      name: event.target.value,
+                    }))
+                  }
                 />
                 <label>
                   connection mode
                   <select
                     value={hostForm.connectionMode}
-                    onChange={(event) => setHostForm((prev) => ({ ...prev, connectionMode: event.target.value as "ssh" | "local" }))}
+                    onChange={(event) =>
+                      setHostForm((prev) => ({
+                        ...prev,
+                        connectionMode: event.target.value as "ssh" | "local",
+                      }))
+                    }
                   >
                     <option value="ssh">ssh</option>
                     <option value="local">local</option>
                   </select>
                 </label>
                 <input
-                  placeholder={hostForm.connectionMode === "local" ? "host (optional for local mode)" : "host"}
+                  placeholder={
+                    hostForm.connectionMode === "local"
+                      ? "host (optional for local mode)"
+                      : "host"
+                  }
                   value={hostForm.host}
-                  onChange={(event) => setHostForm((prev) => ({ ...prev, host: event.target.value }))}
+                  onChange={(event) =>
+                    setHostForm((prev) => ({
+                      ...prev,
+                      host: event.target.value,
+                    }))
+                  }
                 />
                 <input
                   placeholder="user"
                   value={hostForm.user}
-                  onChange={(event) => setHostForm((prev) => ({ ...prev, user: event.target.value }))}
+                  onChange={(event) =>
+                    setHostForm((prev) => ({
+                      ...prev,
+                      user: event.target.value,
+                    }))
+                  }
                 />
                 <input
                   placeholder="workspace"
                   value={hostForm.workspace}
-                  onChange={(event) => setHostForm((prev) => ({ ...prev, workspace: event.target.value }))}
+                  onChange={(event) =>
+                    setHostForm((prev) => ({
+                      ...prev,
+                      workspace: event.target.value,
+                    }))
+                  }
                 />
                 <div className="ops-actions-row">
                   <button type="submit" disabled={addingHost}>
-                    {addingHost ? "Saving..." : editingHostID ? "Update Host" : "Save Host"}
+                    {addingHost
+                      ? "Saving..."
+                      : editingHostID
+                        ? "Update Host"
+                        : "Save Host"}
                   </button>
                   {editingHostID ? (
-                    <button type="button" className="ghost" onClick={onCancelHostEdit}>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={onCancelHostEdit}
+                    >
                       Cancel Edit
                     </button>
                   ) : null}
@@ -2761,16 +7016,53 @@ export function App() {
         </div>
       )}
 
-      {sessionAlerts.length > 0 ? (
-        <div className="session-alert-stack" role="status" aria-live="polite">
-          {sessionAlerts.map((alert) => (
-            <button key={alert.id} type="button" className="session-alert" onClick={() => openSessionFromAlert(alert)}>
-              <strong>{alert.title}</strong>
-              <span>{alert.body}</span>
-            </button>
-          ))}
+      {commandPaletteOpen && appMode === "session" ? (
+        <div
+          className="command-palette-backdrop"
+          onMouseDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            closeCommandPalette();
+          }}
+        >
+          <section
+            className="command-palette"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Command Palette"
+          >
+            <input
+              ref={commandPaletteInputRef}
+              className="command-palette-input"
+              placeholder="Type a command..."
+              value={commandPaletteQuery}
+              onChange={(event) => {
+                setCommandPaletteQuery(event.target.value);
+                setCommandPaletteCursor(0);
+              }}
+              onKeyDown={onCommandPaletteKeyDown}
+            />
+            <div className="command-palette-list" role="listbox">
+              {filteredCommandPaletteActions.length === 0 ? (
+                <p className="command-palette-empty">No matching commands.</p>
+              ) : (
+                filteredCommandPaletteActions.map((action, index) => (
+                  <button
+                    key={action.id}
+                    type="button"
+                    className={`command-palette-item ${index === commandPaletteCursor ? "active" : ""}`}
+                    onMouseEnter={() => setCommandPaletteCursor(index)}
+                    onClick={() => runCommandPaletteAction(index)}
+                  >
+                    <strong>{action.label}</strong>
+                    <small>{action.detail}</small>
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
         </div>
       ) : null}
+
     </div>
   );
 }

@@ -337,3 +337,167 @@ func TestProjectAndSessionBindingLifecycle(t *testing.T) {
 		t.Fatalf("session last_status=%q want=succeeded", sessions[0].LastStatus)
 	}
 }
+
+func TestUpsertProjectKeepsTitleWhenIncomingTitleEmpty(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	project, err := st.UpsertProject(model.ProjectRecord{
+		ID:       "project_h1::/srv/app",
+		HostID:   "h1",
+		HostName: "staging",
+		Path:     "/srv/app",
+		Title:    "My App",
+		Runtime:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	project.Title = ""
+	updated, err := st.UpsertProject(project)
+	if err != nil {
+		t.Fatalf("upsert project with empty title: %v", err)
+	}
+	if updated.Title != "My App" {
+		t.Fatalf("title=%q want=My App", updated.Title)
+	}
+}
+
+func TestDeleteProjectRequiresEmptySessions(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	project, err := st.UpsertProject(model.ProjectRecord{
+		ID:       "project_h1::/srv/app",
+		HostID:   "h1",
+		HostName: "staging",
+		Path:     "/srv/app",
+		Runtime:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	if _, err := st.UpsertSession(model.SessionRecord{
+		ID:        "session_project_delete_1",
+		ProjectID: project.ID,
+		HostID:    "h1",
+		Path:      "/srv/app",
+		Runtime:   "codex",
+		Title:     "keep",
+	}); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+
+	deletedProject, deleted, refs, err := st.DeleteProject(project.ID)
+	if err != nil {
+		t.Fatalf("delete project (non-empty): %v", err)
+	}
+	if deleted {
+		t.Fatalf("project should not be deleted when non-empty")
+	}
+	if refs != 1 {
+		t.Fatalf("refs=%d want=1", refs)
+	}
+	if deletedProject.ID != project.ID {
+		t.Fatalf("deletedProject.ID=%q want=%q", deletedProject.ID, project.ID)
+	}
+
+	if _, ok := st.GetProject(project.ID); !ok {
+		t.Fatalf("project should still exist after blocked delete")
+	}
+
+	if _, ok, err := st.DeleteSession("session_project_delete_1"); err != nil || !ok {
+		t.Fatalf("delete session err=%v ok=%v", err, ok)
+	}
+
+	deletedProject, deleted, refs, err = st.DeleteProject(project.ID)
+	if err != nil {
+		t.Fatalf("delete project (empty): %v", err)
+	}
+	if !deleted {
+		t.Fatalf("project should be deleted when empty")
+	}
+	if refs != 0 {
+		t.Fatalf("refs=%d want=0", refs)
+	}
+	if deletedProject.ID != project.ID {
+		t.Fatalf("deletedProject.ID=%q want=%q", deletedProject.ID, project.ID)
+	}
+	if _, ok := st.GetProject(project.ID); ok {
+		t.Fatalf("project should not exist after delete")
+	}
+}
+
+func TestDeleteSessionRemovesSessionAndEvents(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.UpsertSession(model.SessionRecord{
+		ID:      "session_delete_target",
+		HostID:  "h_1",
+		Path:    "/srv/app",
+		Runtime: "codex",
+		Title:   "Delete me",
+	}); err != nil {
+		t.Fatalf("upsert target session: %v", err)
+	}
+	if _, err := st.UpsertSession(model.SessionRecord{
+		ID:      "session_keep",
+		HostID:  "h_1",
+		Path:    "/srv/app",
+		Runtime: "codex",
+		Title:   "Keep me",
+	}); err != nil {
+		t.Fatalf("upsert keep session: %v", err)
+	}
+	if _, err := st.AppendSessionEvent(model.SessionEvent{
+		SessionID: "session_delete_target",
+		RunID:     "job_1",
+		Type:      "run.started",
+	}); err != nil {
+		t.Fatalf("append target session event: %v", err)
+	}
+	if _, err := st.AppendSessionEvent(model.SessionEvent{
+		SessionID: "session_keep",
+		RunID:     "job_2",
+		Type:      "run.started",
+	}); err != nil {
+		t.Fatalf("append keep session event: %v", err)
+	}
+
+	deleted, ok, err := st.DeleteSession("session_delete_target")
+	if err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected target session to be deleted")
+	}
+	if deleted.ID != "session_delete_target" {
+		t.Fatalf("deleted session id=%q", deleted.ID)
+	}
+
+	if _, found := st.GetSession("session_delete_target"); found {
+		t.Fatalf("target session should not exist after delete")
+	}
+	remaining := st.ListSessions(10)
+	if len(remaining) != 1 || remaining[0].ID != "session_keep" {
+		t.Fatalf("remaining sessions mismatch: %#v", remaining)
+	}
+	targetEvents := st.ListSessionEvents("session_delete_target", 0, 10)
+	if len(targetEvents) != 0 {
+		t.Fatalf("target session events should be removed, got=%d", len(targetEvents))
+	}
+	keepEvents := st.ListSessionEvents("session_keep", 0, 10)
+	if len(keepEvents) != 1 {
+		t.Fatalf("keep session events should remain, got=%d", len(keepEvents))
+	}
+	if _, ok := st.GetSession("unknown_session"); ok {
+		t.Fatalf("unknown session should not exist")
+	}
+	if _, ok, err := st.DeleteSession("unknown_session"); err != nil || ok {
+		t.Fatalf("unknown session delete mismatch: ok=%v err=%v", ok, err)
+	}
+}

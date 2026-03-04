@@ -51,6 +51,8 @@ export type RunRequest = {
     session_id?: string;
     resume_last?: boolean;
     model?: string;
+    ask_for_approval?: "untrusted" | "on-failure" | "on-request" | "never";
+    search?: boolean;
     profile?: string;
     sandbox?: "read-only" | "workspace-write" | "danger-full-access";
     config?: string[];
@@ -274,11 +276,69 @@ export type CodexModelCatalog = {
   warning?: string;
 };
 
+export type CodexPlatformResult = {
+  operation: string;
+  host: Host;
+  command: string[];
+  workdir?: string;
+  ok: boolean;
+  error?: string;
+  error_class?: string;
+  error_hint?: string;
+  result: {
+    command?: string;
+    stdout?: string;
+    stderr?: string;
+    stdout_bytes?: number;
+    stderr_bytes?: number;
+    stdout_truncated?: boolean;
+    stderr_truncated?: boolean;
+    exit_code?: number;
+    duration_ms?: number;
+    started_at?: string;
+    finished_at?: string;
+  };
+  json?: unknown;
+};
+
+export type CodexPlatformLoginRequest = {
+  host_id?: string;
+  action?: "status" | "login_device" | "logout";
+  timeout_sec?: number;
+};
+
+export type CodexPlatformMCPRequest = {
+  host_id?: string;
+  action?: "list" | "get" | "add" | "remove" | "login" | "logout";
+  name?: string;
+  url?: string;
+  command?: string[];
+  env?: string[];
+  bearer_token_env_var?: string;
+  scopes?: string[];
+  timeout_sec?: number;
+};
+
+export type CodexPlatformCloudRequest = {
+  host_id?: string;
+  action?: "list" | "status" | "exec" | "diff" | "apply";
+  task_id?: string;
+  env_id?: string;
+  query?: string;
+  attempts?: number;
+  branch?: string;
+  limit?: number;
+  cursor?: string;
+  attempt?: number;
+  timeout_sec?: number;
+};
+
 export type ProjectRecord = {
   id: string;
   host_id: string;
   host_name?: string;
   path: string;
+  title?: string;
   runtime: string;
   created_at: string;
   updated_at: string;
@@ -557,6 +617,54 @@ export async function discoverCodexModels(
   return body;
 }
 
+export async function codexPlatformLogin(
+  token: string,
+  request: CodexPlatformLoginRequest
+): Promise<CodexPlatformResult> {
+  const res = await fetch(`${API_BASE}/v1/codex/platform/login`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.operation) {
+    throw new Error(`codex platform login failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+export async function codexPlatformMCP(
+  token: string,
+  request: CodexPlatformMCPRequest
+): Promise<CodexPlatformResult> {
+  const res = await fetch(`${API_BASE}/v1/codex/platform/mcp`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.operation) {
+    throw new Error(`codex platform mcp failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+export async function codexPlatformCloud(
+  token: string,
+  request: CodexPlatformCloudRequest
+): Promise<CodexPlatformResult> {
+  const res = await fetch(`${API_BASE}/v1/codex/platform/cloud`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.operation) {
+    throw new Error(`codex platform cloud failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
 export async function syncHosts(token: string, request: SyncRequest): Promise<{ status: number; body: SyncResponse }> {
   const res = await fetch(`${API_BASE}/v1/sync`, {
     method: "POST",
@@ -639,6 +747,42 @@ export async function listProjects(
   return body.projects ?? [];
 }
 
+export async function upsertProject(
+  token: string,
+  project: Partial<ProjectRecord>,
+): Promise<ProjectRecord> {
+  const res = await fetch(`${API_BASE}/v1/projects`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(project),
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.project) {
+    throw new Error(`upsert project failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body.project;
+}
+
+export async function deleteProject(
+  token: string,
+  projectID: string,
+): Promise<{ deleted: boolean; project?: ProjectRecord; session_count?: number }> {
+  const res = await fetch(`${API_BASE}/v1/projects/${encodeURIComponent(projectID)}`, {
+    method: "DELETE",
+    headers: headers(token),
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(`delete project failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return {
+    deleted: Boolean(body?.deleted),
+    project: body?.project,
+    session_count:
+      typeof body?.session_count === "number" ? body.session_count : undefined,
+  };
+}
+
 export async function listSessions(
   token: string,
   limit = 200,
@@ -662,6 +806,18 @@ export async function getSession(token: string, sessionID: string): Promise<Sess
   if (!body?.session) throw new Error("get session failed: invalid response");
   return body.session;
 }
+
+export async function archiveSession(token: string, sessionID: string): Promise<{ deleted: boolean; session?: SessionRecord }> {
+  const res = await fetch(`${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}`, {
+    method: "DELETE",
+    headers: headers(token)
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(`archive session failed: ${res.status} ${JSON.stringify(body)}`);
+  return { deleted: Boolean(body?.deleted), session: body?.session };
+}
+
+export const deleteSession = archiveSession;
 
 type StreamSessionEventsOptions = {
   after?: number;
