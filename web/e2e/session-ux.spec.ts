@@ -1199,74 +1199,23 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   }).toBe(true);
 });
 
-test("resume mode maps resume selector into run payload", async ({ page }) => {
+test("composer submits codex exec payload", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
-  const marker = `RESUME_${Date.now()}`;
-  const harness = await mockSessionApi(page, `resume ${marker}`, marker);
+  const marker = `EXEC_MODE_${Date.now()}`;
+  const harness = await mockSessionApi(page, `exec ${marker}`, marker);
   await unlock(page);
-
-  await page.getByTestId("lifecycle-mode-select").selectOption("resume");
-  const resumeLastToggle = page.getByTestId("resume-last-toggle");
-  await resumeLastToggle.uncheck();
-  await page
-    .getByTestId("resume-session-id-input")
-    .fill("019cb3d9-002a-7b22-969e-ef24dcad7b7c");
-  const composer = page.getByPlaceholder("Optional follow-up prompt for resume...");
-  await composer.fill("");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect.poll(() => harness.runRequests()).toBe(1);
-
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.mode ?? "");
-  }).toBe("resume");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.resume_last);
-  }).toBe(false);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.session_id ?? "");
-  }).toBe("019cb3d9-002a-7b22-969e-ef24dcad7b7c");
-});
-
-test("review mode maps review options into run payload", async ({ page }) => {
-  await page.setViewportSize({ width: 1366, height: 900 });
-  const marker = `REVIEW_${Date.now()}`;
-  const harness = await mockSessionApi(page, `review ${marker}`, marker);
-  await unlock(page);
-
-  await page.getByTestId("lifecycle-mode-select").selectOption("review");
-  await page.getByTestId("review-uncommitted-toggle").check();
-  await page.getByTestId("review-base-input").fill("main");
-  await page.getByTestId("review-commit-input").fill("abc1234");
-  await page.getByTestId("review-title-input").fill("Release review");
-
-  const composer = page.getByPlaceholder("Optional review prompt...");
-  await composer.fill("focus on risky migrations");
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`exec payload ${marker}`);
   await composer.press("Enter");
+  await expect(composer).toHaveValue("");
   await expect.poll(() => harness.runRequests()).toBe(1);
 
   await expect.poll(() => {
     const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
     return String(req?.codex?.mode ?? "");
-  }).toBe("review");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.review_uncommitted);
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.review_base ?? "");
-  }).toBe("main");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.review_commit ?? "");
-  }).toBe("abc1234");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.review_title ?? "");
-  }).toBe("Release review");
+  }).toBe("exec");
 });
 
 test("fork session creates a branch session in project list", async ({ page }) => {
