@@ -103,19 +103,37 @@ function summarizeJobEventLine(event: RunJobEvent): string {
   const host = event.host_name || event.host_id || "target";
   switch (event.type) {
     case "target.started":
-      return `${host} started (attempt=${event.attempt ?? 1})`;
+      return `${host} started.`;
     case "target.done":
-      return `${host} done status=${event.status ?? "unknown"} exit=${event.exit_code ?? "n/a"}${event.error ? ` error=${event.error}` : ""}`;
+      if ((event.status ?? "").toLowerCase() === "ok") {
+        return `${host} completed.`;
+      }
+      return [host, "failed", typeof event.exit_code === "number" ? `exit ${event.exit_code}` : "", event.error || ""]
+        .filter((part) => part.trim() !== "")
+        .join(" · ");
     case "job.cancel_requested":
-      return "cancel requested";
+      return "Cancel requested.";
     case "job.canceled":
-      return "job canceled";
+      return "Session canceled.";
     case "job.failed":
-      return event.error ? `job failed: ${event.error}` : "job failed";
+      return event.error ? `Session failed: ${event.error}` : "Session failed.";
     case "job.succeeded":
-      return "job completed";
+      return "Session completed.";
     default:
       return "";
+  }
+}
+
+function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): { suffix: string; body: string } {
+  switch (status) {
+    case "succeeded":
+      return { suffix: "completed", body: "New response is ready." };
+    case "failed":
+      return { suffix: "failed", body: "Response failed. Open this session for details." };
+    case "canceled":
+      return { suffix: "canceled", body: "Response was canceled." };
+    default:
+      return { suffix: "updated", body: "Session status changed." };
   }
 }
 
@@ -876,11 +894,12 @@ export function App() {
     if (!runID || completedJobsRef.current.has(runID)) return;
     completedJobsRef.current.add(runID);
     const sessionTitle = threadTitleMapRef.current.get(sessionID) ?? "Session";
-    notifySessionDone(`Codex ${status}`, `${sessionTitle}: ${runID}`);
+    const completion = sessionCompletionCopy(status);
+    notifySessionDone(`${sessionTitle} ${completion.suffix}`, completion.body);
     pushSessionAlert({
       threadID: sessionID,
-      title: `${sessionTitle} finished`,
-      body: `job=${runID} status=${status}`
+      title: `${sessionTitle} ${completion.suffix}`,
+      body: completion.body
     });
   }
 
@@ -1548,7 +1567,7 @@ export function App() {
               {
                 kind: "system",
                 state: "error",
-                title: "Job Poll Failed",
+                title: "Session Sync Failed",
                 body: error
               },
               item.threadID
@@ -1692,11 +1711,14 @@ export function App() {
               finalizeAssistantStreamEntry(item.threadID, "success", EMPTY_ASSISTANT_FALLBACK);
             }
             const sessionTitle = threadTitleMapRef.current.get(item.threadID) ?? "Session";
-            notifySessionDone(`Codex ${job.status}`, `${sessionTitle}: ${job.id}`);
+            const completionStatus: "succeeded" | "failed" | "canceled" =
+              job.status === "canceled" ? "canceled" : job.status === "succeeded" && !responseFailed ? "succeeded" : "failed";
+            const completion = sessionCompletionCopy(completionStatus);
+            notifySessionDone(`${sessionTitle} ${completion.suffix}`, completion.body);
             pushSessionAlert({
               threadID: item.threadID,
-              title: `${sessionTitle} finished`,
-              body: `job=${job.id} status=${job.status}`
+              title: `${sessionTitle} ${completion.suffix}`,
+              body: completion.body
             });
           }
         }
@@ -1826,7 +1848,7 @@ export function App() {
           kind: "system",
           state: "running",
           title: "Session Busy",
-          body: "This session already has a running job. Switch to another session or wait for completion."
+          body: "This session is already running. Wait for completion or switch to another session."
         },
         activeThread.id
       );
