@@ -5,6 +5,9 @@ type MockHarness = {
   sessionOneStreamAfterValues: () => number[];
   imageUploads: () => number;
   lastRunRequest: () => Record<string, unknown> | null;
+  lastPlatformLoginRequest: () => Record<string, unknown> | null;
+  lastPlatformMCPRequest: () => Record<string, unknown> | null;
+  lastPlatformCloudRequest: () => Record<string, unknown> | null;
 };
 
 type MockOptions = {
@@ -36,6 +39,9 @@ async function mockSessionApi(
   let runReqCount = 0;
   let imageUploadCount = 0;
   let lastRunRequest: Record<string, unknown> | null = null;
+  let lastPlatformLoginRequest: Record<string, unknown> | null = null;
+  let lastPlatformMCPRequest: Record<string, unknown> | null = null;
+  let lastPlatformCloudRequest: Record<string, unknown> | null = null;
   const streamPattern = options?.streamPattern ?? "ready-only";
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
@@ -186,6 +192,145 @@ async function mockSessionApi(
         runtime: "codex",
         default_model: "gpt-5-codex",
         models: ["gpt-5-codex", "gpt-5"],
+      },
+    });
+  });
+  await page.route("**/v1/codex/platform/login", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const bodyRaw = request.postData() ?? "{}";
+    const body = JSON.parse(bodyRaw) as { action?: string };
+    lastPlatformLoginRequest = body as Record<string, unknown>;
+    const action = (body.action ?? "status").trim();
+    const stdout =
+      action === "logout"
+        ? "Logged out."
+        : action === "login_device"
+          ? "Open browser to continue device auth."
+          : "Logged in as test-user.";
+    await route.fulfill({
+      status: 200,
+      json: {
+        operation: `codex_platform_login_${action}`,
+        host: {
+          id: "local_1",
+          name: "local-default",
+          connection_mode: "local",
+          host: "localhost",
+          user: "",
+          port: 22,
+          workspace: "/srv/work",
+        },
+        command:
+          action === "logout"
+            ? ["codex", "logout"]
+            : action === "login_device"
+              ? ["codex", "login", "--device-auth"]
+              : ["codex", "login", "status"],
+        workdir: "/srv/work",
+        ok: true,
+        result: {
+          command: "mock-codex",
+          stdout,
+          stderr: "",
+          exit_code: 0,
+          duration_ms: 11,
+          started_at: "2026-03-03T00:00:00Z",
+          finished_at: "2026-03-03T00:00:00Z",
+        },
+      },
+    });
+  });
+  await page.route("**/v1/codex/platform/mcp", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const bodyRaw = request.postData() ?? "{}";
+    const body = JSON.parse(bodyRaw) as { action?: string; name?: string };
+    lastPlatformMCPRequest = body as Record<string, unknown>;
+    const action = (body.action ?? "list").trim();
+    const payload =
+      action === "list"
+        ? [{ name: "memory", transport: "http" }]
+        : action === "get"
+          ? { name: body.name ?? "memory", transport: "http" }
+          : { ok: true, action };
+    await route.fulfill({
+      status: 200,
+      json: {
+        operation: `codex_platform_mcp_${action}`,
+        host: {
+          id: "local_1",
+          name: "local-default",
+          connection_mode: "local",
+          host: "localhost",
+          user: "",
+          port: 22,
+          workspace: "/srv/work",
+        },
+        command: ["codex", "mcp", action],
+        workdir: "/srv/work",
+        ok: true,
+        result: {
+          command: "mock-codex",
+          stdout: JSON.stringify(payload),
+          stderr: "",
+          exit_code: 0,
+          duration_ms: 12,
+          started_at: "2026-03-03T00:00:00Z",
+          finished_at: "2026-03-03T00:00:00Z",
+        },
+        json: payload,
+      },
+    });
+  });
+  await page.route("**/v1/codex/platform/cloud", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const bodyRaw = request.postData() ?? "{}";
+    const body = JSON.parse(bodyRaw) as { action?: string; task_id?: string };
+    lastPlatformCloudRequest = body as Record<string, unknown>;
+    const action = (body.action ?? "list").trim();
+    const stdout =
+      action === "list"
+        ? JSON.stringify({ tasks: [{ id: "task_1", status: "done" }] })
+        : action === "status"
+          ? `task ${body.task_id ?? "task_1"} done`
+          : `${action} ok`;
+    await route.fulfill({
+      status: 200,
+      json: {
+        operation: `codex_platform_cloud_${action}`,
+        host: {
+          id: "local_1",
+          name: "local-default",
+          connection_mode: "local",
+          host: "localhost",
+          user: "",
+          port: 22,
+          workspace: "/srv/work",
+        },
+        command: ["codex", "cloud", action],
+        workdir: "/srv/work",
+        ok: true,
+        result: {
+          command: "mock-codex",
+          stdout,
+          stderr: "",
+          exit_code: 0,
+          duration_ms: 14,
+          started_at: "2026-03-03T00:00:00Z",
+          finished_at: "2026-03-03T00:00:00Z",
+        },
+        json:
+          action === "list"
+            ? { tasks: [{ id: "task_1", status: "done" }] }
+            : undefined,
       },
     });
   });
@@ -781,6 +926,9 @@ async function mockSessionApi(
     sessionOneStreamAfterValues: () => [...sessionOneStreamAfterValues],
     imageUploads: () => imageUploadCount,
     lastRunRequest: () => lastRunRequest,
+    lastPlatformLoginRequest: () => lastPlatformLoginRequest,
+    lastPlatformMCPRequest: () => lastPlatformMCPRequest,
+    lastPlatformCloudRequest: () => lastPlatformCloudRequest,
   };
 }
 
@@ -938,6 +1086,68 @@ test("command palette executes session and model actions", async ({ page }) => {
   await paletteInput.fill("new session");
   await paletteInput.press("Enter");
   await expect.poll(async () => sessionChips.count()).toBe(initialSessionCount + 1);
+});
+
+test("ops codex platform auth panel runs status action", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PLATFORM_AUTH_${Date.now()}`;
+  const harness = await mockSessionApi(page, `platform auth ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByRole("button", { name: "Ops", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Codex Platform" })).toBeVisible();
+
+  await page.getByTestId("platform-login-status-btn").click();
+  await expect(page.getByTestId("platform-login-output")).toContainText(
+    "Logged in as test-user.",
+  );
+  await expect.poll(() => {
+    const req = harness.lastPlatformLoginRequest();
+    return String(req?.action ?? "");
+  }).toBe("status");
+});
+
+test("ops codex platform mcp/cloud controls map requests", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PLATFORM_REQ_${Date.now()}`;
+  const harness = await mockSessionApi(page, `platform req ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByRole("button", { name: "Ops", exact: true }).click();
+
+  await page.getByTestId("platform-mcp-action-select").selectOption("add");
+  await page.getByTestId("platform-mcp-name-input").fill("memory");
+  await page.getByTestId("platform-mcp-command-input").fill("npx @acme/mcp");
+  await page.getByTestId("platform-mcp-env-input").fill("TOKEN_ENV=RLM");
+  await page.getByTestId("platform-mcp-run-btn").click();
+  await expect.poll(() => {
+    const req = harness.lastPlatformMCPRequest() as
+      | { action?: string; command?: string[]; env?: string[] }
+      | null;
+    const action = String(req?.action ?? "");
+    const command = Array.isArray(req?.command) ? req.command.join(" ") : "";
+    const env = Array.isArray(req?.env) ? req.env.join(",") : "";
+    return `${action}|${command}|${env}`;
+  }).toBe("add|npx @acme/mcp|TOKEN_ENV=RLM");
+
+  await page.getByTestId("platform-cloud-action-select").selectOption("exec");
+  await page.getByTestId("platform-cloud-env-id-input").fill("env_staging");
+  await page.getByTestId("platform-cloud-query-input").fill("ship release notes");
+  await page.getByTestId("platform-cloud-attempts-input").fill("2");
+  await page.getByTestId("platform-cloud-branch-input").fill("staging");
+  await page.getByTestId("platform-cloud-run-btn").click();
+  await expect.poll(() => {
+    const req = harness.lastPlatformCloudRequest() as
+      | {
+          action?: string;
+          env_id?: string;
+          query?: string;
+          attempts?: number;
+          branch?: string;
+        }
+      | null;
+    return `${String(req?.action ?? "")}|${String(req?.env_id ?? "")}|${String(req?.query ?? "")}|${String(req?.attempts ?? "")}|${String(req?.branch ?? "")}`;
+  }).toBe("exec|env_staging|ship release notes|2|staging");
 });
 
 test("advanced codex controls map into run payload", async ({ page }) => {

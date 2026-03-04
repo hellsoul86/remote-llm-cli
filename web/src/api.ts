@@ -276,6 +276,63 @@ export type CodexModelCatalog = {
   warning?: string;
 };
 
+export type CodexPlatformResult = {
+  operation: string;
+  host: Host;
+  command: string[];
+  workdir?: string;
+  ok: boolean;
+  error?: string;
+  error_class?: string;
+  error_hint?: string;
+  result: {
+    command?: string;
+    stdout?: string;
+    stderr?: string;
+    stdout_bytes?: number;
+    stderr_bytes?: number;
+    stdout_truncated?: boolean;
+    stderr_truncated?: boolean;
+    exit_code?: number;
+    duration_ms?: number;
+    started_at?: string;
+    finished_at?: string;
+  };
+  json?: unknown;
+};
+
+export type CodexPlatformLoginRequest = {
+  host_id?: string;
+  action?: "status" | "login_device" | "logout";
+  timeout_sec?: number;
+};
+
+export type CodexPlatformMCPRequest = {
+  host_id?: string;
+  action?: "list" | "get" | "add" | "remove" | "login" | "logout";
+  name?: string;
+  url?: string;
+  command?: string[];
+  env?: string[];
+  bearer_token_env_var?: string;
+  scopes?: string[];
+  timeout_sec?: number;
+};
+
+export type CodexPlatformCloudRequest = {
+  host_id?: string;
+  action?: "list" | "status" | "exec" | "diff" | "apply";
+  task_id?: string;
+  env_id?: string;
+  query?: string;
+  attempts?: number;
+  branch?: string;
+  limit?: number;
+  cursor?: string;
+  attempt?: number;
+  timeout_sec?: number;
+};
+
 export type ProjectRecord = {
   id: string;
   host_id: string;
@@ -556,6 +613,54 @@ export async function discoverCodexModels(
   const body = await res.json();
   if (!res.ok || !Array.isArray(body?.models)) {
     throw new Error(`discover codex models failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+export async function codexPlatformLogin(
+  token: string,
+  request: CodexPlatformLoginRequest
+): Promise<CodexPlatformResult> {
+  const res = await fetch(`${API_BASE}/v1/codex/platform/login`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.operation) {
+    throw new Error(`codex platform login failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+export async function codexPlatformMCP(
+  token: string,
+  request: CodexPlatformMCPRequest
+): Promise<CodexPlatformResult> {
+  const res = await fetch(`${API_BASE}/v1/codex/platform/mcp`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.operation) {
+    throw new Error(`codex platform mcp failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+export async function codexPlatformCloud(
+  token: string,
+  request: CodexPlatformCloudRequest
+): Promise<CodexPlatformResult> {
+  const res = await fetch(`${API_BASE}/v1/codex/platform/cloud`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request)
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.operation) {
+    throw new Error(`codex platform cloud failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return body;
 }

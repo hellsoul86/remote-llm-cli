@@ -11,6 +11,9 @@ import {
 import {
   API_BASE,
   cancelRunJob,
+  codexPlatformCloud,
+  codexPlatformLogin,
+  codexPlatformMCP,
   discoverCodexSessions,
   discoverCodexModels,
   archiveSession,
@@ -43,6 +46,7 @@ import {
   type RunJobRecord,
   type RunRequest,
   type RunResponse,
+  type CodexPlatformResult,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
 import {
@@ -155,6 +159,40 @@ const CODEX_MODE_OPTIONS: Array<{ value: CodexSessionMode; label: string }> = [
   { value: "exec", label: "exec" },
   { value: "resume", label: "resume" },
   { value: "review", label: "review" },
+];
+type CodexPlatformMCPAction =
+  | "list"
+  | "get"
+  | "add"
+  | "remove"
+  | "login"
+  | "logout";
+type CodexPlatformCloudAction =
+  | "list"
+  | "status"
+  | "exec"
+  | "diff"
+  | "apply";
+const CODEX_PLATFORM_MCP_ACTIONS: Array<{
+  value: CodexPlatformMCPAction;
+  label: string;
+}> = [
+  { value: "list", label: "list" },
+  { value: "get", label: "get" },
+  { value: "add", label: "add" },
+  { value: "remove", label: "remove" },
+  { value: "login", label: "login" },
+  { value: "logout", label: "logout" },
+];
+const CODEX_PLATFORM_CLOUD_ACTIONS: Array<{
+  value: CodexPlatformCloudAction;
+  label: string;
+}> = [
+  { value: "list", label: "list" },
+  { value: "status", label: "status" },
+  { value: "exec", label: "exec" },
+  { value: "diff", label: "diff" },
+  { value: "apply", label: "apply" },
 ];
 
 type SessionTreePrefs = {
@@ -1053,6 +1091,50 @@ function streamHealthCopy(
   return "offline";
 }
 
+function splitCSVValues(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+}
+
+function formatCodexPlatformResult(result: CodexPlatformResult | null): string {
+  if (!result) return "No command executed yet.";
+  const lines: string[] = [];
+  lines.push(`operation: ${result.operation}`);
+  lines.push(`status: ${result.ok ? "ok" : "error"}`);
+  const command = Array.isArray(result.command)
+    ? result.command.join(" ")
+    : "";
+  if (command) lines.push(`command: ${command}`);
+  if (result.workdir) lines.push(`workdir: ${result.workdir}`);
+  if (result.error) lines.push(`error: ${result.error}`);
+  if (result.error_hint) lines.push(`hint: ${result.error_hint}`);
+
+  const stdout = result.result?.stdout?.trim() ?? "";
+  const stderr = result.result?.stderr?.trim() ?? "";
+  if (stdout) {
+    lines.push("");
+    lines.push("[stdout]");
+    lines.push(stdout);
+  }
+  if (stderr) {
+    lines.push("");
+    lines.push("[stderr]");
+    lines.push(stderr);
+  }
+  if (typeof result.json !== "undefined") {
+    lines.push("");
+    lines.push("[json]");
+    try {
+      lines.push(JSON.stringify(result.json, null, 2));
+    } catch {
+      lines.push(String(result.json));
+    }
+  }
+  return lines.join("\n").trim();
+}
+
 export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
@@ -1065,6 +1147,36 @@ export function App() {
       ? "session"
       : modeFromHash(window.location.hash),
   );
+  const [platformHostID, setPlatformHostID] = useState("");
+  const [platformBusySection, setPlatformBusySection] = useState<
+    "" | "login" | "mcp" | "cloud"
+  >("");
+  const [platformNotice, setPlatformNotice] = useState("");
+  const [platformLoginResult, setPlatformLoginResult] =
+    useState<CodexPlatformResult | null>(null);
+  const [platformMCPAction, setPlatformMCPAction] =
+    useState<CodexPlatformMCPAction>("list");
+  const [platformMCPName, setPlatformMCPName] = useState("");
+  const [platformMCPURL, setPlatformMCPURL] = useState("");
+  const [platformMCPCommand, setPlatformMCPCommand] = useState("");
+  const [platformMCPEnvCSV, setPlatformMCPEnvCSV] = useState("");
+  const [platformMCPBearerTokenEnvVar, setPlatformMCPBearerTokenEnvVar] =
+    useState("");
+  const [platformMCPScopeCSV, setPlatformMCPScopeCSV] = useState("");
+  const [platformMCPResult, setPlatformMCPResult] =
+    useState<CodexPlatformResult | null>(null);
+  const [platformCloudAction, setPlatformCloudAction] =
+    useState<CodexPlatformCloudAction>("list");
+  const [platformCloudTaskID, setPlatformCloudTaskID] = useState("");
+  const [platformCloudEnvID, setPlatformCloudEnvID] = useState("");
+  const [platformCloudQuery, setPlatformCloudQuery] = useState("");
+  const [platformCloudAttempts, setPlatformCloudAttempts] = useState("1");
+  const [platformCloudBranch, setPlatformCloudBranch] = useState("");
+  const [platformCloudLimit, setPlatformCloudLimit] = useState("20");
+  const [platformCloudCursor, setPlatformCloudCursor] = useState("");
+  const [platformCloudAttempt, setPlatformCloudAttempt] = useState("1");
+  const [platformCloudResult, setPlatformCloudResult] =
+    useState<CodexPlatformResult | null>(null);
 
   const ops = useOpsDomain();
   const session = useSessionDomain();
@@ -1710,6 +1822,10 @@ export function App() {
       return text.includes(query);
     });
   }, [hosts, hostFilter]);
+  const platformHost = useMemo(
+    () => hosts.find((host) => host.id === platformHostID) ?? null,
+    [hosts, platformHostID],
+  );
 
   const filteredOpsRuns = useMemo(() => {
     if (opsRunStatusFilter === "all") return runs;
@@ -1743,6 +1859,24 @@ export function App() {
   const healthIsError = health.startsWith("error");
   const opsNoticeIsError = /fail|error|degraded/i.test(opsNotice);
   const syncLabel = isRefreshing ? "syncing" : "live";
+
+  useEffect(() => {
+    if (hosts.length === 0) {
+      if (platformHostID) {
+        setPlatformHostID("");
+      }
+      return;
+    }
+    if (platformHostID && hosts.some((host) => host.id === platformHostID)) {
+      return;
+    }
+    const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
+    if (workspaceHostID && hosts.some((host) => host.id === workspaceHostID)) {
+      setPlatformHostID(workspaceHostID);
+      return;
+    }
+    setPlatformHostID(hosts[0].id);
+  }, [hosts, activeWorkspace?.hostID, platformHostID]);
 
   useEffect(() => {
     tokenRef.current = token;
@@ -4747,6 +4881,152 @@ export function App() {
     await submitPromptForActiveThread(trimmed);
   }
 
+  async function onRunPlatformLogin(action: "status" | "login_device" | "logout") {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const hostID = platformHostID.trim();
+    if (!hostID) {
+      setPlatformNotice("Select a target host first.");
+      return;
+    }
+    setPlatformBusySection("login");
+    setPlatformNotice(`Running login ${action} on ${platformHost?.name ?? hostID}...`);
+    try {
+      const result = await codexPlatformLogin(token, {
+        host_id: hostID,
+        action,
+      });
+      setPlatformLoginResult(result);
+      setPlatformNotice(`Login ${action} finished on ${result.host.name}.`);
+    } catch (error) {
+      setPlatformNotice(String(error));
+    } finally {
+      setPlatformBusySection("");
+    }
+  }
+
+  async function onRunPlatformMCP() {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const hostID = platformHostID.trim();
+    if (!hostID) {
+      setPlatformNotice("Select a target host first.");
+      return;
+    }
+    const command = platformMCPCommand
+      .trim()
+      .split(/\s+/)
+      .filter((item) => item !== "");
+    const request: {
+      host_id: string;
+      action: CodexPlatformMCPAction;
+      name?: string;
+      url?: string;
+      command?: string[];
+      env?: string[];
+      bearer_token_env_var?: string;
+      scopes?: string[];
+    } = {
+      host_id: hostID,
+      action: platformMCPAction,
+    };
+    if (platformMCPName.trim()) {
+      request.name = platformMCPName.trim();
+    }
+    if (platformMCPURL.trim()) {
+      request.url = platformMCPURL.trim();
+    }
+    if (command.length > 0) {
+      request.command = command;
+    }
+    const envValues = splitCSVValues(platformMCPEnvCSV);
+    if (envValues.length > 0) {
+      request.env = envValues;
+    }
+    if (platformMCPBearerTokenEnvVar.trim()) {
+      request.bearer_token_env_var = platformMCPBearerTokenEnvVar.trim();
+    }
+    const scopeValues = splitCSVValues(platformMCPScopeCSV);
+    if (scopeValues.length > 0) {
+      request.scopes = scopeValues;
+    }
+
+    setPlatformBusySection("mcp");
+    setPlatformNotice(`Running mcp ${platformMCPAction} on ${platformHost?.name ?? hostID}...`);
+    try {
+      const result = await codexPlatformMCP(token, request);
+      setPlatformMCPResult(result);
+      setPlatformNotice(`MCP ${platformMCPAction} finished on ${result.host.name}.`);
+    } catch (error) {
+      setPlatformNotice(String(error));
+    } finally {
+      setPlatformBusySection("");
+    }
+  }
+
+  async function onRunPlatformCloud() {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const hostID = platformHostID.trim();
+    if (!hostID) {
+      setPlatformNotice("Select a target host first.");
+      return;
+    }
+    const attempts = Number.parseInt(platformCloudAttempts, 10);
+    const limit = Number.parseInt(platformCloudLimit, 10);
+    const attempt = Number.parseInt(platformCloudAttempt, 10);
+    const request: {
+      host_id: string;
+      action: CodexPlatformCloudAction;
+      task_id?: string;
+      env_id?: string;
+      query?: string;
+      attempts?: number;
+      branch?: string;
+      limit?: number;
+      cursor?: string;
+      attempt?: number;
+    } = {
+      host_id: hostID,
+      action: platformCloudAction,
+    };
+    if (platformCloudTaskID.trim()) {
+      request.task_id = platformCloudTaskID.trim();
+    }
+    if (platformCloudEnvID.trim()) {
+      request.env_id = platformCloudEnvID.trim();
+    }
+    if (platformCloudQuery.trim()) {
+      request.query = platformCloudQuery.trim();
+    }
+    if (Number.isFinite(attempts) && attempts > 0) {
+      request.attempts = attempts;
+    }
+    if (platformCloudBranch.trim()) {
+      request.branch = platformCloudBranch.trim();
+    }
+    if (Number.isFinite(limit) && limit > 0) {
+      request.limit = limit;
+    }
+    if (platformCloudCursor.trim()) {
+      request.cursor = platformCloudCursor.trim();
+    }
+    if (Number.isFinite(attempt) && attempt > 0) {
+      request.attempt = attempt;
+    }
+
+    setPlatformBusySection("cloud");
+    setPlatformNotice(`Running cloud ${platformCloudAction} on ${platformHost?.name ?? hostID}...`);
+    try {
+      const result = await codexPlatformCloud(token, request);
+      setPlatformCloudResult(result);
+      setPlatformNotice(
+        `Cloud ${platformCloudAction} finished on ${result.host.name}.`,
+      );
+    } catch (error) {
+      setPlatformNotice(String(error));
+    } finally {
+      setPlatformBusySection("");
+    }
+  }
+
   async function onAddHost(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (authPhase !== "ready" || !token.trim()) return;
@@ -6138,6 +6418,305 @@ export function App() {
                 </p>
               </section>
             ) : null}
+
+            <section className="inspect-block codex-platform-block">
+              <h3>Codex Platform</h3>
+              <label>
+                target host
+                <select
+                  data-testid="platform-host-select"
+                  value={platformHostID}
+                  onChange={(event) => setPlatformHostID(event.target.value)}
+                  disabled={hosts.length === 0 || platformBusySection !== ""}
+                >
+                  {hosts.length === 0 ? (
+                    <option value="">no host</option>
+                  ) : (
+                    hosts.map((host) => (
+                      <option key={host.id} value={host.id}>
+                        {host.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              {platformNotice ? (
+                <p className="pane-subtle-light platform-notice">
+                  {platformNotice}
+                </p>
+              ) : null}
+              <div className="platform-grid">
+                <article className="platform-card">
+                  <h4>Auth</h4>
+                  <div className="platform-actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-testid="platform-login-status-btn"
+                      onClick={() => void onRunPlatformLogin("status")}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Status
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-testid="platform-login-device-btn"
+                      onClick={() => void onRunPlatformLogin("login_device")}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Device Login
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost danger-ghost"
+                      data-testid="platform-logout-btn"
+                      onClick={() => void onRunPlatformLogin("logout")}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Logout
+                    </button>
+                  </div>
+                  <pre
+                    className="platform-output"
+                    data-testid="platform-login-output"
+                  >
+                    {formatCodexPlatformResult(platformLoginResult)}
+                  </pre>
+                </article>
+
+                <article className="platform-card">
+                  <h4>MCP</h4>
+                  <label>
+                    action
+                    <select
+                      data-testid="platform-mcp-action-select"
+                      value={platformMCPAction}
+                      onChange={(event) =>
+                        setPlatformMCPAction(
+                          event.target.value as CodexPlatformMCPAction,
+                        )
+                      }
+                      disabled={platformBusySection !== ""}
+                    >
+                      {CODEX_PLATFORM_MCP_ACTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {platformMCPAction === "get" ||
+                  platformMCPAction === "add" ||
+                  platformMCPAction === "remove" ||
+                  platformMCPAction === "login" ||
+                  platformMCPAction === "logout" ? (
+                    <input
+                      data-testid="platform-mcp-name-input"
+                      placeholder="server name"
+                      value={platformMCPName}
+                      onChange={(event) => setPlatformMCPName(event.target.value)}
+                      disabled={platformBusySection !== ""}
+                    />
+                  ) : null}
+                  {platformMCPAction === "add" ? (
+                    <>
+                      <input
+                        data-testid="platform-mcp-url-input"
+                        placeholder="url (for streamable server)"
+                        value={platformMCPURL}
+                        onChange={(event) => setPlatformMCPURL(event.target.value)}
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-mcp-command-input"
+                        placeholder="stdio command (space separated)"
+                        value={platformMCPCommand}
+                        onChange={(event) =>
+                          setPlatformMCPCommand(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-mcp-env-input"
+                        placeholder="env KEY=VALUE,KEY2=VALUE2"
+                        value={platformMCPEnvCSV}
+                        onChange={(event) => setPlatformMCPEnvCSV(event.target.value)}
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-mcp-bearer-env-input"
+                        placeholder="bearer token env var"
+                        value={platformMCPBearerTokenEnvVar}
+                        onChange={(event) =>
+                          setPlatformMCPBearerTokenEnvVar(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                    </>
+                  ) : null}
+                  {platformMCPAction === "login" ? (
+                    <input
+                      data-testid="platform-mcp-scopes-input"
+                      placeholder="scopes (comma separated)"
+                      value={platformMCPScopeCSV}
+                      onChange={(event) => setPlatformMCPScopeCSV(event.target.value)}
+                      disabled={platformBusySection !== ""}
+                    />
+                  ) : null}
+                  <div className="platform-actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-testid="platform-mcp-run-btn"
+                      onClick={() => void onRunPlatformMCP()}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Run MCP
+                    </button>
+                  </div>
+                  <pre className="platform-output" data-testid="platform-mcp-output">
+                    {formatCodexPlatformResult(platformMCPResult)}
+                  </pre>
+                </article>
+
+                <article className="platform-card">
+                  <h4>Cloud</h4>
+                  <label>
+                    action
+                    <select
+                      data-testid="platform-cloud-action-select"
+                      value={platformCloudAction}
+                      onChange={(event) =>
+                        setPlatformCloudAction(
+                          event.target.value as CodexPlatformCloudAction,
+                        )
+                      }
+                      disabled={platformBusySection !== ""}
+                    >
+                      {CODEX_PLATFORM_CLOUD_ACTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {platformCloudAction === "status" ||
+                  platformCloudAction === "diff" ||
+                  platformCloudAction === "apply" ? (
+                    <input
+                      data-testid="platform-cloud-task-id-input"
+                      placeholder="task id"
+                      value={platformCloudTaskID}
+                      onChange={(event) =>
+                        setPlatformCloudTaskID(event.target.value)
+                      }
+                      disabled={platformBusySection !== ""}
+                    />
+                  ) : null}
+                  {platformCloudAction === "exec" ? (
+                    <>
+                      <input
+                        data-testid="platform-cloud-env-id-input"
+                        placeholder="env id"
+                        value={platformCloudEnvID}
+                        onChange={(event) =>
+                          setPlatformCloudEnvID(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-query-input"
+                        placeholder="query"
+                        value={platformCloudQuery}
+                        onChange={(event) =>
+                          setPlatformCloudQuery(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-attempts-input"
+                        placeholder="attempts"
+                        value={platformCloudAttempts}
+                        onChange={(event) =>
+                          setPlatformCloudAttempts(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-branch-input"
+                        placeholder="branch"
+                        value={platformCloudBranch}
+                        onChange={(event) =>
+                          setPlatformCloudBranch(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                    </>
+                  ) : null}
+                  {platformCloudAction === "list" ? (
+                    <>
+                      <input
+                        data-testid="platform-cloud-list-env-input"
+                        placeholder="env id (optional)"
+                        value={platformCloudEnvID}
+                        onChange={(event) =>
+                          setPlatformCloudEnvID(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-limit-input"
+                        placeholder="limit"
+                        value={platformCloudLimit}
+                        onChange={(event) =>
+                          setPlatformCloudLimit(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                      <input
+                        data-testid="platform-cloud-cursor-input"
+                        placeholder="cursor"
+                        value={platformCloudCursor}
+                        onChange={(event) =>
+                          setPlatformCloudCursor(event.target.value)
+                        }
+                        disabled={platformBusySection !== ""}
+                      />
+                    </>
+                  ) : null}
+                  {platformCloudAction === "diff" ||
+                  platformCloudAction === "apply" ? (
+                    <input
+                      data-testid="platform-cloud-attempt-input"
+                      placeholder="attempt (optional)"
+                      value={platformCloudAttempt}
+                      onChange={(event) =>
+                        setPlatformCloudAttempt(event.target.value)
+                      }
+                      disabled={platformBusySection !== ""}
+                    />
+                  ) : null}
+                  <div className="platform-actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-testid="platform-cloud-run-btn"
+                      onClick={() => void onRunPlatformCloud()}
+                      disabled={platformBusySection !== "" || !platformHostID}
+                    >
+                      Run Cloud
+                    </button>
+                  </div>
+                  <pre
+                    className="platform-output"
+                    data-testid="platform-cloud-output"
+                  >
+                    {formatCodexPlatformResult(platformCloudResult)}
+                  </pre>
+                </article>
+              </div>
+            </section>
 
             <section className="inspect-block">
               <h3>Active Job</h3>

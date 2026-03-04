@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +92,9 @@ func TestInferAction(t *testing.T) {
 		{name: "codex models discover", method: http.MethodGet, path: "/v1/codex/models", want: "codex.models.discover"},
 		{name: "codex sessions discover", method: http.MethodPost, path: "/v1/codex/sessions/discover", want: "codex.sessions.discover"},
 		{name: "codex sessions cleanup", method: http.MethodPost, path: "/v1/codex/sessions/cleanup", want: "codex.sessions.cleanup"},
+		{name: "codex platform login", method: http.MethodPost, path: "/v1/codex/platform/login", want: "codex.platform.login"},
+		{name: "codex platform mcp", method: http.MethodPost, path: "/v1/codex/platform/mcp", want: "codex.platform.mcp"},
+		{name: "codex platform cloud", method: http.MethodPost, path: "/v1/codex/platform/cloud", want: "codex.platform.cloud"},
 		{name: "metrics get", method: http.MethodGet, path: "/v1/metrics", want: "metrics.get"},
 		{name: "retention get", method: http.MethodGet, path: "/v1/admin/retention", want: "retention.get"},
 		{name: "retention set", method: http.MethodPost, path: "/v1/admin/retention", want: "retention.set"},
@@ -172,6 +176,65 @@ func TestMergeModelCatalogNoFallback(t *testing.T) {
 	}
 	if models[0] != "gpt-5.3-codex" || models[1] != "gpt-5.2-codex" {
 		t.Fatalf("models=%#v", models)
+	}
+}
+
+func TestBuildCodexPlatformLoginSpecDefaultStatus(t *testing.T) {
+	spec, action, err := buildCodexPlatformLoginSpec(codexPlatformLoginRequest{})
+	if err != nil {
+		t.Fatalf("buildCodexPlatformLoginSpec error: %v", err)
+	}
+	if action != "status" {
+		t.Fatalf("action=%q want=status", action)
+	}
+	if spec.Program != "codex" {
+		t.Fatalf("program=%q want=codex", spec.Program)
+	}
+	if len(spec.Args) != 2 || spec.Args[0] != "login" || spec.Args[1] != "status" {
+		t.Fatalf("args=%#v", spec.Args)
+	}
+}
+
+func TestBuildCodexPlatformMCPSpecAddCommand(t *testing.T) {
+	spec, action, expectJSON, err := buildCodexPlatformMCPSpec(codexPlatformMCPRequest{
+		Action:  "add",
+		Name:    "demo",
+		Command: []string{"npx", "@acme/server"},
+		Env:     []string{"TOKEN_ENV=ABC"},
+	})
+	if err != nil {
+		t.Fatalf("buildCodexPlatformMCPSpec error: %v", err)
+	}
+	if action != "add" {
+		t.Fatalf("action=%q want=add", action)
+	}
+	if expectJSON {
+		t.Fatalf("expectJSON=%v want=false", expectJSON)
+	}
+	if spec.Program != "codex" {
+		t.Fatalf("program=%q want=codex", spec.Program)
+	}
+	if len(spec.Args) == 0 || spec.Args[0] != "mcp" {
+		t.Fatalf("args=%#v", spec.Args)
+	}
+	joined := strings.Join(spec.Args, " ")
+	if !strings.Contains(joined, "add demo") {
+		t.Fatalf("args missing add demo: %q", joined)
+	}
+	if !strings.Contains(joined, "--env TOKEN_ENV=ABC") {
+		t.Fatalf("args missing env: %q", joined)
+	}
+	if !strings.Contains(joined, "-- npx @acme/server") {
+		t.Fatalf("args missing command: %q", joined)
+	}
+}
+
+func TestBuildCodexPlatformCloudSpecStatusRequiresTaskID(t *testing.T) {
+	_, _, _, err := buildCodexPlatformCloudSpec(codexPlatformCloudRequest{
+		Action: "status",
+	})
+	if err == nil {
+		t.Fatalf("expected error when task_id is missing")
 	}
 }
 

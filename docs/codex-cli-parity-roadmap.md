@@ -58,20 +58,20 @@ Legend:
 | Attach image | `--image` | 🟡 | Supported, currently only for local-mode targets |
 | Model select | `--model` | ✅ | Discovered model catalog + per-session model |
 | Sandbox select | `--sandbox` | ✅ | Per-session selector in chat pane |
-| Approval policy | `--ask-for-approval` | ❌ | Not exposed in UI or request payload |
-| Web search | `--search` | ❌ | Not exposed |
-| Extra writable dirs | `--add-dir` | ❌ | Not exposed in chat UX |
+| Approval policy | `--ask-for-approval` | ✅ | Session-level selector in composer advanced panel |
+| Web search | `--search` | ✅ | Session-level toggle in composer advanced panel |
+| Extra writable dirs | `--add-dir` | ✅ | Session-level add/remove controls in composer advanced panel |
 | Profile/config flags | `--profile`, `-c`, `--enable`, `--disable` | ❌ | Not exposed in chat UX |
 | Exec mode | `codex exec` | ✅ | Main session send flow |
-| Resume mode | `codex exec resume` / `codex resume` | 🟡 | Backend supports; session UX not explicitly exposing resume selector flow |
-| Fork mode | `codex fork` | ❌ | No web workflow yet |
-| Review mode | `codex review` / `exec review` | ❌ | Backend supports; no dedicated web review UX |
-| Ephemeral | `--ephemeral` | 🟡 | Hardcoded false in session flow; no UI toggle |
-| Skip git check | `--skip-git-repo-check` | 🟡 | Hardcoded true in session flow; no UI toggle |
-| JSON output | `--json` | 🟡 | Hardcoded true in session flow |
-| Login visibility | `codex login status` | 🟡 | Visible via host probe diagnostics only, not session-facing |
-| MCP mgmt | `codex mcp ...` | ❌ | Not exposed |
-| Cloud tasks | `codex cloud ...` | ❌ | Not exposed |
+| Resume mode | `codex exec resume` / `codex resume` | ✅ | Session mode selector + resume target controls |
+| Fork mode | `codex fork` | ✅ | Session fork action integrated in composer controls |
+| Review mode | `codex review` / `exec review` | ✅ | Session mode selector + review options |
+| Ephemeral | `--ephemeral` | ✅ | Advanced toggle mapped into codex request |
+| Skip git check | `--skip-git-repo-check` | ✅ | Advanced toggle mapped into codex request |
+| JSON output | `--json` | ✅ | Advanced toggle mapped into codex request |
+| Login visibility | `codex login status` | ✅ | Dedicated Ops platform auth panel (status/device login/logout) |
+| MCP mgmt | `codex mcp ...` | ✅ | Dedicated Ops platform MCP panel (list/get/add/remove/login/logout) |
+| Cloud tasks | `codex cloud ...` | ✅ | Dedicated Ops platform cloud panel (list/status/exec/diff/apply) |
 
 ## Implementation Phases
 
@@ -103,4 +103,3 @@ Deliver user-facing controls required for day-to-day Codex usage in chat session
 - session pane stays focused: chat content first, controls minimal and contextual
 - advanced options hidden by default, but complete when expanded
 - non-active session completion must remain reliable and visible
-

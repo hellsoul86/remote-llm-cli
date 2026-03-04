@@ -124,6 +124,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/codex/models", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexModels)))
 	mux.Handle("POST /v1/codex/sessions/discover", s.withAuth(http.HandlerFunc(s.handleDiscoverCodexSessions)))
 	mux.Handle("POST /v1/codex/sessions/cleanup", s.withAuth(http.HandlerFunc(s.handleCleanupCodexSessions)))
+	mux.Handle("POST /v1/codex/platform/login", s.withAuth(http.HandlerFunc(s.handleCodexPlatformLogin)))
+	mux.Handle("POST /v1/codex/platform/mcp", s.withAuth(http.HandlerFunc(s.handleCodexPlatformMCP)))
+	mux.Handle("POST /v1/codex/platform/cloud", s.withAuth(http.HandlerFunc(s.handleCodexPlatformCloud)))
 	mux.Handle("POST /v1/files/images", s.withAuth(http.HandlerFunc(s.handleUploadImage)))
 	mux.Handle("GET /v1/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
 	mux.Handle("GET /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleGetRetentionPolicy)))
@@ -726,6 +729,51 @@ type codexCleanupRequest struct {
 	TimeoutSec     int      `json:"timeout_sec,omitempty"`
 	OlderThanHours int      `json:"older_than_hours,omitempty"`
 	DryRun         bool     `json:"dry_run,omitempty"`
+}
+
+type codexPlatformLoginRequest struct {
+	HostID     string `json:"host_id,omitempty"`
+	Action     string `json:"action,omitempty"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+}
+
+type codexPlatformMCPRequest struct {
+	HostID            string   `json:"host_id,omitempty"`
+	Action            string   `json:"action,omitempty"`
+	Name              string   `json:"name,omitempty"`
+	URL               string   `json:"url,omitempty"`
+	Command           []string `json:"command,omitempty"`
+	Env               []string `json:"env,omitempty"`
+	BearerTokenEnvVar string   `json:"bearer_token_env_var,omitempty"`
+	Scopes            []string `json:"scopes,omitempty"`
+	TimeoutSec        int      `json:"timeout_sec,omitempty"`
+}
+
+type codexPlatformCloudRequest struct {
+	HostID     string `json:"host_id,omitempty"`
+	Action     string `json:"action,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
+	EnvID      string `json:"env_id,omitempty"`
+	Query      string `json:"query,omitempty"`
+	Attempts   int    `json:"attempts,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	Cursor     string `json:"cursor,omitempty"`
+	Attempt    int    `json:"attempt,omitempty"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+}
+
+type codexPlatformResult struct {
+	Operation  string              `json:"operation"`
+	Host       model.Host          `json:"host"`
+	Command    []string            `json:"command"`
+	Workdir    string              `json:"workdir,omitempty"`
+	OK         bool                `json:"ok"`
+	Error      string              `json:"error,omitempty"`
+	ErrorClass string              `json:"error_class,omitempty"`
+	ErrorHint  string              `json:"error_hint,omitempty"`
+	Result     executor.ExecResult `json:"result"`
+	JSON       any                 `json:"json,omitempty"`
 }
 
 type codexModelsResponse struct {
@@ -2263,6 +2311,311 @@ func (s *Server) handleCleanupCodexSessions(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (s *Server) handleCodexPlatformLogin(w http.ResponseWriter, r *http.Request) {
+	var req codexPlatformLoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	host, err := s.resolveCodexModelHost(req.HostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	spec, action, err := buildCodexPlatformLoginSpec(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	status, payload := s.executeCodexPlatformCommand(
+		r.Context(),
+		host,
+		"codex_platform_login_"+action,
+		spec,
+		req.TimeoutSec,
+		false,
+	)
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) handleCodexPlatformMCP(w http.ResponseWriter, r *http.Request) {
+	var req codexPlatformMCPRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	host, err := s.resolveCodexModelHost(req.HostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	spec, action, expectJSON, err := buildCodexPlatformMCPSpec(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	status, payload := s.executeCodexPlatformCommand(
+		r.Context(),
+		host,
+		"codex_platform_mcp_"+action,
+		spec,
+		req.TimeoutSec,
+		expectJSON,
+	)
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) handleCodexPlatformCloud(w http.ResponseWriter, r *http.Request) {
+	var req codexPlatformCloudRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	host, err := s.resolveCodexModelHost(req.HostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	spec, action, expectJSON, err := buildCodexPlatformCloudSpec(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	status, payload := s.executeCodexPlatformCommand(
+		r.Context(),
+		host,
+		"codex_platform_cloud_"+action,
+		spec,
+		req.TimeoutSec,
+		expectJSON,
+	)
+	writeJSON(w, status, payload)
+}
+
+func (s *Server) executeCodexPlatformCommand(
+	parentCtx context.Context,
+	host model.Host,
+	operation string,
+	spec runtime.CommandSpec,
+	timeoutSec int,
+	expectJSON bool,
+) (int, codexPlatformResult) {
+	timeout := normalizeCodexPlatformTimeout(timeoutSec)
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
+	defer cancel()
+
+	workdir := resolveWorkdir("", host.Workspace)
+	res, runErr := s.runViaSSH(
+		ctx,
+		host,
+		spec,
+		workdir,
+		executor.ExecOptions{
+			MaxStdoutBytes: 1024 * 1024,
+			MaxStderrBytes: 512 * 1024,
+		},
+	)
+	msg, class, hint := errorDetails(runErr)
+	payload := codexPlatformResult{
+		Operation:  operation,
+		Host:       host,
+		Command:    append([]string{spec.Program}, spec.Args...),
+		Workdir:    workdir,
+		OK:         runErr == nil,
+		Error:      msg,
+		ErrorClass: class,
+		ErrorHint:  hint,
+		Result:     res,
+	}
+	if expectJSON && strings.TrimSpace(res.Stdout) != "" {
+		var decoded any
+		if err := json.Unmarshal([]byte(res.Stdout), &decoded); err == nil {
+			payload.JSON = decoded
+		}
+	}
+	if runErr != nil {
+		return http.StatusBadGateway, payload
+	}
+	return http.StatusOK, payload
+}
+
+func normalizeCodexPlatformTimeout(v int) time.Duration {
+	if v <= 0 {
+		return 120 * time.Second
+	}
+	if v > 900 {
+		v = 900
+	}
+	return time.Duration(v) * time.Second
+}
+
+func buildCodexPlatformLoginSpec(req codexPlatformLoginRequest) (runtime.CommandSpec, string, error) {
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "status"
+	}
+	switch action {
+	case "status":
+		return runtime.CommandSpec{Program: "codex", Args: []string{"login", "status"}}, action, nil
+	case "login_device":
+		return runtime.CommandSpec{Program: "codex", Args: []string{"login", "--device-auth"}}, action, nil
+	case "logout":
+		return runtime.CommandSpec{Program: "codex", Args: []string{"logout"}}, action, nil
+	default:
+		return runtime.CommandSpec{}, "", fmt.Errorf("unsupported codex login action: %q", req.Action)
+	}
+}
+
+func buildCodexPlatformMCPSpec(req codexPlatformMCPRequest) (runtime.CommandSpec, string, bool, error) {
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "list"
+	}
+	args := []string{"mcp"}
+	expectJSON := false
+	name := strings.TrimSpace(req.Name)
+	switch action {
+	case "list":
+		args = append(args, "list", "--json")
+		expectJSON = true
+	case "get":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp get")
+		}
+		args = append(args, "get", name, "--json")
+		expectJSON = true
+	case "add":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp add")
+		}
+		args = append(args, "add", name)
+		url := strings.TrimSpace(req.URL)
+		command := trimStringList(req.Command)
+		if url != "" && len(command) > 0 {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("mcp add accepts either url or command, not both")
+		}
+		if url != "" {
+			args = append(args, "--url", url)
+			if v := strings.TrimSpace(req.BearerTokenEnvVar); v != "" {
+				args = append(args, "--bearer-token-env-var", v)
+			}
+			if len(req.Env) > 0 {
+				return runtime.CommandSpec{}, "", false, fmt.Errorf("env is only supported for stdio mcp add")
+			}
+		} else {
+			if len(command) == 0 {
+				return runtime.CommandSpec{}, "", false, fmt.Errorf("command is required for stdio mcp add")
+			}
+			for _, envKV := range trimStringList(req.Env) {
+				args = append(args, "--env", envKV)
+			}
+			args = append(args, "--")
+			args = append(args, command...)
+		}
+	case "remove":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp remove")
+		}
+		args = append(args, "remove", name)
+	case "login":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp login")
+		}
+		args = append(args, "login", name)
+		scopes := trimStringList(req.Scopes)
+		if len(scopes) > 0 {
+			args = append(args, "--scopes", strings.Join(scopes, ","))
+		}
+	case "logout":
+		if name == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("name is required for mcp logout")
+		}
+		args = append(args, "logout", name)
+	default:
+		return runtime.CommandSpec{}, "", false, fmt.Errorf("unsupported codex mcp action: %q", req.Action)
+	}
+	return runtime.CommandSpec{Program: "codex", Args: args}, action, expectJSON, nil
+}
+
+func buildCodexPlatformCloudSpec(req codexPlatformCloudRequest) (runtime.CommandSpec, string, bool, error) {
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "list"
+	}
+	args := []string{"cloud"}
+	expectJSON := false
+	switch action {
+	case "list":
+		args = append(args, "list", "--json")
+		expectJSON = true
+		if envID := strings.TrimSpace(req.EnvID); envID != "" {
+			args = append(args, "--env", envID)
+		}
+		if req.Limit > 0 {
+			limit := req.Limit
+			if limit < 1 {
+				limit = 1
+			}
+			if limit > 20 {
+				limit = 20
+			}
+			args = append(args, "--limit", strconv.Itoa(limit))
+		}
+		if cursor := strings.TrimSpace(req.Cursor); cursor != "" {
+			args = append(args, "--cursor", cursor)
+		}
+	case "status":
+		taskID := strings.TrimSpace(req.TaskID)
+		if taskID == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("task_id is required for cloud status")
+		}
+		args = append(args, "status", taskID)
+	case "exec":
+		envID := strings.TrimSpace(req.EnvID)
+		if envID == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("env_id is required for cloud exec")
+		}
+		args = append(args, "exec", "--env", envID)
+		if req.Attempts > 0 {
+			attempts := req.Attempts
+			if attempts < 1 {
+				attempts = 1
+			}
+			if attempts > 20 {
+				attempts = 20
+			}
+			args = append(args, "--attempts", strconv.Itoa(attempts))
+		}
+		if branch := strings.TrimSpace(req.Branch); branch != "" {
+			args = append(args, "--branch", branch)
+		}
+		if query := strings.TrimSpace(req.Query); query != "" {
+			args = append(args, query)
+		}
+	case "diff":
+		taskID := strings.TrimSpace(req.TaskID)
+		if taskID == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("task_id is required for cloud diff")
+		}
+		args = append(args, "diff", taskID)
+		if req.Attempt > 0 {
+			args = append(args, "--attempt", strconv.Itoa(req.Attempt))
+		}
+	case "apply":
+		taskID := strings.TrimSpace(req.TaskID)
+		if taskID == "" {
+			return runtime.CommandSpec{}, "", false, fmt.Errorf("task_id is required for cloud apply")
+		}
+		args = append(args, "apply", taskID)
+		if req.Attempt > 0 {
+			args = append(args, "--attempt", strconv.Itoa(req.Attempt))
+		}
+	default:
+		return runtime.CommandSpec{}, "", false, fmt.Errorf("unsupported codex cloud action: %q", req.Action)
+	}
+	return runtime.CommandSpec{Program: "codex", Args: args}, action, expectJSON, nil
+}
+
 func buildCodexSessionDiscoverSpec(limitPerHost int) runtime.CommandSpec {
 	script := fmt.Sprintf(`
 set -e
@@ -2613,6 +2966,24 @@ func capStringList(src []string, max int) []string {
 		return src
 	}
 	return src[:max]
+}
+
+func trimStringList(src []string) []string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(src))
+	for _, raw := range src {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type probeRequest struct {
@@ -3287,6 +3658,12 @@ func inferAction(method string, path string) string {
 		return "codex.sessions.discover"
 	case method == http.MethodPost && path == "/v1/codex/sessions/cleanup":
 		return "codex.sessions.cleanup"
+	case method == http.MethodPost && path == "/v1/codex/platform/login":
+		return "codex.platform.login"
+	case method == http.MethodPost && path == "/v1/codex/platform/mcp":
+		return "codex.platform.mcp"
+	case method == http.MethodPost && path == "/v1/codex/platform/cloud":
+		return "codex.platform.cloud"
 	case method == http.MethodPost && path == "/v1/files/images":
 		return "files.image.upload"
 	case method == http.MethodGet && path == "/v1/metrics":
