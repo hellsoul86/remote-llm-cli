@@ -13,16 +13,18 @@ type CodexRunOptions struct {
 	SessionID  string       `json:"session_id,omitempty"`
 	ResumeLast bool         `json:"resume_last,omitempty"`
 
-	Model         string   `json:"model,omitempty"`
-	Profile       string   `json:"profile,omitempty"`
-	Sandbox       string   `json:"sandbox,omitempty"`
-	Config        []string `json:"config,omitempty"`
-	Enable        []string `json:"enable,omitempty"`
-	Disable       []string `json:"disable,omitempty"`
-	AddDirs       []string `json:"add_dirs,omitempty"`
-	Images        []string `json:"images,omitempty"`
-	LocalProvider string   `json:"local_provider,omitempty"`
-	Color         string   `json:"color,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	AskForApproval string   `json:"ask_for_approval,omitempty"`
+	Search         bool     `json:"search,omitempty"`
+	Profile        string   `json:"profile,omitempty"`
+	Sandbox        string   `json:"sandbox,omitempty"`
+	Config         []string `json:"config,omitempty"`
+	Enable         []string `json:"enable,omitempty"`
+	Disable        []string `json:"disable,omitempty"`
+	AddDirs        []string `json:"add_dirs,omitempty"`
+	Images         []string `json:"images,omitempty"`
+	LocalProvider  string   `json:"local_provider,omitempty"`
+	Color          string   `json:"color,omitempty"`
 
 	OSS               bool `json:"oss,omitempty"`
 	FullAuto          bool `json:"full_auto,omitempty"`

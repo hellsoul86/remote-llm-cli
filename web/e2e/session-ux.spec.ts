@@ -4,6 +4,7 @@ type MockHarness = {
   runRequests: () => number;
   sessionOneStreamAfterValues: () => number[];
   imageUploads: () => number;
+  lastRunRequest: () => Record<string, unknown> | null;
 };
 
 type MockOptions = {
@@ -34,6 +35,7 @@ async function mockSessionApi(
   let eventPollCount = 0;
   let runReqCount = 0;
   let imageUploadCount = 0;
+  let lastRunRequest: Record<string, unknown> | null = null;
   const streamPattern = options?.streamPattern ?? "ready-only";
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
@@ -501,8 +503,15 @@ async function mockSessionApi(
     });
   });
 
-  await page.route("**/v1/jobs/run", async (route) => {
+  await page.route("**/v1/jobs/run", async (route, request) => {
     runReqCount += 1;
+    try {
+      const bodyRaw = request.postData() ?? "{}";
+      const parsed = JSON.parse(bodyRaw) as Record<string, unknown>;
+      lastRunRequest = parsed;
+    } catch {
+      lastRunRequest = null;
+    }
     await route.fulfill({
       status: 202,
       json: {
@@ -771,6 +780,7 @@ async function mockSessionApi(
     runRequests: () => runReqCount,
     sessionOneStreamAfterValues: () => [...sessionOneStreamAfterValues],
     imageUploads: () => imageUploadCount,
+    lastRunRequest: () => lastRunRequest,
   };
 }
 
@@ -930,6 +940,55 @@ test("command palette executes session and model actions", async ({ page }) => {
   await paletteInput.fill("new session");
   await paletteInput.press("Enter");
   await expect.poll(async () => sessionChips.count()).toBe(initialSessionCount + 1);
+});
+
+test("advanced codex controls map into run payload", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `ADVANCED_${Date.now()}`;
+  const harness = await mockSessionApi(page, `advanced ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByTestId("advanced-toggle-btn").click();
+  await page.getByTestId("advanced-approval-select").selectOption("never");
+  await page.getByTestId("advanced-web-search-toggle").check();
+  const addDirInput = page.getByTestId("advanced-add-dir-input");
+  await addDirInput.fill("/srv/extra");
+  await addDirInput.press("Enter");
+  await page.getByTestId("advanced-skip-git-toggle").uncheck();
+  await page.getByTestId("advanced-ephemeral-toggle").check();
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`advanced settings ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return String(req?.codex?.ask_for_approval ?? "");
+  }).toBe("never");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return Boolean(req?.codex?.search);
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    const dirs = req?.codex?.add_dirs;
+    return Array.isArray(dirs) && dirs.includes("/srv/extra");
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return Boolean(req?.codex?.ephemeral);
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return Boolean(req?.codex?.skip_git_repo_check);
+  }).toBe(false);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
+    return Boolean(req?.codex?.json_output);
+  }).toBe(true);
 });
 
 test("session stream completion keeps a single assistant reply", async ({

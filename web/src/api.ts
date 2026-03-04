@@ -51,6 +51,8 @@ export type RunRequest = {
     session_id?: string;
     resume_last?: boolean;
     model?: string;
+    ask_for_approval?: "untrusted" | "on-failure" | "on-request" | "never";
+    search?: boolean;
     profile?: string;
     sandbox?: "read-only" | "workspace-write" | "danger-full-access";
     config?: string[];

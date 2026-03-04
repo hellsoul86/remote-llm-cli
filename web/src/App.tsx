@@ -46,6 +46,7 @@ import {
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
 import {
+  type CodexApprovalPolicy,
   type TimelineEntry,
   type TimelineState,
   useSessionDomain,
@@ -139,6 +140,16 @@ type CommandPaletteAction = {
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
 const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
 const MAX_SESSION_STREAMS = 4;
+const APPROVAL_POLICY_OPTIONS: Array<{
+  value: CodexApprovalPolicy;
+  label: string;
+}> = [
+  { value: "", label: "default" },
+  { value: "untrusted", label: "untrusted" },
+  { value: "on-request", label: "on-request" },
+  { value: "never", label: "never" },
+  { value: "on-failure", label: "on-failure (legacy)" },
+];
 
 type SessionTreePrefs = {
   projectFilter: string;
@@ -1133,6 +1144,13 @@ export function App() {
     switchThreadByOffset,
     setThreadModel,
     setThreadSandbox,
+    setThreadApprovalPolicy,
+    setThreadWebSearch,
+    addThreadAddDir,
+    removeThreadAddDir,
+    setThreadSkipGitRepoCheck,
+    setThreadEphemeral,
+    setThreadJSONOutput,
     addThreadImagePath,
     removeThreadImagePath,
     setThreadJobState,
@@ -1167,6 +1185,8 @@ export function App() {
   const [projectFormTitle, setProjectFormTitle] = useState("");
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
+  const [sessionAdvancedOpen, setSessionAdvancedOpen] = useState(false);
+  const [addDirDraft, setAddDirDraft] = useState("");
   const [composerDropActive, setComposerDropActive] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
@@ -1831,6 +1851,8 @@ export function App() {
   useEffect(() => {
     composerDragDepthRef.current = 0;
     setComposerDropActive(false);
+    setAddDirDraft("");
+    setSessionAdvancedOpen(false);
   }, [activeThreadID]);
 
   useEffect(() => {
@@ -1911,6 +1933,14 @@ export function App() {
       event.preventDefault();
       runCommandPaletteAction(commandPaletteCursor);
     }
+  }
+
+  function onAddDirDraftSubmit() {
+    if (!activeThread) return;
+    const trimmed = addDirDraft.trim();
+    if (!trimmed) return;
+    addThreadAddDir(activeThread.id, trimmed);
+    setAddDirDraft("");
   }
 
   function openProjectComposer() {
@@ -4428,10 +4458,16 @@ export function App() {
               mode: "exec",
               model: effectiveModel,
               sandbox: effectiveSandbox,
+              ask_for_approval: activeThread.approvalPolicy || undefined,
+              search: activeThread.webSearch ? true : undefined,
+              add_dirs:
+                activeThread.addDirs.length > 0
+                  ? activeThread.addDirs
+                  : undefined,
               images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
-              json_output: true,
-              skip_git_repo_check: true,
-              ephemeral: false,
+              json_output: activeThread.jsonOutput,
+              skip_git_repo_check: activeThread.skipGitRepoCheck,
+              ephemeral: activeThread.ephemeral,
             }
           : undefined,
     };
@@ -5387,6 +5423,148 @@ export function App() {
                   </select>
                 </label>
               </div>
+
+              <div className="session-controls-row">
+                <button
+                  type="button"
+                  className="ghost advanced-toggle-btn"
+                  data-testid="advanced-toggle-btn"
+                  onClick={() => setSessionAdvancedOpen((prev) => !prev)}
+                  disabled={!activeThread}
+                >
+                  {sessionAdvancedOpen ? "Hide Advanced" : "Advanced"}
+                </button>
+              </div>
+
+              {sessionAdvancedOpen ? (
+                <div className="session-advanced-panel">
+                  <label className="session-setting-row">
+                    approval
+                    <select
+                      data-testid="advanced-approval-select"
+                      value={activeThread?.approvalPolicy ?? ""}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadApprovalPolicy(
+                          activeThread.id,
+                          event.target.value as CodexApprovalPolicy,
+                        )
+                      }
+                    >
+                      {APPROVAL_POLICY_OPTIONS.map((option) => (
+                        <option key={option.label} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="session-setting-row toggle-setting-row">
+                    <span>web search</span>
+                    <input
+                      type="checkbox"
+                      data-testid="advanced-web-search-toggle"
+                      checked={Boolean(activeThread?.webSearch)}
+                      disabled={!activeThread || activeThreadBusy}
+                      onChange={(event) =>
+                        activeThread &&
+                        setThreadWebSearch(activeThread.id, event.target.checked)
+                      }
+                    />
+                  </label>
+
+                  <label className="session-setting-row">
+                    add dir
+                    <div className="add-dir-row">
+                      <input
+                        data-testid="advanced-add-dir-input"
+                        placeholder="/opt/shared"
+                        value={addDirDraft}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) => setAddDirDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") return;
+                          event.preventDefault();
+                          onAddDirDraftSubmit();
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={
+                          !activeThread ||
+                          activeThreadBusy ||
+                          !addDirDraft.trim()
+                        }
+                        onClick={onAddDirDraftSubmit}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="add-dir-list">
+                      {(activeThread?.addDirs ?? []).map((dir) => (
+                        <button
+                          key={dir}
+                          type="button"
+                          className="quick-chip ghost"
+                          disabled={!activeThread || activeThreadBusy}
+                          onClick={() =>
+                            activeThread && removeThreadAddDir(activeThread.id, dir)
+                          }
+                        >
+                          {dir} ×
+                        </button>
+                      ))}
+                    </div>
+                  </label>
+
+                  <div className="advanced-toggle-grid">
+                    <label className="session-setting-row toggle-setting-row">
+                      <span>skip repo check</span>
+                      <input
+                        type="checkbox"
+                        data-testid="advanced-skip-git-toggle"
+                        checked={activeThread?.skipGitRepoCheck ?? true}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          activeThread &&
+                          setThreadSkipGitRepoCheck(
+                            activeThread.id,
+                            event.target.checked,
+                          )
+                        }
+                      />
+                    </label>
+                    <label className="session-setting-row toggle-setting-row">
+                      <span>json output</span>
+                      <input
+                        type="checkbox"
+                        data-testid="advanced-json-output-toggle"
+                        checked={activeThread?.jsonOutput ?? true}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          activeThread &&
+                          setThreadJSONOutput(activeThread.id, event.target.checked)
+                        }
+                      />
+                    </label>
+                    <label className="session-setting-row toggle-setting-row">
+                      <span>ephemeral</span>
+                      <input
+                        type="checkbox"
+                        data-testid="advanced-ephemeral-toggle"
+                        checked={activeThread?.ephemeral ?? false}
+                        disabled={!activeThread || activeThreadBusy}
+                        onChange={(event) =>
+                          activeThread &&
+                          setThreadEphemeral(activeThread.id, event.target.checked)
+                        }
+                      />
+                    </label>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="quick-strip">
                 <label

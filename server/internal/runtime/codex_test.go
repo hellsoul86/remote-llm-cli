@@ -2,6 +2,27 @@ package runtime
 
 import "testing"
 
+func hasArgPair(args []string, flag string, value string) bool {
+	for index := 0; index < len(args)-1; index += 1 {
+		if args[index] != flag {
+			continue
+		}
+		if args[index+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+func hasArg(args []string, target string) bool {
+	for _, arg := range args {
+		if arg == target {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCodexBuildRunCommandExecWithOptions(t *testing.T) {
 	a := NewCodexAdapter()
 	spec, err := a.BuildRunCommand(RunRequest{
@@ -9,6 +30,8 @@ func TestCodexBuildRunCommandExecWithOptions(t *testing.T) {
 		Codex: &CodexRunOptions{
 			Mode:                  CodexRunModeExec,
 			Model:                 "gpt-5",
+			AskForApproval:        "on-request",
+			Search:                true,
 			Sandbox:               "workspace-write",
 			JSONOutput:            true,
 			SkipGitRepoCheck:      true,
@@ -27,6 +50,12 @@ func TestCodexBuildRunCommandExecWithOptions(t *testing.T) {
 	}
 	if len(spec.Args) == 0 || spec.Args[0] != "exec" {
 		t.Fatalf("args should start with exec: %v", spec.Args)
+	}
+	if !hasArgPair(spec.Args, "--ask-for-approval", "on-request") {
+		t.Fatalf("missing ask-for-approval args: %v", spec.Args)
+	}
+	if !hasArg(spec.Args, "--search") {
+		t.Fatalf("missing --search arg: %v", spec.Args)
 	}
 }
 
@@ -98,5 +127,19 @@ func TestCodexBuildRunCommandModeSpecificValidation(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected review mode option validation error")
+	}
+}
+
+func TestCodexBuildRunCommandAskForApprovalValidation(t *testing.T) {
+	a := NewCodexAdapter()
+	_, err := a.BuildRunCommand(RunRequest{
+		Prompt: "hello",
+		Codex: &CodexRunOptions{
+			Mode:           CodexRunModeExec,
+			AskForApproval: "invalid-policy",
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected ask_for_approval validation error")
 	}
 }

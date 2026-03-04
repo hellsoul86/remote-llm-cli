@@ -12,6 +12,13 @@ export type TimelineEntry = {
   createdAt: string;
 };
 
+export type CodexApprovalPolicy =
+  | ""
+  | "untrusted"
+  | "on-failure"
+  | "on-request"
+  | "never";
+
 export type ConversationThread = {
   id: string;
   title: string;
@@ -21,6 +28,12 @@ export type ConversationThread = {
   updatedAt: string;
   model: string;
   sandbox: "" | "read-only" | "workspace-write" | "danger-full-access";
+  approvalPolicy: CodexApprovalPolicy;
+  webSearch: boolean;
+  addDirs: string[];
+  skipGitRepoCheck: boolean;
+  ephemeral: boolean;
+  jsonOutput: boolean;
   imagePaths: string[];
   activeJobID: string;
   lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
@@ -74,6 +87,19 @@ function projectTitleFromPath(path: string): string {
   return tail?.trim() || trimmed;
 }
 
+function normalizeApprovalPolicy(raw: unknown): CodexApprovalPolicy {
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (
+    value === "untrusted" ||
+    value === "on-failure" ||
+    value === "on-request" ||
+    value === "never"
+  ) {
+    return value;
+  }
+  return "";
+}
+
 function createSession(index: number, title?: string): ConversationThread {
   const now = new Date().toISOString();
   return {
@@ -85,6 +111,12 @@ function createSession(index: number, title?: string): ConversationThread {
     updatedAt: now,
     model: "",
     sandbox: "workspace-write",
+    approvalPolicy: "",
+    webSearch: false,
+    addDirs: [],
+    skipGitRepoCheck: true,
+    ephemeral: false,
+    jsonOutput: true,
     imagePaths: [],
     activeJobID: "",
     lastJobStatus: "idle",
@@ -147,6 +179,12 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     last === "idle" || last === "running" || last === "succeeded" || last === "failed" || last === "canceled"
       ? last
       : fallback.lastJobStatus;
+  const addDirs = Array.isArray(candidate.addDirs)
+    ? candidate.addDirs.filter(
+        (path): path is string =>
+          typeof path === "string" && path.trim() !== "",
+      )
+    : [];
 
   return {
     id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : fallback.id,
@@ -157,6 +195,16 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : now,
     model: typeof candidate.model === "string" ? candidate.model : "",
     sandbox: safeSandbox,
+    approvalPolicy: normalizeApprovalPolicy(candidate.approvalPolicy),
+    webSearch: Boolean(candidate.webSearch),
+    addDirs,
+    skipGitRepoCheck:
+      typeof candidate.skipGitRepoCheck === "boolean"
+        ? candidate.skipGitRepoCheck
+        : true,
+    ephemeral: Boolean(candidate.ephemeral),
+    jsonOutput:
+      typeof candidate.jsonOutput === "boolean" ? candidate.jsonOutput : true,
     imagePaths: Array.isArray(candidate.imagePaths) ? candidate.imagePaths.filter((path): path is string => typeof path === "string" && path.trim() !== "") : [],
     activeJobID: typeof candidate.activeJobID === "string" ? candidate.activeJobID : "",
     lastJobStatus: safeLast,
@@ -599,6 +647,68 @@ export function useSessionDomain() {
     }));
   }
 
+  function setThreadApprovalPolicy(threadID: string, policy: CodexApprovalPolicy) {
+    const safePolicy = normalizeApprovalPolicy(policy);
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      approvalPolicy: safePolicy,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadWebSearch(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      webSearch: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function addThreadAddDir(threadID: string, dir: string) {
+    const trimmed = dir.trim();
+    if (!trimmed) return;
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.addDirs.includes(trimmed)) return thread;
+      return {
+        ...thread,
+        addDirs: [...thread.addDirs, trimmed],
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+
+  function removeThreadAddDir(threadID: string, dir: string) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      addDirs: thread.addDirs.filter((item) => item !== dir),
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadSkipGitRepoCheck(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      skipGitRepoCheck: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadEphemeral(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      ephemeral: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function setThreadJSONOutput(threadID: string, enabled: boolean) {
+    updateWorkspacesByThread(threadID, (thread) => ({
+      ...thread,
+      jsonOutput: enabled,
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
   function addThreadImagePath(threadID: string, imagePath: string) {
     const trimmed = imagePath.trim();
     if (!trimmed) return;
@@ -707,6 +817,12 @@ export function useSessionDomain() {
           updatedAt,
           model: prior?.model ?? "",
           sandbox: prior?.sandbox ?? "workspace-write",
+          approvalPolicy: prior?.approvalPolicy ?? "",
+          webSearch: prior?.webSearch ?? false,
+          addDirs: prior?.addDirs ?? [],
+          skipGitRepoCheck: prior?.skipGitRepoCheck ?? true,
+          ephemeral: prior?.ephemeral ?? false,
+          jsonOutput: prior?.jsonOutput ?? true,
           imagePaths: prior?.imagePaths ?? [],
           activeJobID: prior?.activeJobID ?? "",
           lastJobStatus: prior?.lastJobStatus ?? "idle",
@@ -821,6 +937,13 @@ export function useSessionDomain() {
     switchThreadByOffset,
     setThreadModel,
     setThreadSandbox,
+    setThreadApprovalPolicy,
+    setThreadWebSearch,
+    addThreadAddDir,
+    removeThreadAddDir,
+    setThreadSkipGitRepoCheck,
+    setThreadEphemeral,
+    setThreadJSONOutput,
     addThreadImagePath,
     removeThreadImagePath,
     setThreadJobState,

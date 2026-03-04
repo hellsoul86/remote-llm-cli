@@ -1124,6 +1124,73 @@ button.ghost.danger-ghost:hover {
   gap: 8px;
 }
 
+.session-controls-row {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.advanced-toggle-btn {
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.session-advanced-panel {
+  border: 1px solid #dbe4f0;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.toggle-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.toggle-setting-row span {
+  font-size: 0.72rem;
+}
+
+.toggle-setting-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  accent-color: #1f5d9a;
+}
+
+.add-dir-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.add-dir-row input {
+  font-size: 0.78rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.add-dir-row button {
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+}
+
+.add-dir-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.advanced-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .quick-strip {
   display: flex;
   align-items: center;
@@ -1590,6 +1657,10 @@ button.ghost.danger-ghost:hover {
   }
 
   .session-inline-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .advanced-toggle-grid {
     grid-template-columns: 1fr;
   }
 
