@@ -226,8 +226,10 @@ func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, command string, opt
 		stderrErr = copyStreamToLimitedBuffer(stderrPipe, stderrBuffer, normOpts.OnStderrChunk)
 	}()
 
-	waitErr := cmd.Wait()
+	// Drain both pipes before waiting on process completion to avoid
+	// dropping fast-exit command output in local mode.
 	wg.Wait()
+	waitErr := cmd.Wait()
 	if waitErr == nil {
 		if stdoutErr != nil {
 			waitErr = stdoutErr
