@@ -291,6 +291,46 @@ func (s *Store) ListSessions(limit int) []model.SessionRecord {
 	return out
 }
 
+func (s *Store) DeleteSession(id string) (model.SessionRecord, bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.SessionRecord{}, false, errors.New("session id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	index := -1
+	var deleted model.SessionRecord
+	for i := range s.state.Sessions {
+		if s.state.Sessions[i].ID != id {
+			continue
+		}
+		index = i
+		deleted = s.state.Sessions[i]
+		break
+	}
+	if index < 0 {
+		return model.SessionRecord{}, false, nil
+	}
+
+	s.state.Sessions = append(s.state.Sessions[:index], s.state.Sessions[index+1:]...)
+	delete(s.state.SessionEventSeq, id)
+
+	if len(s.state.SessionEvents) > 0 {
+		kept := make([]model.SessionEvent, 0, len(s.state.SessionEvents))
+		for _, event := range s.state.SessionEvents {
+			if strings.TrimSpace(event.SessionID) == id {
+				continue
+			}
+			kept = append(kept, event)
+		}
+		s.state.SessionEvents = kept
+	}
+
+	return deleted, true, s.saveLocked()
+}
+
 func (s *Store) ListKeys() []model.AccessKey {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

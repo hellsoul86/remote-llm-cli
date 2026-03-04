@@ -11,6 +11,7 @@ import {
   cancelRunJob,
   discoverCodexSessions,
   discoverCodexModels,
+  archiveSession,
   deleteHost,
   enqueueRunJob,
   getMetrics,
@@ -101,7 +102,6 @@ type SessionStreamHealth = {
 };
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
-const COMPLETION_ALERT_GRACE_MS = 30_000;
 const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
 
 type SessionTreePrefs = {
@@ -660,6 +660,7 @@ export function App() {
     upsertAssistantStreamEntry,
     finalizeAssistantStreamEntry,
     createThread,
+    removeThread,
     switchThreadByOffset,
     setThreadModel,
     setThreadSandbox,
@@ -684,6 +685,7 @@ export function App() {
     Record<string, SessionStreamHealth>
   >({});
   const [submittingThreadID, setSubmittingThreadID] = useState("");
+  const [deletingThreadID, setDeletingThreadID] = useState("");
   const [sessionModelDefault, setSessionModelDefault] = useState("");
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
@@ -720,7 +722,7 @@ export function App() {
     new Map(),
   );
   const streamAuthTokenRef = useRef("");
-  const appStartedAtMSRef = useRef<number>(Date.now());
+  const completionAlertCutoffMSRef = useRef<number>(Date.now());
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
@@ -874,7 +876,8 @@ export function App() {
   }, [collapsedHostIDs, filteredSessionTreeHosts]);
   const activeThreadBusy =
     Boolean(activeThread?.activeJobID) ||
-    (activeThread ? submittingThreadID === activeThread.id : false);
+    (activeThread ? submittingThreadID === activeThread.id : false) ||
+    (activeThread ? deletingThreadID === activeThread.id : false);
   const activeThreadStatusCopy = activeThreadBusy
     ? "Codex is thinking..."
     : activeThread?.lastJobStatus === "failed"
@@ -1253,6 +1256,12 @@ export function App() {
   function notifySessionDone(title: string, body: string) {
     if (typeof Notification === "undefined") return;
     if (notificationPermission !== "granted") return;
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible"
+    ) {
+      return;
+    }
     try {
       const note = new Notification(title, { body, silent: false });
       window.setTimeout(() => note.close(), 6000);
@@ -1266,7 +1275,7 @@ export function App() {
     if (!ts) return false;
     const parsed = Date.parse(ts);
     if (!Number.isFinite(parsed)) return false;
-    return parsed >= appStartedAtMSRef.current - COMPLETION_ALERT_GRACE_MS;
+    return parsed >= completionAlertCutoffMSRef.current;
   }
 
   function pushSessionAlert(alert: Omit<SessionAlert, "id">) {
@@ -1734,6 +1743,7 @@ export function App() {
     sessionID: string,
     runID: string,
     completedAt?: string,
+    options?: { surfaceCompletions?: boolean },
   ) {
     if (runID && completedJobsRef.current.has(runID)) {
       return;
@@ -1801,7 +1811,9 @@ export function App() {
       );
       setThreadJobState(sessionID, "", "failed");
       const surfaced = markSessionDone(sessionID, runID, "failed", {
-        surface: shouldSurfaceCompletion(completedAt),
+        surface:
+          options?.surfaceCompletions !== false &&
+          shouldSurfaceCompletion(completedAt),
       });
       if (surfaced && sessionID !== activeThreadIDRef.current) {
         setThreadUnread(sessionID, true);
@@ -1837,7 +1849,9 @@ export function App() {
       );
     }
     const surfaced = markSessionDone(sessionID, runID, "succeeded", {
-      surface: shouldSurfaceCompletion(completedAt),
+      surface:
+        options?.surfaceCompletions !== false &&
+        shouldSurfaceCompletion(completedAt),
     });
     if (surfaced && sessionID !== activeThreadIDRef.current) {
       setThreadUnread(sessionID, true);
@@ -1848,6 +1862,7 @@ export function App() {
   async function handleSessionEventRecord(
     sessionID: string,
     event: SessionEventRecord,
+    options?: { surfaceCompletions?: boolean },
   ) {
     const payload = sessionPayloadRecord(event);
     const runID = sessionEventRunID(event);
@@ -1965,7 +1980,9 @@ export function App() {
         );
         setThreadJobState(sessionID, "", "failed");
         const surfaced = markSessionDone(sessionID, id, "failed", {
-          surface: shouldSurfaceCompletion(event.created_at),
+          surface:
+            options?.surfaceCompletions !== false &&
+            shouldSurfaceCompletion(event.created_at),
         });
         if (surfaced && sessionID !== activeThreadIDRef.current) {
           setThreadUnread(sessionID, true);
@@ -1991,7 +2008,9 @@ export function App() {
         );
         setThreadJobState(sessionID, "", "canceled");
         const surfaced = markSessionDone(sessionID, id, "canceled", {
-          surface: shouldSurfaceCompletion(event.created_at),
+          surface:
+            options?.surfaceCompletions !== false &&
+            shouldSurfaceCompletion(event.created_at),
         });
         if (surfaced && sessionID !== activeThreadIDRef.current) {
           setThreadUnread(sessionID, true);
@@ -2002,7 +2021,9 @@ export function App() {
       case "run.completed":
       case "job.succeeded": {
         if (!runID) return;
-        await finalizeStreamCompleted(sessionID, runID, event.created_at);
+        await finalizeStreamCompleted(sessionID, runID, event.created_at, {
+          surfaceCompletions: options?.surfaceCompletions !== false,
+        });
         return;
       }
       default:
@@ -2091,7 +2112,7 @@ export function App() {
       return;
     }
 
-    state.ready = true;
+    const surfaceCompletions = state.ready;
     updateSessionStreamHealth(sessionID, "live", {
       lastEventAt: receivedAt,
       lastError: "",
@@ -2101,7 +2122,9 @@ export function App() {
     const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
     if (event.seq <= current) return;
     sessionEventCursorRef.current.set(sessionID, event.seq);
-    void handleSessionEventRecord(sessionID, event);
+    void handleSessionEventRecord(sessionID, event, {
+      surfaceCompletions,
+    });
   }
 
   function startSessionStream(sessionID: string, authToken: string) {
@@ -2193,6 +2216,7 @@ export function App() {
   }
 
   async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
+    const refreshStartedAtMS = Date.now();
     setIsRefreshing(true);
     try {
       const [
@@ -2284,6 +2308,8 @@ export function App() {
           activeThreadID,
         );
       }
+      // Only surface completion alerts for events that happen after this sync starts.
+      completionAlertCutoffMSRef.current = refreshStartedAtMS;
     } catch (error) {
       setHealth(`error: ${String(error)}`);
       if (emitConnectedNote) {
@@ -2960,6 +2986,50 @@ export function App() {
   async function onRefreshWorkspace() {
     if (authPhase !== "ready" || !token.trim()) return;
     await loadWorkspace(token, false);
+  }
+
+  async function onArchiveActiveSession() {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    const targetSessionID = activeThread.id.trim();
+    if (!targetSessionID) return;
+    if (activeThread.activeJobID || submittingThreadID === targetSessionID) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Archive Blocked",
+          body: "Session is running. Stop it before archiving.",
+        },
+        targetSessionID,
+      );
+      return;
+    }
+    const confirmed = window.confirm(
+      `Archive session "${activeThread.title}" on host "${activeWorkspace?.hostName || "unknown"}"?`,
+    );
+    if (!confirmed) return;
+
+    setDeletingThreadID(targetSessionID);
+    try {
+      await archiveSession(token, targetSessionID);
+      stopSessionStream(targetSessionID);
+      sessionEventCursorRef.current.delete(targetSessionID);
+      sessionRunStateRef.current.delete(targetSessionID);
+      removeThread(targetSessionID);
+      await refreshProjectsFromSource(token, hosts, false, true);
+    } catch (error) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Archive Failed",
+          body: String(error),
+        },
+        targetSessionID,
+      );
+    } finally {
+      setDeletingThreadID("");
+    }
   }
 
   function onReconnectActiveStream() {
@@ -3654,6 +3724,16 @@ export function App() {
                 >
                   stream {activeStreamCopy}
                 </span>
+                <button
+                  type="button"
+                  className="ghost danger-ghost stream-reconnect-btn"
+                  disabled={!activeThread || activeThreadBusy}
+                  onClick={() => void onArchiveActiveSession()}
+                >
+                  {activeThread && deletingThreadID === activeThread.id
+                    ? "Archiving..."
+                    : "Archive"}
+                </button>
                 <button
                   type="button"
                   className="ghost stream-reconnect-btn"

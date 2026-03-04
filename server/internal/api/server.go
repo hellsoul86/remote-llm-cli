@@ -111,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/projects", s.withAuth(http.HandlerFunc(s.handleListProjects)))
 	mux.Handle("GET /v1/sessions", s.withAuth(http.HandlerFunc(s.handleListSessions)))
 	mux.Handle("GET /v1/sessions/{id}", s.withAuth(http.HandlerFunc(s.handleGetSession)))
+	mux.Handle("DELETE /v1/sessions/{id}", s.withAuth(http.HandlerFunc(s.handleDeleteSession)))
 	mux.Handle("GET /v1/jobs", s.withAuth(http.HandlerFunc(s.handleListRunJobs)))
 	mux.Handle("GET /v1/jobs/{id}", s.withAuth(http.HandlerFunc(s.handleGetRunJob)))
 	mux.Handle("GET /v1/jobs/{id}/events", s.withAuth(http.HandlerFunc(s.handleListRunJobEvents)))
@@ -328,6 +329,89 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": session})
+}
+
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	if sessionID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session id"})
+		return
+	}
+	session, ok := s.store.GetSession(sessionID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	sessionRuntime := strings.ToLower(strings.TrimSpace(session.Runtime))
+	if sessionRuntime != "" && sessionRuntime != "codex" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "remote delete unsupported for session runtime",
+			"runtime": session.Runtime,
+		})
+		return
+	}
+
+	hostID := strings.TrimSpace(session.HostID)
+	if hostID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "session host_id is missing",
+		})
+		return
+	}
+	host, ok := s.store.GetHost(hostID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error":   "session host not found",
+			"host_id": hostID,
+		})
+		return
+	}
+
+	spec := buildCodexSessionDeleteSpec(sessionID)
+	execRes, runErr := s.runViaSSH(
+		r.Context(),
+		host,
+		spec,
+		resolveWorkdir("", host.Workspace),
+		executor.ExecOptions{
+			MaxStdoutBytes: 512 * 1024,
+			MaxStderrBytes: 256 * 1024,
+		},
+	)
+	if runErr != nil {
+		msg, class, hint := errorDetails(runErr)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":       msg,
+			"error_class": class,
+			"error_hint":  hint,
+			"host":        host,
+			"result":      execRes,
+		})
+		return
+	}
+
+	paths := parseCodexSessionDeleteOutput(execRes.Stdout)
+	deletedSession, deleted, err := s.store.DeleteSession(sessionID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	s.closeSessionStreams(sessionID)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"session": deletedSession,
+		"remote": map[string]any{
+			"host":       host,
+			"result":     execRes,
+			"paths":      capStringList(paths, 200),
+			"path_count": len(paths),
+		},
+	})
 }
 
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
@@ -1415,6 +1499,25 @@ func (s *Server) publishSessionEvent(event model.SessionEvent) {
 	}
 }
 
+func (s *Server) closeSessionStreams(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bySession := s.streamSubs[sessionID]
+	if len(bySession) == 0 {
+		delete(s.streamSubs, sessionID)
+		return
+	}
+	for subID, ch := range bySession {
+		close(ch)
+		delete(bySession, subID)
+	}
+	delete(s.streamSubs, sessionID)
+}
+
 func (s *Server) listRunJobEvents(jobID string, afterSeq int64, limit int) ([]runJobEvent, int64) {
 	if limit <= 0 {
 		limit = 200
@@ -2181,6 +2284,149 @@ fi
 	return runtime.CommandSpec{Program: "sh", Args: []string{"-lc", script}}
 }
 
+func buildCodexSessionDeleteSpec(sessionID string) runtime.CommandSpec {
+	script := fmt.Sprintf(`
+set -e
+session_id=%q
+if [ -z "$session_id" ]; then
+  exit 0
+fi
+if command -v python3 >/dev/null 2>&1; then
+  py_exec=python3
+elif command -v python >/dev/null 2>&1; then
+  py_exec=python
+else
+  target="$HOME/.codex/sessions"
+  if [ -d "$target" ]; then
+    find "$target" -type f -name "*$session_id*.jsonl" -print -delete 2>/dev/null
+  fi
+  if [ -f "$HOME/.codex/session_index.jsonl" ]; then
+    tmp="$HOME/.codex/session_index.jsonl.tmp.$$"
+    grep -v "\"id\"[[:space:]]*:[[:space:]]*\"$session_id\"" "$HOME/.codex/session_index.jsonl" >"$tmp" || true
+    mv "$tmp" "$HOME/.codex/session_index.jsonl"
+  fi
+  exit 0
+fi
+
+"$py_exec" - "$session_id" <<'PY'
+import json
+import os
+import sys
+
+def infer_session_id_from_name(name: str) -> str:
+    base = name
+    if base.endswith(".jsonl"):
+        base = base[:-6]
+    if base.startswith("rollout-"):
+        parts = base.split("-")
+        if len(parts) >= 5:
+            candidate = "-".join(parts[-5:]).strip()
+            if candidate:
+                return candidate
+    return base.strip()
+
+def file_matches(path: str, target_session_id: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            first = fh.readline().strip()
+        if first:
+            row = json.loads(first)
+            payload = row.get("payload") if isinstance(row, dict) else {}
+            if isinstance(payload, dict):
+                payload_id = str(payload.get("id") or "").strip()
+                if payload_id == target_session_id:
+                    return True
+    except Exception:
+        pass
+    inferred = infer_session_id_from_name(os.path.basename(path))
+    return inferred == target_session_id
+
+def prune_empty_dirs(root_path: str) -> None:
+    if not os.path.isdir(root_path):
+        return
+    for root, dirs, files in os.walk(root_path, topdown=False):
+        if dirs or files:
+            continue
+        try:
+            os.rmdir(root)
+        except Exception:
+            pass
+
+def rewrite_session_index(index_path: str, target_session_id: str) -> None:
+    if not os.path.isfile(index_path):
+        return
+    keep_lines = []
+    changed = False
+    try:
+        with open(index_path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.rstrip("\n")
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                remove = False
+                try:
+                    row = json.loads(stripped)
+                    row_id = str(row.get("id") or "").strip() if isinstance(row, dict) else ""
+                    if row_id == target_session_id:
+                        remove = True
+                except Exception:
+                    remove = False
+                if remove:
+                    changed = True
+                    continue
+                keep_lines.append(stripped)
+    except Exception:
+        return
+    if not changed:
+        return
+    tmp_path = index_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            for line in keep_lines:
+                fh.write(line + "\n")
+        os.replace(tmp_path, index_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+session_id = str(sys.argv[1] if len(sys.argv) > 1 else "").strip()
+if not session_id:
+    raise SystemExit(0)
+
+home = os.path.expanduser("~")
+sessions_root = os.path.join(home, ".codex", "sessions")
+index_path = os.path.join(home, ".codex", "session_index.jsonl")
+
+matches = []
+if os.path.isdir(sessions_root):
+    for root, _, files in os.walk(sessions_root):
+        for name in files:
+            if not name.endswith(".jsonl"):
+                continue
+            full = os.path.join(root, name)
+            if file_matches(full, session_id):
+                matches.append(full)
+
+for full in sorted(set(matches)):
+    try:
+        os.remove(full)
+        print(full)
+    except FileNotFoundError:
+        continue
+    except Exception:
+        pass
+
+prune_empty_dirs(sessions_root)
+rewrite_session_index(index_path, session_id)
+PY
+`, sessionID)
+	return runtime.CommandSpec{Program: "sh", Args: []string{"-lc", script}}
+}
+
 func parseCodexSessionDiscoverOutput(stdout string) []codexSessionInfo {
 	lines := parsePathLines(stdout)
 	out := make([]codexSessionInfo, 0, len(lines))
@@ -2215,6 +2461,10 @@ func parseCodexSessionDiscoverOutput(stdout string) []codexSessionInfo {
 		})
 	}
 	return out
+}
+
+func parseCodexSessionDeleteOutput(stdout string) []string {
+	return parsePathLines(stdout)
 }
 
 func parseEpochSeconds(raw string) (time.Time, error) {
@@ -2909,6 +3159,8 @@ func inferAction(method string, path string) string {
 		return "project.list"
 	case method == http.MethodGet && path == "/v1/sessions":
 		return "session.list"
+	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/sessions/"):
+		return "session.delete"
 	case method == http.MethodGet && path == "/v1/jobs":
 		return "job.list"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v1/jobs/") && strings.HasSuffix(path, "/events"):

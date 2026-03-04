@@ -444,6 +444,56 @@ export function useSessionDomain() {
     setThreadRenameDraft(next.title);
   }
 
+  function removeThread(threadID: string) {
+    const targetID = threadID.trim();
+    if (!targetID) return;
+    let removed = false;
+    let nextActiveWorkspaceID = activeWorkspaceID;
+    let fallbackThreadID = "";
+    setWorkspaces((prev) => {
+      const now = new Date().toISOString();
+      const next = prev.map((workspace) => {
+        const currentIndex = workspace.sessions.findIndex((thread) => thread.id === targetID);
+        if (currentIndex < 0) return workspace;
+        removed = true;
+
+        const nextSessions = workspace.sessions.filter((thread) => thread.id !== targetID);
+        let nextActiveSessionID = workspace.activeSessionID;
+        if (workspace.activeSessionID === targetID) {
+          if (nextSessions.length > 0) {
+            const fallbackIndex = Math.min(currentIndex, nextSessions.length - 1);
+            nextActiveSessionID = nextSessions[fallbackIndex]?.id ?? "";
+          } else {
+            nextActiveSessionID = "";
+          }
+        }
+        return {
+          ...workspace,
+          sessions: nextSessions,
+          activeSessionID: nextActiveSessionID,
+          updatedAt: now
+        };
+      });
+
+      if (!removed) {
+        return prev;
+      }
+      if (!next.some((workspace) => workspace.id === nextActiveWorkspaceID)) {
+        nextActiveWorkspaceID = next[0]?.id ?? "";
+      }
+      const nextActiveWorkspace = next.find((workspace) => workspace.id === nextActiveWorkspaceID);
+      fallbackThreadID = nextActiveWorkspace?.activeSessionID ?? "";
+      return next;
+    });
+    if (!removed) return;
+    if (nextActiveWorkspaceID !== activeWorkspaceID) {
+      setActiveWorkspaceID(nextActiveWorkspaceID);
+    }
+    if (activeJobThreadID === targetID) {
+      setActiveJobThreadID(fallbackThreadID);
+    }
+  }
+
   function renameThread(threadID: string, nextTitle: string) {
     const trimmed = nextTitle.trim();
     if (!trimmed) return;
@@ -716,6 +766,7 @@ export function useSessionDomain() {
     upsertAssistantStreamEntry,
     finalizeAssistantStreamEntry,
     createThread,
+    removeThread,
     renameThread,
     switchThreadByOffset,
     setThreadModel,

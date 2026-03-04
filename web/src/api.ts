@@ -663,6 +663,18 @@ export async function getSession(token: string, sessionID: string): Promise<Sess
   return body.session;
 }
 
+export async function archiveSession(token: string, sessionID: string): Promise<{ deleted: boolean; session?: SessionRecord }> {
+  const res = await fetch(`${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}`, {
+    method: "DELETE",
+    headers: headers(token)
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(`archive session failed: ${res.status} ${JSON.stringify(body)}`);
+  return { deleted: Boolean(body?.deleted), session: body?.session };
+}
+
+export const deleteSession = archiveSession;
+
 type StreamSessionEventsOptions = {
   after?: number;
   signal: AbortSignal;

@@ -337,3 +337,75 @@ func TestProjectAndSessionBindingLifecycle(t *testing.T) {
 		t.Fatalf("session last_status=%q want=succeeded", sessions[0].LastStatus)
 	}
 }
+
+func TestDeleteSessionRemovesSessionAndEvents(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.UpsertSession(model.SessionRecord{
+		ID:      "session_delete_target",
+		HostID:  "h_1",
+		Path:    "/srv/app",
+		Runtime: "codex",
+		Title:   "Delete me",
+	}); err != nil {
+		t.Fatalf("upsert target session: %v", err)
+	}
+	if _, err := st.UpsertSession(model.SessionRecord{
+		ID:      "session_keep",
+		HostID:  "h_1",
+		Path:    "/srv/app",
+		Runtime: "codex",
+		Title:   "Keep me",
+	}); err != nil {
+		t.Fatalf("upsert keep session: %v", err)
+	}
+	if _, err := st.AppendSessionEvent(model.SessionEvent{
+		SessionID: "session_delete_target",
+		RunID:     "job_1",
+		Type:      "run.started",
+	}); err != nil {
+		t.Fatalf("append target session event: %v", err)
+	}
+	if _, err := st.AppendSessionEvent(model.SessionEvent{
+		SessionID: "session_keep",
+		RunID:     "job_2",
+		Type:      "run.started",
+	}); err != nil {
+		t.Fatalf("append keep session event: %v", err)
+	}
+
+	deleted, ok, err := st.DeleteSession("session_delete_target")
+	if err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected target session to be deleted")
+	}
+	if deleted.ID != "session_delete_target" {
+		t.Fatalf("deleted session id=%q", deleted.ID)
+	}
+
+	if _, found := st.GetSession("session_delete_target"); found {
+		t.Fatalf("target session should not exist after delete")
+	}
+	remaining := st.ListSessions(10)
+	if len(remaining) != 1 || remaining[0].ID != "session_keep" {
+		t.Fatalf("remaining sessions mismatch: %#v", remaining)
+	}
+	targetEvents := st.ListSessionEvents("session_delete_target", 0, 10)
+	if len(targetEvents) != 0 {
+		t.Fatalf("target session events should be removed, got=%d", len(targetEvents))
+	}
+	keepEvents := st.ListSessionEvents("session_keep", 0, 10)
+	if len(keepEvents) != 1 {
+		t.Fatalf("keep session events should remain, got=%d", len(keepEvents))
+	}
+	if _, ok := st.GetSession("unknown_session"); ok {
+		t.Fatalf("unknown session should not exist")
+	}
+	if _, ok, err := st.DeleteSession("unknown_session"); err != nil || ok {
+		t.Fatalf("unknown session delete mismatch: ok=%v err=%v", ok, err)
+	}
+}

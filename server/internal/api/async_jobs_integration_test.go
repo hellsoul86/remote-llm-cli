@@ -497,6 +497,102 @@ func TestSessionBindingAndNormalizedLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionRemovesRemoteCodexSessionAndLocalState(t *testing.T) {
+	srv, httpSrv, token, host := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_delete_1"
+	project, err := srv.store.UpsertProject(model.ProjectRecord{
+		ID:       "project_h1::/srv/work",
+		HostID:   host.ID,
+		HostName: host.Name,
+		Path:     "/srv/work",
+		Runtime:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+	if _, err := srv.store.UpsertSession(model.SessionRecord{
+		ID:        sessionID,
+		ProjectID: project.ID,
+		HostID:    host.ID,
+		Path:      "/srv/work",
+		Runtime:   "codex",
+		Title:     "Delete Target",
+	}); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+	if _, err := srv.store.AppendSessionEvent(model.SessionEvent{
+		SessionID: sessionID,
+		RunID:     "job_delete_1",
+		Type:      "run.started",
+		Payload:   json.RawMessage(`{"status":"running"}`),
+	}); err != nil {
+		t.Fatalf("append session event: %v", err)
+	}
+
+	runCalled := false
+	srv.runViaSSH = func(_ context.Context, h model.Host, spec runtime.CommandSpec, _ string, _ executor.ExecOptions) (executor.ExecResult, error) {
+		runCalled = true
+		if h.ID != host.ID {
+			t.Fatalf("delete host id=%q want=%q", h.ID, host.ID)
+		}
+		if spec.Program != "sh" {
+			t.Fatalf("delete spec program=%q want=sh", spec.Program)
+		}
+		if len(spec.Args) < 2 || !strings.Contains(spec.Args[1], sessionID) {
+			t.Fatalf("delete spec should include session id, args=%#v", spec.Args)
+		}
+		now := time.Now().UTC()
+		return executor.ExecResult{
+			ExitCode:   0,
+			Stdout:     "/home/u/.codex/sessions/2026/03/04/rollout-2026-03-04T12-00-00-019cf300-1111-2222-3333-444455556666.jsonl\n",
+			DurationMS: 3,
+			StartedAt:  now,
+			FinishedAt: now,
+		}, nil
+	}
+
+	var deleteResp struct {
+		Deleted bool                `json:"deleted"`
+		Session model.SessionRecord `json:"session"`
+		Remote  struct {
+			PathCount int      `json:"path_count"`
+			Paths     []string `json:"paths"`
+		} `json:"remote"`
+	}
+	status := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodDelete,
+		fmt.Sprintf("%s/v1/sessions/%s", httpSrv.URL, sessionID),
+		token,
+		nil,
+		&deleteResp,
+	)
+	if status != http.StatusOK {
+		t.Fatalf("delete session status=%d want=200", status)
+	}
+	if !runCalled {
+		t.Fatalf("expected remote delete command to execute")
+	}
+	if !deleteResp.Deleted {
+		t.Fatalf("deleted flag should be true")
+	}
+	if deleteResp.Session.ID != sessionID {
+		t.Fatalf("deleted session id=%q want=%q", deleteResp.Session.ID, sessionID)
+	}
+	if deleteResp.Remote.PathCount != 1 || len(deleteResp.Remote.Paths) != 1 {
+		t.Fatalf("unexpected delete paths: count=%d paths=%#v", deleteResp.Remote.PathCount, deleteResp.Remote.Paths)
+	}
+	if _, ok := srv.store.GetSession(sessionID); ok {
+		t.Fatalf("session should be removed from store")
+	}
+	if events := srv.store.ListSessionEvents(sessionID, 0, 100); len(events) != 0 {
+		t.Fatalf("session events should be removed, got=%d", len(events))
+	}
+}
+
 func TestDiscoverCodexModels(t *testing.T) {
 	srv, httpSrv, token, host := newAuthedTestServer(t)
 	defer httpSrv.Close()
