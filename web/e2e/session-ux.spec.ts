@@ -11,6 +11,7 @@ type MockOptions = {
   titleUpdate?: string;
   jobRunningPolls?: number;
   streamFailAttempts?: number;
+  runtimeCommandEvents?: boolean;
 };
 
 function buildLongAssistantReply(marker: string): string {
@@ -36,6 +37,7 @@ async function mockSessionApi(
   const titleUpdate = options?.titleUpdate?.trim() ?? "";
   const jobRunningPolls = Math.max(1, options?.jobRunningPolls ?? 1);
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
+  const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   let sessionOneStreamAttempts = 0;
   let canceled = false;
   const nowISO = new Date().toISOString();
@@ -263,10 +265,45 @@ async function mockSessionApi(
       return;
     }
     if (streamPattern === "completion-once") {
-      const chunk =
-        `{"type":"thread.started","thread_id":"t_ux"}\n` +
-        `{"type":"turn.started"}\n` +
-        `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: assistantReply } })}\n`;
+      const chunkLines = [
+        `{"type":"thread.started","thread_id":"t_ux"}`,
+        `{"type":"turn.started"}`,
+      ];
+      if (runtimeCommandEvents) {
+        chunkLines.push(
+          JSON.stringify({
+            type: "item.started",
+            item: {
+              id: "item_cmd_1",
+              type: "command_execution",
+              command: "ls -la",
+              aggregated_output: "",
+              exit_code: null,
+              status: "in_progress",
+            },
+          }),
+        );
+        chunkLines.push(
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "item_cmd_1",
+              type: "command_execution",
+              command: "ls -la",
+              aggregated_output: "README.md",
+              exit_code: 0,
+              status: "completed",
+            },
+          }),
+        );
+      }
+      chunkLines.push(
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: assistantReply },
+        }),
+      );
+      const chunk = `${chunkLines.join("\n")}\n`;
       const events = [
         {
           seq: 1,
@@ -818,6 +855,27 @@ test("session stream completion keeps a single assistant reply", async ({
   await expect(page.getByText("Target Done")).toBeVisible();
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
+});
+
+test("session stream renders command runtime cards", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `RUNTIME_CARD_${Date.now()}`;
+  const harness = await mockSessionApi(page, `runtime ${marker}`, marker, {
+    streamPattern: "completion-once",
+    runtimeCommandEvents: true,
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`emit runtime command cards ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect(page.getByText("Command Started")).toBeVisible();
+  await expect(page.getByText("Command Completed")).toBeVisible();
+  await expect(page.getByText(/^ls -la$/)).toBeVisible();
 });
 
 test("stop and regenerate controls work in session composer", async ({
