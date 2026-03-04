@@ -698,6 +698,7 @@ export function App() {
   const [deletingProjectID, setDeletingProjectID] = useState("");
   const [sessionModelDefault, setSessionModelDefault] = useState("");
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
+  const [sourceProjectIDs, setSourceProjectIDs] = useState<string[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
   const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
@@ -889,6 +890,15 @@ export function App() {
       projects: group.projects.sort((a, b) => a.path.localeCompare(b.path)),
     }));
   }, [hosts, workspaces]);
+  const sourceProjectIDSet = useMemo(
+    () =>
+      new Set(
+        sourceProjectIDs
+          .map((id) => id.trim())
+          .filter((id) => id !== ""),
+      ),
+    [sourceProjectIDs],
+  );
   const filteredSessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
     const query = projectFilter.trim().toLowerCase();
     if (!query) return sessionTreeHosts;
@@ -1656,6 +1666,7 @@ export function App() {
     preserveOnError = true,
   ) {
     if (!discoverEnabled) {
+      setSourceProjectIDs([]);
       syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
       return;
     }
@@ -1665,10 +1676,12 @@ export function App() {
         fanout: Math.max(1, Math.min(8, sourceHosts.length || 1)),
         limit_per_host: 120,
       });
+      setSourceProjectIDs([]);
       syncProjectsFromDiscovery(
         buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []),
       );
     } catch {
+      setSourceProjectIDs([]);
       if (!preserveOnError) {
         syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
       }
@@ -1728,6 +1741,11 @@ export function App() {
         listProjects(authToken, 600),
         listSessions(authToken, 1200),
       ]);
+      setSourceProjectIDs(
+        projects
+          .map((project) => project.id.trim())
+          .filter((id) => id !== ""),
+      );
       const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
       if (built.length > 0) {
         syncProjectsFromDiscovery(built, { preserveMissingSessions: false });
@@ -1735,6 +1753,7 @@ export function App() {
         return;
       }
     } catch {
+      setSourceProjectIDs([]);
       // fall through to discovery fallback
     }
     await refreshProjectsFromDiscovery(
@@ -3074,6 +3093,7 @@ export function App() {
     setSessionAlerts([]);
     setSessionModelDefault("");
     setSessionModelOptions([]);
+    setSourceProjectIDs([]);
     setToken("");
     setTokenInput("");
     setAuthError("");
@@ -3101,6 +3121,18 @@ export function App() {
     if (authPhase !== "ready" || !token.trim()) return;
     const targetProjectID = projectID.trim();
     if (!targetProjectID) return;
+    if (!sourceProjectIDSet.has(targetProjectID)) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Archive Unavailable",
+          body: "Project is local-only and cannot be archived remotely.",
+        },
+        activeThreadID,
+      );
+      return;
+    }
     if (sessionCount > 0) {
       addTimelineEntry(
         {
@@ -3724,35 +3756,37 @@ export function App() {
                                     : `${projectNode.sessions.length}`}
                                 </small>
                               </button>
-                              <div className="project-node-actions">
-                                <button
-                                  type="button"
-                                  className="ghost danger-ghost project-archive-btn"
-                                  disabled={
-                                    authPhase !== "ready" ||
-                                    !token.trim() ||
-                                    deletingProjectID === projectNode.id ||
-                                    deletingProjectID !== "" ||
-                                    projectNode.sessions.length > 0
-                                  }
-                                  title={
-                                    projectNode.sessions.length > 0
-                                      ? "Archive sessions first"
-                                      : "Archive empty project"
-                                  }
-                                  onClick={() =>
-                                    void onArchiveProject(
-                                      projectNode.id,
-                                      projectNode.path,
-                                      projectNode.sessions.length,
-                                    )
-                                  }
-                                >
-                                  {deletingProjectID === projectNode.id
-                                    ? "Archiving..."
-                                    : "Archive"}
-                                </button>
-                              </div>
+                              {sourceProjectIDSet.has(projectNode.id) ? (
+                                <div className="project-node-actions">
+                                  <button
+                                    type="button"
+                                    className="ghost danger-ghost project-archive-btn"
+                                    disabled={
+                                      authPhase !== "ready" ||
+                                      !token.trim() ||
+                                      deletingProjectID === projectNode.id ||
+                                      deletingProjectID !== "" ||
+                                      projectNode.sessions.length > 0
+                                    }
+                                    title={
+                                      projectNode.sessions.length > 0
+                                        ? "Archive sessions first"
+                                        : "Archive empty project"
+                                    }
+                                    onClick={() =>
+                                      void onArchiveProject(
+                                        projectNode.id,
+                                        projectNode.path,
+                                        projectNode.sessions.length,
+                                      )
+                                    }
+                                  >
+                                    {deletingProjectID === projectNode.id
+                                      ? "Archiving..."
+                                      : "Archive"}
+                                  </button>
+                                </div>
+                              ) : null}
                               <div className="project-session-list">
                                 {projectNode.sessions.length === 0 ? (
                                   <p className="pane-subtle-light compact-empty">
