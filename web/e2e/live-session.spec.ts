@@ -31,7 +31,7 @@ async function unlockSessionPage(page: Page, token: string): Promise<void> {
 }
 
 async function createFreshSession(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "New" }).click();
+  await page.locator("button.new-thread").first().click();
   const heading = page.locator(".chat-head h1");
   await expect(heading).toContainText(/Session\s+\d+/, { timeout: 30_000 });
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled({ timeout: 120_000 });
@@ -121,7 +121,7 @@ test.describe.serial("live headless session flow (real API, no route mocking)", 
     const session1Chip = page.locator(".session-chip-tree.active").first();
     const session1ID = (await session1Chip.getAttribute("data-session-id")) ?? "";
     expect(session1ID).not.toBe("");
-    await page.getByRole("button", { name: "New" }).click();
+    await page.locator("button.new-thread").first().click();
     const session2Chip = page.locator(".session-chip-tree.active").first();
     await expect(session2Chip).toBeVisible({ timeout: 30_000 });
     const session2ID = (await session2Chip.getAttribute("data-session-id")) ?? "";
