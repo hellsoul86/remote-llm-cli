@@ -51,7 +51,6 @@ import {
 import { useOpsDomain } from "./domains/ops";
 import {
   type CodexApprovalPolicy,
-  type CodexSessionMode,
   type TimelineEntry,
   type TimelineState,
   useSessionDomain,
@@ -154,11 +153,6 @@ const APPROVAL_POLICY_OPTIONS: Array<{
   { value: "on-request", label: "on-request" },
   { value: "never", label: "never" },
   { value: "on-failure", label: "on-failure (legacy)" },
-];
-const CODEX_MODE_OPTIONS: Array<{ value: CodexSessionMode; label: string }> = [
-  { value: "exec", label: "exec" },
-  { value: "resume", label: "resume" },
-  { value: "review", label: "review" },
 ];
 type CodexPlatformMCPAction =
   | "list"
@@ -1262,13 +1256,6 @@ export function App() {
     removeThread,
     switchThreadByOffset,
     setThreadModel,
-    setThreadCodexMode,
-    setThreadResumeLast,
-    setThreadResumeSessionID,
-    setThreadReviewUncommitted,
-    setThreadReviewBase,
-    setThreadReviewCommit,
-    setThreadReviewTitle,
     setThreadSandbox,
     setThreadApprovalPolicy,
     setThreadWebSearch,
@@ -1582,14 +1569,9 @@ export function App() {
     (activeThread ? submittingThreadID === activeThread.id : false) ||
     (activeThread ? deletingThreadID === activeThread.id : false) ||
     (activeThread ? cancelingThreadID === activeThread.id : false);
-  const activeThreadMode: CodexSessionMode = activeThread?.codexMode ?? "exec";
-  const isResumeMode = activeThreadMode === "resume";
-  const isReviewMode = activeThreadMode === "review";
-  const isExecMode = activeThreadMode === "exec";
   const activeThreadRunID = activeThread?.activeJobID.trim() ?? "";
   const hasRegeneratePrompt =
     activeThread !== null &&
-    isExecMode &&
     lastUserPromptFromTimeline(activeThread.timeline).trim() !== "";
   const activeThreadStatusCopy = activeThreadBusy
     ? "Codex is thinking..."
@@ -2101,7 +2083,6 @@ export function App() {
 
   function onAddDirDraftSubmit() {
     if (!activeThread) return;
-    if (activeThread.codexMode !== "exec") return;
     const trimmed = addDirDraft.trim();
     if (!trimmed) return;
     addThreadAddDir(activeThread.id, trimmed);
@@ -4532,37 +4513,20 @@ export function App() {
       return;
     }
 
-    const mode: CodexSessionMode = activeThread.codexMode ?? "exec";
     const prompt = trimmedPrompt.trim();
-    if (mode === "exec" && !prompt) {
+    if (!prompt) {
       addTimelineEntry(
         {
           kind: "system",
           state: "error",
           title: "Prompt Missing",
-          body: "Prompt is required in exec mode.",
+          body: "Prompt is required.",
         },
         activeThread.id,
       );
       return;
     }
-    if (
-      mode === "resume" &&
-      !activeThread.resumeLast &&
-      !activeThread.resumeSessionID.trim()
-    ) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Resume Config Missing",
-          body: "Enable resume last or provide a session ID.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-    if (prompt && mode === "exec" && isGenericSessionTitle(activeThread.title)) {
+    if (isGenericSessionTitle(activeThread.title)) {
       const nextTitle = deriveSessionTitleFromPrompt(prompt);
       if (nextTitle) {
         setThreadTitle(activeThread.id, nextTitle);
@@ -4602,10 +4566,8 @@ export function App() {
     const hasNonLocalTarget = selectedHosts.some(
       (host) => host.connection_mode !== "local",
     );
-    const allowImageAttach = mode !== "review";
-    const safeImagePaths =
-      allowImageAttach && !hasNonLocalTarget ? activeThread.imagePaths : [];
-    if (allowImageAttach && hasNonLocalTarget && activeThread.imagePaths.length > 0) {
+    const safeImagePaths = !hasNonLocalTarget ? activeThread.imagePaths : [];
+    if (hasNonLocalTarget && activeThread.imagePaths.length > 0) {
       addTimelineEntry(
         {
           kind: "system",
@@ -4627,49 +4589,21 @@ export function App() {
     const effectiveSandbox =
       activeThread.sandbox || runSandbox || "workspace-write";
     const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
-    const reviewBase = activeThread.reviewBase.trim();
-    const reviewCommit = activeThread.reviewCommit.trim();
-    const reviewTitle = activeThread.reviewTitle.trim();
 
     const codexRequest: RunRequest["codex"] =
       (activeRuntime?.name ?? selectedRuntime) === "codex"
         ? {
-            mode,
+            mode: "exec",
             model: effectiveModel,
             ask_for_approval: activeThread.approvalPolicy || undefined,
             search: activeThread.webSearch ? true : undefined,
             json_output: activeThread.jsonOutput,
             skip_git_repo_check: activeThread.skipGitRepoCheck,
             ephemeral: activeThread.ephemeral,
-            ...(mode === "exec"
-              ? {
-                  sandbox: effectiveSandbox,
-                  add_dirs:
-                    activeThread.addDirs.length > 0
-                      ? activeThread.addDirs
-                      : undefined,
-                  images:
-                    safeImagePaths.length > 0 ? safeImagePaths : undefined,
-                }
-              : {}),
-            ...(mode === "resume"
-              ? {
-                  resume_last: activeThread.resumeLast,
-                  session_id: activeThread.resumeLast
-                    ? undefined
-                    : activeThread.resumeSessionID.trim() || undefined,
-                  images:
-                    safeImagePaths.length > 0 ? safeImagePaths : undefined,
-                }
-              : {}),
-            ...(mode === "review"
-              ? {
-                  review_uncommitted: activeThread.reviewUncommitted,
-                  review_base: reviewBase || undefined,
-                  review_commit: reviewCommit || undefined,
-                  review_title: reviewTitle || undefined,
-                }
-              : {}),
+            sandbox: effectiveSandbox,
+            add_dirs:
+              activeThread.addDirs.length > 0 ? activeThread.addDirs : undefined,
+            images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
           }
         : undefined;
 
@@ -4685,38 +4619,14 @@ export function App() {
       codex: codexRequest,
     };
 
-    if (prompt) {
-      addTimelineEntry(
-        {
-          kind: "user",
-          title: "You",
-          body: prompt,
-        },
-        activeThread.id,
-      );
-    } else if (mode === "resume") {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "running",
-          title: "Resume Requested",
-          body: activeThread.resumeLast
-            ? "Continuing from latest session."
-            : `Continuing from ${activeThread.resumeSessionID.trim() || "specified session"}.`,
-        },
-        activeThread.id,
-      );
-    } else if (mode === "review") {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "running",
-          title: "Review Requested",
-          body: "Starting code review.",
-        },
-        activeThread.id,
-      );
-    }
+    addTimelineEntry(
+      {
+        kind: "user",
+        title: "You",
+        body: prompt,
+      },
+      activeThread.id,
+    );
     if (runAsyncMode) {
       upsertAssistantStreamEntry(activeThread.id, "Thinking...");
     }
@@ -4827,18 +4737,6 @@ export function App() {
 
   async function onRegenerateActiveSession() {
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    if (activeThread.codexMode !== "exec") {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Regenerate Unavailable",
-          body: "Regenerate is available only in exec mode.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
     const prompt = lastUserPromptFromTimeline(activeThread.timeline);
     if (!prompt) {
       addTimelineEntry(
@@ -5769,27 +5667,6 @@ export function App() {
               ) : null}
               <div className="session-inline-settings">
                 <label className="session-setting-row">
-                  mode
-                  <select
-                    data-testid="lifecycle-mode-select"
-                    value={activeThreadMode}
-                    disabled={!activeThread || activeThreadBusy}
-                    onChange={(event) => {
-                      if (!activeThread) return;
-                      setThreadCodexMode(
-                        activeThread.id,
-                        event.target.value as CodexSessionMode,
-                      );
-                    }}
-                  >
-                    {CODEX_MODE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="session-setting-row">
                   model
                   <select
                     data-testid="session-model-select"
@@ -5825,7 +5702,7 @@ export function App() {
                   <select
                     data-testid="session-sandbox-select"
                     value={activeThread?.sandbox ?? "workspace-write"}
-                    disabled={!activeThread || activeThreadBusy || !isExecMode}
+                    disabled={!activeThread || activeThreadBusy}
                     onChange={(event) =>
                       activeThread &&
                       setThreadSandbox(
@@ -5844,11 +5721,6 @@ export function App() {
                       danger-full-access
                     </option>
                   </select>
-                  {!isExecMode ? (
-                    <small className="pane-subtle-light">
-                      Sandbox applies in exec mode.
-                    </small>
-                  ) : null}
                 </label>
               </div>
 
@@ -5872,104 +5744,6 @@ export function App() {
                   {sessionAdvancedOpen ? "Hide Advanced" : "Advanced"}
                 </button>
               </div>
-
-              {isResumeMode ? (
-                <div className="session-lifecycle-panel">
-                  <label className="session-setting-row toggle-setting-row">
-                    <span>resume latest</span>
-                    <input
-                      type="checkbox"
-                      data-testid="resume-last-toggle"
-                      checked={Boolean(activeThread?.resumeLast)}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadResumeLast(activeThread.id, event.target.checked)
-                      }
-                    />
-                  </label>
-                  <label className="session-setting-row">
-                    session id
-                    <input
-                      data-testid="resume-session-id-input"
-                      placeholder="019cb3d9-..."
-                      value={activeThread?.resumeSessionID ?? ""}
-                      disabled={
-                        !activeThread ||
-                        activeThreadBusy ||
-                        Boolean(activeThread?.resumeLast)
-                      }
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadResumeSessionID(
-                          activeThread.id,
-                          event.target.value,
-                        )
-                      }
-                    />
-                  </label>
-                </div>
-              ) : null}
-
-              {isReviewMode ? (
-                <div className="session-lifecycle-panel">
-                  <label className="session-setting-row toggle-setting-row">
-                    <span>uncommitted</span>
-                    <input
-                      type="checkbox"
-                      data-testid="review-uncommitted-toggle"
-                      checked={Boolean(activeThread?.reviewUncommitted)}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadReviewUncommitted(
-                          activeThread.id,
-                          event.target.checked,
-                        )
-                      }
-                    />
-                  </label>
-                  <label className="session-setting-row">
-                    base branch
-                    <input
-                      data-testid="review-base-input"
-                      placeholder="main"
-                      value={activeThread?.reviewBase ?? ""}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadReviewBase(activeThread.id, event.target.value)
-                      }
-                    />
-                  </label>
-                  <label className="session-setting-row">
-                    commit sha
-                    <input
-                      data-testid="review-commit-input"
-                      placeholder="a1b2c3d4"
-                      value={activeThread?.reviewCommit ?? ""}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadReviewCommit(activeThread.id, event.target.value)
-                      }
-                    />
-                  </label>
-                  <label className="session-setting-row">
-                    review title
-                    <input
-                      data-testid="review-title-input"
-                      placeholder="Release review"
-                      value={activeThread?.reviewTitle ?? ""}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadReviewTitle(activeThread.id, event.target.value)
-                      }
-                    />
-                  </label>
-                </div>
-              ) : null}
 
               {sessionAdvancedOpen ? (
                 <div className="session-advanced-panel">
@@ -6016,9 +5790,7 @@ export function App() {
                         data-testid="advanced-add-dir-input"
                         placeholder="/opt/shared"
                         value={addDirDraft}
-                        disabled={
-                          !activeThread || activeThreadBusy || !isExecMode
-                        }
+                        disabled={!activeThread || activeThreadBusy}
                         onChange={(event) => setAddDirDraft(event.target.value)}
                         onKeyDown={(event) => {
                           if (event.key !== "Enter") return;
@@ -6029,12 +5801,7 @@ export function App() {
                       <button
                         type="button"
                         className="ghost"
-                        disabled={
-                          !activeThread ||
-                          activeThreadBusy ||
-                          !isExecMode ||
-                          !addDirDraft.trim()
-                        }
+                        disabled={!activeThread || activeThreadBusy || !addDirDraft.trim()}
                         onClick={onAddDirDraftSubmit}
                       >
                         Add
@@ -6046,7 +5813,7 @@ export function App() {
                           key={dir}
                           type="button"
                           className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy || !isExecMode}
+                          disabled={!activeThread || activeThreadBusy}
                           onClick={() =>
                             activeThread && removeThreadAddDir(activeThread.id, dir)
                           }
@@ -6055,11 +5822,6 @@ export function App() {
                         </button>
                       ))}
                     </div>
-                    {!isExecMode ? (
-                      <small className="pane-subtle-light">
-                        add-dir applies in exec mode.
-                      </small>
-                    ) : null}
                   </label>
 
                   <div className="advanced-toggle-grid">
@@ -6161,11 +5923,7 @@ export function App() {
                 rows={1}
                 placeholder={
                   activeThread
-                    ? isResumeMode
-                      ? "Optional follow-up prompt for resume..."
-                      : isReviewMode
-                        ? "Optional review prompt..."
-                        : "Tell codex what to do in this workspace..."
+                    ? "Tell codex what to do in this workspace..."
                     : "Select a session to start"
                 }
                 disabled={!activeThread}
