@@ -10,6 +10,7 @@ type MockOptions = {
   backgroundCompletion?: boolean;
   titleUpdate?: string;
   jobRunningPolls?: number;
+  streamFailAttempts?: number;
 };
 
 function buildLongAssistantReply(marker: string): string {
@@ -34,6 +35,8 @@ async function mockSessionApi(
   const backgroundCompletion = options?.backgroundCompletion ?? false;
   const titleUpdate = options?.titleUpdate?.trim() ?? "";
   const jobRunningPolls = Math.max(1, options?.jobRunningPolls ?? 1);
+  const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
+  let sessionOneStreamAttempts = 0;
   const nowISO = new Date().toISOString();
   const sessions = [
     {
@@ -192,6 +195,14 @@ async function mockSessionApi(
     });
   });
   await page.route("**/v1/sessions/session_cli_1/stream**", async (route) => {
+    if (sessionOneStreamAttempts < streamFailAttempts) {
+      sessionOneStreamAttempts += 1;
+      await route.fulfill({
+        status: 503,
+        body: "stream temporarily unavailable",
+      });
+      return;
+    }
     if (streamPattern === "completion-once") {
       const chunk =
         `{"type":"thread.started","thread_id":"t_ux"}\n` +
@@ -810,6 +821,31 @@ test("running state locks session controls then unlocks on completion", async ({
   await expect(modelSelect).toBeEnabled();
   await expect(sandboxSelect).toBeEnabled();
   await expect(attachInput).toBeEnabled();
+});
+
+test("stream status recovers after transient failures", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `STREAM_RECOVER_${Date.now()}`;
+  await mockSessionApi(page, `recover ${marker}`, marker, {
+    streamFailAttempts: 2,
+  });
+  await unlock(page);
+
+  const streamStatus = page.getByTestId("stream-status");
+  let sawRetryState = false;
+  for (let index = 0; index < 16; index += 1) {
+    const text = (await streamStatus.innerText()).toLowerCase();
+    if (text.includes("reconnecting") || text.includes("stream error")) {
+      sawRetryState = true;
+      break;
+    }
+    await page.waitForTimeout(500);
+  }
+  expect(sawRetryState).toBeTruthy();
+  await expect(streamStatus).toContainText("stream live", { timeout: 15000 });
+
+  await page.getByRole("button", { name: "Reconnect" }).click();
+  await expect(streamStatus).toContainText("stream live", { timeout: 10000 });
 });
 
 test("pinning session reorders tree and persists across reload", async ({ page }) => {

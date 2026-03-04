@@ -85,6 +85,21 @@ type SessionRunStreamState = {
   failureHints: string[];
 };
 
+type SessionStreamHealthState =
+  | "offline"
+  | "connecting"
+  | "live"
+  | "reconnecting"
+  | "error";
+
+type SessionStreamHealth = {
+  state: SessionStreamHealthState;
+  retries: number;
+  lastEventAt: number;
+  updatedAt: number;
+  lastError: string;
+};
+
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
 const COMPLETION_ALERT_GRACE_MS = 30_000;
 const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
@@ -530,6 +545,28 @@ function modeToHash(mode: AppMode): string {
   return mode === "ops" ? "#/ops" : "#/session";
 }
 
+function streamHealthTone(
+  state: SessionStreamHealthState,
+): "ok" | "warn" | "error" {
+  if (state === "live") return "ok";
+  if (state === "error") return "error";
+  if (state === "offline") return "warn";
+  return "warn";
+}
+
+function streamHealthCopy(
+  state: SessionStreamHealthState,
+  retries: number,
+): string {
+  if (state === "live") return "live";
+  if (state === "connecting") return "connecting";
+  if (state === "reconnecting")
+    return retries > 0 ? `reconnecting (${retries})` : "reconnecting";
+  if (state === "error")
+    return retries > 0 ? `stream error (${retries})` : "stream error";
+  return "offline";
+}
+
 export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
@@ -643,6 +680,9 @@ export function App() {
     );
   const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
   const [sessionAlertsExpanded, setSessionAlertsExpanded] = useState(true);
+  const [sessionStreamHealthByID, setSessionStreamHealthByID] = useState<
+    Record<string, SessionStreamHealth>
+  >({});
   const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [sessionModelDefault, setSessionModelDefault] = useState("");
   const [sessionModelOptions, setSessionModelOptions] = useState<string[]>([]);
@@ -684,6 +724,7 @@ export function App() {
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
+  const runningSessionIDsRef = useRef<Set<string>>(new Set());
   const previousAlertCountRef = useRef(0);
   const tokenRef = useRef(token);
 
@@ -694,6 +735,9 @@ export function App() {
       null,
     [runtimes, selectedRuntime],
   );
+  const activeSessionStreamHealth = activeThreadID
+    ? sessionStreamHealthByID[activeThreadID]
+    : undefined;
   const selectedHostCount = allHosts ? hosts.length : selectedHostIDs.length;
   const threadWorkspaceMap = useMemo(() => {
     const out = new Map<string, string>();
@@ -838,6 +882,18 @@ export function App() {
       : activeThread?.lastJobStatus === "canceled"
         ? "Last response interrupted."
         : "";
+  const activeStreamState: SessionStreamHealthState = activeSessionStreamHealth
+    ? activeSessionStreamHealth.state
+    : activeThreadID
+      ? "connecting"
+      : "offline";
+  const activeStreamRetries = activeSessionStreamHealth?.retries ?? 0;
+  const activeStreamCopy = streamHealthCopy(activeStreamState, activeStreamRetries);
+  const activeStreamTone = streamHealthTone(activeStreamState);
+  const activeStreamLastError =
+    activeSessionStreamHealth?.lastError.trim() ?? "";
+  const canReconnectActiveStream =
+    authPhase === "ready" && token.trim() !== "" && activeThreadID.trim() !== "";
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
@@ -940,6 +996,18 @@ export function App() {
   }, [threadWorkspaceMap]);
 
   useEffect(() => {
+    const running = new Set<string>();
+    for (const workspace of workspaces) {
+      for (const sessionItem of workspace.sessions) {
+        if (sessionItem.activeJobID.trim()) {
+          running.add(sessionItem.id);
+        }
+      }
+    }
+    runningSessionIDsRef.current = running;
+  }, [workspaces]);
+
+  useEffect(() => {
     if (sessionAlerts.length > previousAlertCountRef.current) {
       setSessionAlertsExpanded(true);
     }
@@ -951,6 +1019,31 @@ export function App() {
     const title = activeThread?.title.trim() || "Session";
     document.title = `${title} · Codex Control App`;
   }, [activeThread?.title]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const runningSessionIDs = new Set<string>();
+      for (const workspace of workspaces) {
+        for (const thread of workspace.sessions) {
+          if (thread.activeJobID.trim()) {
+            runningSessionIDs.add(thread.id);
+          }
+        }
+      }
+      for (const [sessionID, state] of sessionStreamStateRef.current.entries()) {
+        if (!runningSessionIDs.has(sessionID)) continue;
+        if (state.lastEventAt <= 0) continue;
+        if (now - state.lastEventAt < 16_000) continue;
+        updateSessionStreamHealth(sessionID, "reconnecting", {
+          lastEventAt: state.lastEventAt,
+          lastError: "stream idle, retrying",
+          throttleMS: 0,
+        });
+      }
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [workspaces]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1199,6 +1292,67 @@ export function App() {
 
   function clearSessionAlerts() {
     setSessionAlerts([]);
+  }
+
+  function updateSessionStreamHealth(
+    sessionID: string,
+    state: SessionStreamHealthState,
+    options?: {
+      retries?: number;
+      lastEventAt?: number;
+      lastError?: string;
+      throttleMS?: number;
+    },
+  ) {
+    const id = sessionID.trim();
+    if (!id) return;
+    setSessionStreamHealthByID((prev) => {
+      const current = prev[id] ?? {
+        state: "offline",
+        retries: 0,
+        lastEventAt: 0,
+        updatedAt: 0,
+        lastError: "",
+      };
+      const retries = options?.retries ?? current.retries;
+      const lastEventAt = options?.lastEventAt ?? current.lastEventAt;
+      const lastError = options?.lastError ?? current.lastError;
+      const now = Date.now();
+      const throttleMS = options?.throttleMS ?? 1100;
+      const stateChanged =
+        current.state !== state ||
+        current.retries !== retries ||
+        current.lastError !== lastError;
+      const eventAtChanged = current.lastEventAt !== lastEventAt;
+      if (
+        !stateChanged &&
+        (!eventAtChanged || now - current.updatedAt < throttleMS)
+      ) {
+        return prev;
+      }
+      const next: SessionStreamHealth = {
+        state,
+        retries,
+        lastEventAt,
+        updatedAt: now,
+        lastError,
+      };
+      return {
+        ...prev,
+        [id]: next,
+      };
+    });
+  }
+
+  function clearSessionStreamHealth(sessionID: string) {
+    const id = sessionID.trim();
+    if (!id) return;
+    setSessionStreamHealthByID((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   }
 
   function openSessionFromAlert(alert: SessionAlert) {
@@ -1551,12 +1705,20 @@ export function App() {
     return true;
   }
 
-  function stopSessionStream(sessionID: string) {
+  function stopSessionStream(
+    sessionID: string,
+    options?: { preserveRunState?: boolean; preserveHealth?: boolean },
+  ) {
     const state = sessionStreamStateRef.current.get(sessionID);
     if (!state) return;
     state.controller.abort();
     sessionStreamStateRef.current.delete(sessionID);
-    sessionRunStateRef.current.delete(sessionID);
+    if (!options?.preserveRunState) {
+      sessionRunStateRef.current.delete(sessionID);
+    }
+    if (!options?.preserveHealth) {
+      clearSessionStreamHealth(sessionID);
+    }
   }
 
   function stopAllSessionStreams() {
@@ -1565,6 +1727,7 @@ export function App() {
     }
     sessionStreamStateRef.current.clear();
     sessionRunStateRef.current.clear();
+    setSessionStreamHealthByID({});
   }
 
   async function finalizeStreamCompleted(
@@ -1880,10 +2043,15 @@ export function App() {
   ) {
     const state = sessionStreamStateRef.current.get(sessionID);
     if (!state) return;
-    state.lastEventAt = Date.now();
+    const receivedAt = Date.now();
+    state.lastEventAt = receivedAt;
 
     if (frame.event === "session.ready") {
       state.ready = true;
+      updateSessionStreamHealth(sessionID, "live", {
+        lastEventAt: receivedAt,
+        lastError: "",
+      });
       const data = asRecord(frame.data);
       const cursor = data ? Number(data.cursor) : NaN;
       if (
@@ -1897,6 +2065,10 @@ export function App() {
 
     if (frame.event === "session.reset") {
       state.ready = false;
+      updateSessionStreamHealth(sessionID, "reconnecting", {
+        lastEventAt: receivedAt,
+        throttleMS: 0,
+      });
       const data = asRecord(frame.data);
       const nextAfter = data ? Number(data.next_after) : NaN;
       if (
@@ -1909,6 +2081,9 @@ export function App() {
     }
 
     if (frame.event === "heartbeat") {
+      updateSessionStreamHealth(sessionID, "live", {
+        lastEventAt: receivedAt,
+      });
       return;
     }
 
@@ -1917,6 +2092,10 @@ export function App() {
     }
 
     state.ready = true;
+    updateSessionStreamHealth(sessionID, "live", {
+      lastEventAt: receivedAt,
+      lastError: "",
+    });
     const event = decodeSessionEventRecord(frame.data);
     if (!event) return;
     const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
@@ -1936,10 +2115,23 @@ export function App() {
       ready: false,
       lastEventAt: 0,
     });
+    updateSessionStreamHealth(trimmedSessionID, "connecting", {
+      retries: 0,
+      lastEventAt: 0,
+      lastError: "",
+      throttleMS: 0,
+    });
 
     const run = async () => {
       let backoff = 700;
+      let retries = 0;
       while (!controller.signal.aborted) {
+        if (retries > 0) {
+          updateSessionStreamHealth(trimmedSessionID, "reconnecting", {
+            retries,
+            throttleMS: 0,
+          });
+        }
         const after = sessionEventCursorRef.current.get(trimmedSessionID) ?? 0;
         try {
           await streamSessionEvents(authToken, trimmedSessionID, {
@@ -1948,8 +2140,35 @@ export function App() {
             onFrame: (frame) =>
               handleSessionStreamFrame(trimmedSessionID, frame),
           });
+          if (controller.signal.aborted) break;
+          const isRunning = runningSessionIDsRef.current.has(trimmedSessionID);
+          if (isRunning) {
+            retries += 1;
+            updateSessionStreamHealth(trimmedSessionID, "reconnecting", {
+              retries,
+              lastError: "stream closed, retrying",
+              throttleMS: 0,
+            });
+          } else {
+            retries = 0;
+            updateSessionStreamHealth(trimmedSessionID, "live", {
+              retries: 0,
+              lastError: "",
+              throttleMS: 0,
+            });
+          }
         } catch {
           if (controller.signal.aborted) break;
+          retries += 1;
+          updateSessionStreamHealth(
+            trimmedSessionID,
+            retries >= 3 ? "error" : "reconnecting",
+            {
+              retries,
+              lastError: "stream interrupted, retrying",
+              throttleMS: 0,
+            },
+          );
         }
         const active = sessionStreamStateRef.current.get(trimmedSessionID);
         if (
@@ -1965,6 +2184,9 @@ export function App() {
       const active = sessionStreamStateRef.current.get(trimmedSessionID);
       if (active && active.controller === controller) {
         sessionStreamStateRef.current.delete(trimmedSessionID);
+        updateSessionStreamHealth(trimmedSessionID, "offline", {
+          throttleMS: 0,
+        });
       }
     };
     void run();
@@ -2740,6 +2962,18 @@ export function App() {
     await loadWorkspace(token, false);
   }
 
+  function onReconnectActiveStream() {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const sessionID = activeThreadID.trim();
+    if (!sessionID) return;
+    stopSessionStream(sessionID, { preserveRunState: true, preserveHealth: true });
+    updateSessionStreamHealth(sessionID, "connecting", {
+      throttleMS: 0,
+      lastError: "",
+    });
+    startSessionStream(sessionID, token);
+  }
+
   async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
@@ -3411,6 +3645,23 @@ export function App() {
                     " · " +
                     (activeWorkspace?.path?.trim() || "/home/ecs-user")}
                 </p>
+              </div>
+              <div className="chat-head-side">
+                <span
+                  className={`stream-pill ${activeStreamTone}`}
+                  data-testid="stream-status"
+                  title={activeStreamLastError || `stream ${activeStreamCopy}`}
+                >
+                  stream {activeStreamCopy}
+                </span>
+                <button
+                  type="button"
+                  className="ghost stream-reconnect-btn"
+                  disabled={!canReconnectActiveStream}
+                  onClick={onReconnectActiveStream}
+                >
+                  Reconnect
+                </button>
               </div>
             </header>
 

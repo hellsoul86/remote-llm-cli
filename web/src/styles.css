@@ -543,7 +543,7 @@ button.ghost.danger-ghost:hover {
   border-bottom: 1px solid #e1e7ef;
   display: flex;
   align-items: flex-start;
-  justify-content: flex-start;
+  justify-content: space-between;
   gap: 12px;
   background: #ffffff;
 }
@@ -562,6 +562,49 @@ button.ghost.danger-ghost:hover {
   color: #607089;
   font-size: 0.74rem;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.chat-head-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.stream-pill {
+  border-radius: 999px;
+  border: 1px solid #d5deea;
+  background: #f6f9ff;
+  color: #3e556f;
+  padding: 4px 9px;
+  font-size: 0.67rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+}
+
+.stream-pill.ok {
+  border-color: #b9dbc9;
+  background: #effaf4;
+  color: #175f40;
+}
+
+.stream-pill.warn {
+  border-color: #d9cea8;
+  background: #fff8e9;
+  color: #715410;
+}
+
+.stream-pill.error {
+  border-color: #e2c0c0;
+  background: #fff2f2;
+  color: #842f2f;
+}
+
+.stream-reconnect-btn {
+  padding: 5px 10px;
+  font-size: 0.7rem;
 }
 
 .thread-bar {
