@@ -110,6 +110,13 @@ type SessionTreePrefs = {
   collapsedHostIDs: string[];
 };
 
+type SessionLastStatus =
+  | "idle"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "canceled";
+
 function loadSessionTreePrefs(): SessionTreePrefs {
   if (typeof window === "undefined") {
     return { projectFilter: "", collapsedHostIDs: [] };
@@ -1672,6 +1679,48 @@ export function App() {
     discoverEnabled: boolean,
     preserveOnError = true,
   ) {
+    const normalizeLastStatus = (raw: string | undefined): SessionLastStatus => {
+      const value = (raw ?? "").trim().toLowerCase();
+      if (value === "running" || value === "pending") return "running";
+      if (value === "succeeded") return "succeeded";
+      if (value === "failed") return "failed";
+      if (value === "canceled") return "canceled";
+      return "idle";
+    };
+    const reconcileFromSessionRecords = (records: SessionRecord[]) => {
+      const currentByID = new Map<
+        string,
+        { activeJobID: string; lastJobStatus: SessionLastStatus }
+      >();
+      for (const workspace of workspaces) {
+        for (const thread of workspace.sessions) {
+          currentByID.set(thread.id, {
+            activeJobID: thread.activeJobID.trim(),
+            lastJobStatus: thread.lastJobStatus,
+          });
+        }
+      }
+
+      for (const record of records) {
+        const sessionID = record.id.trim();
+        if (!sessionID) continue;
+        const current = currentByID.get(sessionID);
+        if (!current) continue;
+        const nextStatus = normalizeLastStatus(record.last_status);
+        const nextJobID =
+          nextStatus === "running"
+            ? record.last_run_id?.trim() || current.activeJobID
+            : "";
+        if (
+          current.activeJobID === nextJobID &&
+          current.lastJobStatus === nextStatus
+        ) {
+          continue;
+        }
+        setThreadJobState(sessionID, nextJobID, nextStatus);
+      }
+    };
+
     try {
       const [projects, sessions] = await Promise.all([
         listProjects(authToken, 600),
@@ -1680,6 +1729,7 @@ export function App() {
       const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
       if (built.length > 0) {
         syncProjectsFromDiscovery(built);
+        reconcileFromSessionRecords(sessions);
         return;
       }
     } catch {
