@@ -204,6 +204,17 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
   return "";
 }
 
+function isProtocolNoiseLine(line: string): boolean {
+  const normalized = line.trim();
+  if (!normalized) return true;
+  if (/^done\.?$/i.test(normalized)) return true;
+  if (normalized.includes(`"type":"thread.started"`)) return true;
+  if (normalized.includes(`"type":"turn.started"`)) return true;
+  if (normalized.includes(`"type":"turn.completed"`)) return true;
+  if (normalized.includes(`"type":"response.started"`)) return true;
+  return false;
+}
+
 function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallback = true): string {
   if (!stdout.trim()) return "";
   const lines = stdout.split(/\r?\n/);
@@ -217,7 +228,9 @@ function parseCodexAssistantTextFromStdout(stdout: string, allowPlainTextFallbac
     try {
       parsed = JSON.parse(line);
     } catch {
-      plainLines.push(line);
+      if (!isProtocolNoiseLine(line)) {
+        plainLines.push(line);
+      }
       continue;
     }
     const event = asRecord(parsed);
@@ -257,7 +270,7 @@ function extractAssistantTextFromJob(job: RunJobRecord): string {
   for (const target of response.targets) {
     const stdout = target?.result?.stdout;
     if (typeof stdout !== "string" || !stdout.trim()) continue;
-    const assistantText = parseCodexAssistantTextFromStdout(stdout);
+    const assistantText = parseCodexAssistantTextFromStdout(stdout, false) || parseCodexAssistantTextFromStdout(stdout, true);
     if (!assistantText) continue;
     if (multiTarget) {
       const hostName = target.host?.name?.trim() || target.host?.id || "target";
@@ -437,6 +450,9 @@ export function App() {
 
   const timelineViewportRef = useRef<HTMLElement | null>(null);
   const timelineBottomRef = useRef<HTMLDivElement | null>(null);
+  const timelineStickToBottomRef = useRef(true);
+  const timelineForceStickRef = useRef(false);
+  const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
@@ -984,7 +1000,7 @@ export function App() {
 
     setThreadJobState(sessionID, "", "succeeded");
     if (assistantText.trim()) {
-      if (state?.streamSeen) {
+      if (state?.streamSeen && !state.assistantFinalized) {
         finalizeAssistantStreamEntry(sessionID, "success", clipStreamText(assistantText));
       } else if (!state?.assistantFinalized) {
         addTimelineEntry(
@@ -1192,9 +1208,8 @@ export function App() {
     const event = decodeSessionEventRecord(frame.data);
     if (!event) return;
     const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
-    if (event.seq > current) {
-      sessionEventCursorRef.current.set(sessionID, event.seq);
-    }
+    if (event.seq <= current) return;
+    sessionEventCursorRef.current.set(sessionID, event.seq);
     void handleSessionEventRecord(sessionID, event);
   }
 
@@ -1462,17 +1477,32 @@ export function App() {
   useEffect(() => {
     const node = timelineViewportRef.current;
     if (!node) return;
+    const threadChanged = lastTimelineThreadIDRef.current !== activeThreadID;
+    if (threadChanged) {
+      lastTimelineThreadIDRef.current = activeThreadID;
+      timelineForceStickRef.current = true;
+    }
+    const shouldStick = timelineForceStickRef.current || timelineStickToBottomRef.current || threadChanged;
+    if (!shouldStick) return;
     const frame = window.requestAnimationFrame(() => {
       if (timelineBottomRef.current) {
         timelineBottomRef.current.scrollIntoView({ block: "end" });
       } else {
         node.scrollTop = node.scrollHeight;
       }
+      timelineForceStickRef.current = false;
     });
     return () => {
       window.cancelAnimationFrame(frame);
     };
   }, [activeThreadID, activeTimeline.length, activeTimelineTail?.body, activeTimelineTail?.state]);
+
+  function onTimelineScroll() {
+    const node = timelineViewportRef.current;
+    if (!node) return;
+    const gap = Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop);
+    timelineStickToBottomRef.current = gap <= 72;
+  }
 
   useEffect(() => {
     if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
@@ -1939,6 +1969,11 @@ export function App() {
       },
       activeThread.id
     );
+    if (runAsyncMode) {
+      upsertAssistantStreamEntry(activeThread.id, "Thinking...");
+    }
+    timelineForceStickRef.current = true;
+    timelineStickToBottomRef.current = true;
     updateThreadDraft(activeThread.id, "");
 
     setSubmittingThreadID(activeThread.id);
@@ -1980,6 +2015,7 @@ export function App() {
         setSubmittingThreadID("");
       }
     } catch (error) {
+      finalizeAssistantStreamEntry(activeThread.id, "error");
       addTimelineEntry({ kind: "system", state: "error", title: "Run Failed", body: String(error) }, activeThread.id);
       setThreadJobState(activeThread.id, "", "failed");
       setSubmittingThreadID("");
@@ -2272,7 +2308,7 @@ export function App() {
               </div>
             </header>
 
-            <section className="timeline" aria-live="polite" ref={timelineViewportRef}>
+            <section className="timeline" aria-live="polite" ref={timelineViewportRef} onScroll={onTimelineScroll}>
               {activeTimeline.length === 0 ? (
                 <article className="message message-system">
                   <div className="message-title-row">

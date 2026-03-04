@@ -1,22 +1,22 @@
 @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap");
 
 :root {
-  --bg: #eef3f8;
-  --bg-warm: #f7f4ec;
+  --bg: #f4f6f9;
+  --bg-warm: #f6f4ef;
   --panel: #ffffff;
-  --panel-alt: #f8fbff;
-  --ink: #0f172a;
-  --muted: #52607a;
-  --line: #d0dbe8;
-  --brand: #0f766e;
-  --brand-strong: #0d5d56;
+  --panel-alt: #f8fafc;
+  --ink: #111827;
+  --muted: #5b667a;
+  --line: #d9e1eb;
+  --brand: #111827;
+  --brand-strong: #1f2937;
   --warn: #9a6700;
   --danger: #b42318;
   --success: #157347;
   --nav-bg: #11263d;
   --nav-ink: #e8f0ff;
   --nav-muted: #9bb1cd;
-  --shadow-soft: 0 16px 38px rgba(15, 23, 42, 0.12);
+  --shadow-soft: 0 10px 28px rgba(15, 23, 42, 0.08);
 }
 
 * {
@@ -30,10 +30,7 @@ body,
   min-height: 100%;
   font-family: "Sora", "Segoe UI", sans-serif;
   color: var(--ink);
-  background:
-    radial-gradient(1000px 600px at -5% -18%, rgba(47, 156, 133, 0.25), transparent 60%),
-    radial-gradient(900px 520px at 110% -15%, rgba(255, 178, 67, 0.2), transparent 62%),
-    linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
+  background: linear-gradient(180deg, #f9fbfe 0%, var(--bg) 100%);
 }
 
 h1,
@@ -75,7 +72,6 @@ button {
 
 button:hover {
   background: var(--brand-strong);
-  transform: translateY(-1px);
 }
 
 button:disabled {
@@ -173,10 +169,10 @@ pre {
 
 .workspace-shell {
   min-height: 100vh;
-  padding: 14px;
+  padding: 12px;
   display: grid;
   grid-template-rows: auto 1fr;
-  gap: 12px;
+  gap: 10px;
 }
 
 .session-alert-stack {
@@ -216,11 +212,11 @@ pre {
 }
 
 .app-topbar {
-  border-radius: 18px;
-  border: 1px solid #cbdbec;
-  background: rgba(255, 255, 255, 0.92);
+  border-radius: 14px;
+  border: 1px solid #d7e0ea;
+  background: #ffffff;
   box-shadow: var(--shadow-soft);
-  padding: 12px 14px;
+  padding: 10px 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -235,7 +231,7 @@ pre {
 .topbar-eyebrow {
   text-transform: uppercase;
   letter-spacing: 0.14em;
-  font-size: 0.69rem;
+  font-size: 0.66rem;
   color: var(--muted);
 }
 
@@ -328,8 +324,8 @@ pre {
 .session-stage {
   min-height: 0;
   display: grid;
-  grid-template-columns: 320px minmax(580px, 1fr);
-  gap: 12px;
+  grid-template-columns: 300px minmax(580px, 1fr);
+  gap: 10px;
 }
 
 .ops-stage {
@@ -512,15 +508,15 @@ button.ghost.danger-ghost:hover {
 
 .chat-pane {
   background: #ffffff;
-  border: 1px solid #cbdbec;
+  border: 1px solid #d7e0ea;
   display: grid;
   grid-template-rows: auto 1fr auto;
   overflow: hidden;
 }
 
 .chat-head {
-  padding: 14px 16px 12px;
-  border-bottom: 1px solid #d3e0ef;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid #e1e7ef;
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
@@ -594,17 +590,17 @@ button.ghost.danger-ghost:hover {
 .project-tree {
   display: grid;
   gap: 10px;
-  max-height: 520px;
+  max-height: 560px;
   overflow: auto;
 }
 
 .project-host-group {
-  border: 1px solid #d6e3f1;
-  border-radius: 11px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   padding: 8px;
   display: grid;
   gap: 8px;
-  background: #f9fbff;
+  background: #ffffff;
 }
 
 .project-host-head {
@@ -630,7 +626,7 @@ button.ghost.danger-ghost:hover {
 
 .project-chip {
   width: 100%;
-  border: 1px solid #c8d7eb;
+  border: 1px solid #dde5ef;
   border-radius: 10px;
   background: #ffffff;
   color: #10233d;
@@ -650,9 +646,9 @@ button.ghost.danger-ghost:hover {
 }
 
 .project-chip.active {
-  border-color: #2f8a7d;
-  background: #e5f8f3;
-  color: #0b4741;
+  border-color: #8fb6e2;
+  background: #f2f7ff;
+  color: #17324d;
 }
 
 .project-session-list {
@@ -663,7 +659,7 @@ button.ghost.danger-ghost:hover {
 
 .session-chip-tree {
   width: 100%;
-  border: 1px solid #d7e2ef;
+  border: 1px solid #e0e7f0;
   border-radius: 9px;
   background: #ffffff;
   color: #1d334f;
@@ -673,19 +669,19 @@ button.ghost.danger-ghost:hover {
   gap: 8px;
   padding: 6px 8px;
   text-align: left;
-  font-size: 0.74rem;
+  font-size: 0.8rem;
 }
 
 .session-chip-tree small {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: #5a6f8b;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
 .session-chip-tree.active {
-  border-color: #2f8a7d;
-  background: #e5f8f3;
-  color: #0b4741;
+  border-color: #8fb6e2;
+  background: #f2f7ff;
+  color: #17324d;
 }
 
 .compact-empty {
@@ -695,17 +691,17 @@ button.ghost.danger-ghost:hover {
 .timeline {
   min-height: 0;
   overflow: auto;
-  padding: 16px;
+  padding: 14px;
   display: grid;
-  gap: 10px;
+  gap: 12px;
   align-content: start;
-  background: #f8fafc;
+  background: #fafbfc;
 }
 
 .message {
-  border-radius: 13px;
+  border-radius: 12px;
   border: 1px solid var(--line);
-  padding: 11px 12px;
+  padding: 10px 12px;
   display: grid;
   gap: 8px;
   animation: messageIn 240ms ease;
@@ -714,8 +710,8 @@ button.ghost.danger-ghost:hover {
 
 .message-user {
   margin-left: auto;
-  background: #ecf8f4;
-  border-color: #9ecfc5;
+  background: #eef4ff;
+  border-color: #c7d8f2;
 }
 
 .message-assistant {
@@ -758,14 +754,14 @@ button.ghost.danger-ghost:hover {
 }
 
 .message pre {
-  font-size: 0.8rem;
-  line-height: 1.52;
+  font-size: 0.84rem;
+  line-height: 1.58;
 }
 
 .composer {
-  border-top: 1px solid #d3e0ef;
+  border-top: 1px solid #e1e7ef;
   background: #ffffff;
-  padding: 12px;
+  padding: 10px 12px 12px;
   display: grid;
   gap: 8px;
 }
@@ -823,13 +819,13 @@ button.ghost.danger-ghost:hover {
 }
 
 .session-side {
-  background: #f9fbfe;
-  border: 1px solid #cbdbec;
-  padding: 14px;
+  background: #ffffff;
+  border: 1px solid #d7e0ea;
+  padding: 12px;
   overflow: auto;
   display: grid;
   align-content: start;
-  gap: 12px;
+  gap: 10px;
 }
 
 .inspect-pane {
@@ -843,9 +839,9 @@ button.ghost.danger-ghost:hover {
 }
 
 .inspect-block {
-  border: 1px solid #d3e0ef;
+  border: 1px solid #e1e7ef;
   border-radius: 13px;
-  padding: 11px;
+  padding: 10px;
   background: #ffffff;
   display: grid;
   gap: 8px;
@@ -881,7 +877,7 @@ button.ghost.danger-ghost:hover {
 
 .pane-subtle-light {
   color: #6c7f98;
-  font-size: 0.82rem;
+  font-size: 0.79rem;
 }
 
 .thread-rename-form {

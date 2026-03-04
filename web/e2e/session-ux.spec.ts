@@ -4,6 +4,10 @@ type MockHarness = {
   runRequests: () => number;
 };
 
+type MockOptions = {
+  streamPattern?: "ready-only" | "completion-once";
+};
+
 function buildLongAssistantReply(marker: string): string {
   const lines: string[] = [];
   for (let i = 0; i < 80; i += 1) {
@@ -12,10 +16,11 @@ function buildLongAssistantReply(marker: string): string {
   return lines.join("\n");
 }
 
-async function mockSessionApi(page: Page, assistantReply: string, marker: string): Promise<MockHarness> {
+async function mockSessionApi(page: Page, assistantReply: string, marker: string, options?: MockOptions): Promise<MockHarness> {
   let jobPollCount = 0;
   let eventPollCount = 0;
   let runReqCount = 0;
+  const streamPattern = options?.streamPattern ?? "ready-only";
 
   await page.route("**/v1/healthz", async (route) => {
     await route.fulfill({ status: 200, json: { ok: true, timestamp: "2026-03-03T00:00:00Z" } });
@@ -125,6 +130,36 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
     });
   });
   await page.route("**/v1/sessions/session_cli_1/stream**", async (route) => {
+    if (streamPattern === "completion-once") {
+      const chunk =
+        `{"type":"thread.started","thread_id":"t_ux"}\n` +
+        `{"type":"turn.started"}\n` +
+        `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: assistantReply } })}\n`;
+      const streamBody = [
+        `event: session.ready`,
+        `data: {"session_id":"session_cli_1","cursor":0}`,
+        ``,
+        `event: session.event`,
+        `data: {"seq":1,"session_id":"session_cli_1","run_id":"job_ux_1","type":"run.started","payload":{"job_id":"job_ux_1"},"created_at":"2026-03-03T00:00:00Z"}`,
+        ``,
+        `event: session.event`,
+        `data: {"seq":2,"session_id":"session_cli_1","run_id":"job_ux_1","type":"assistant.delta","payload":{"job_id":"job_ux_1","chunk":${JSON.stringify(chunk)}},"created_at":"2026-03-03T00:00:00Z"}`,
+        ``,
+        `event: session.event`,
+        `data: {"seq":3,"session_id":"session_cli_1","run_id":"job_ux_1","type":"assistant.completed","payload":{"job_id":"job_ux_1","run_id":"job_ux_1"},"created_at":"2026-03-03T00:00:01Z"}`,
+        ``,
+        `event: session.event`,
+        `data: {"seq":4,"session_id":"session_cli_1","run_id":"job_ux_1","type":"run.completed","payload":{"job_id":"job_ux_1"},"created_at":"2026-03-03T00:00:01Z"}`,
+        ``,
+        ``
+      ].join("\n");
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: streamBody
+      });
+      return;
+    }
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
@@ -232,6 +267,10 @@ async function mockSessionApi(page: Page, assistantReply: string, marker: string
     });
   });
   await page.route("**/v1/jobs/job_ux_1/events**", async (route) => {
+    if (streamPattern === "completion-once") {
+      await route.fulfill({ status: 200, json: { job_id: "job_ux_1", after: eventPollCount, next_after: eventPollCount, events: [] } });
+      return;
+    }
     eventPollCount += 1;
     if (eventPollCount > 1) {
       await route.fulfill({ status: 200, json: { job_id: "job_ux_1", after: 4, next_after: 4, events: [] } });
@@ -346,6 +385,26 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({ pag
   const timeline = page.locator(".timeline");
   const scrollGap = await timeline.evaluate((el) => Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop));
   expect(scrollGap <= 48).toBeTruthy();
+});
+
+test("session stream completion keeps a single assistant reply", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `STREAM_ONCE_${Date.now()}`;
+  const harness = await mockSessionApi(page, `single reply ${marker}`, marker, { streamPattern: "completion-once" });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+  await composer.fill(`reply once with marker: ${marker}`);
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const assistantWithMarker = page.locator(".message.message-assistant pre", { hasText: marker });
+  await expect(assistantWithMarker).toHaveCount(1);
+  await page.waitForTimeout(1800);
+  await expect(assistantWithMarker).toHaveCount(1);
+  await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
+  await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 });
 
 test.use({ viewport: { width: 390, height: 844 } });
