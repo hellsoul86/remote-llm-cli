@@ -1563,7 +1563,7 @@ export function App() {
         for (const result of jobResults) {
           const { item, job, error, events, nextAfter } = result;
           if (!job) {
-              addTimelineEntry(
+            addTimelineEntry(
               {
                 kind: "system",
                 state: "error",
