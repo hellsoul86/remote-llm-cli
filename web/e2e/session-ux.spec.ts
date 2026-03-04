@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 type MockHarness = {
   runRequests: () => number;
   sessionOneStreamAfterValues: () => number[];
+  imageUploads: () => number;
 };
 
 type MockOptions = {
@@ -32,6 +33,7 @@ async function mockSessionApi(
   let jobPollCount = 0;
   let eventPollCount = 0;
   let runReqCount = 0;
+  let imageUploadCount = 0;
   const streamPattern = options?.streamPattern ?? "ready-only";
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
@@ -182,6 +184,22 @@ async function mockSessionApi(
         runtime: "codex",
         default_model: "gpt-5-codex",
         models: ["gpt-5-codex", "gpt-5"],
+      },
+    });
+  });
+  await page.route("**/v1/files/images", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    imageUploadCount += 1;
+    const id = imageUploadCount.toString().padStart(2, "0");
+    await route.fulfill({
+      status: 200,
+      json: {
+        path: `/tmp/uploads/mock-image-${id}.png`,
+        name: `mock-image-${id}.png`,
+        bytes: 12,
       },
     });
   });
@@ -752,6 +770,7 @@ async function mockSessionApi(
   return {
     runRequests: () => runReqCount,
     sessionOneStreamAfterValues: () => [...sessionOneStreamAfterValues],
+    imageUploads: () => imageUploadCount,
   };
 }
 
@@ -836,6 +855,81 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
     Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop),
   );
   expect(scrollGap <= 48).toBeTruthy();
+});
+
+test("composer supports image paste and drag-drop upload", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `IMG_ATTACH_${Date.now()}`;
+  const harness = await mockSessionApi(page, `img ${marker}`, marker);
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  const composerPanel = page.locator(".composer");
+
+  await composer.evaluate((node) => {
+    const data = new DataTransfer();
+    data.items.add(new File(["img-paste"], "paste.png", { type: "image/png" }));
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: data });
+    node.dispatchEvent(event);
+  });
+  await expect.poll(() => harness.imageUploads()).toBe(1);
+  await expect(page.getByRole("button", { name: /mock-image-01\.png/i })).toBeVisible();
+
+  await composerPanel.evaluate((node) => {
+    const data = new DataTransfer();
+    data.items.add(new File(["img-drop"], "drop.png", { type: "image/png" }));
+    const dragEnter = new Event("dragenter", { bubbles: true, cancelable: true });
+    Object.defineProperty(dragEnter, "dataTransfer", { value: data });
+    node.dispatchEvent(dragEnter);
+  });
+  await expect(page.locator(".composer-drop-indicator")).toBeVisible();
+
+  await composerPanel.evaluate((node) => {
+    const data = new DataTransfer();
+    data.items.add(new File(["img-drop"], "drop.png", { type: "image/png" }));
+    const dragOver = new Event("dragover", { bubbles: true, cancelable: true });
+    Object.defineProperty(dragOver, "dataTransfer", { value: data });
+    node.dispatchEvent(dragOver);
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: data });
+    node.dispatchEvent(drop);
+  });
+  await expect.poll(() => harness.imageUploads()).toBe(2);
+  await expect(page.getByRole("button", { name: /mock-image-02\.png/i })).toBeVisible();
+});
+
+test("command palette executes session and model actions", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PALETTE_${Date.now()}`;
+  await mockSessionApi(page, `palette ${marker}`, marker);
+  await unlock(page);
+
+  const sessionChips = page.locator(".project-session-list .session-chip-tree");
+  const initialSessionCount = await sessionChips.count();
+
+  await page.keyboard.press("Control+k");
+  const paletteInput = page.getByPlaceholder("Type a command...");
+  await expect(paletteInput).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Open Project: work/i }),
+  ).toBeVisible();
+
+  await paletteInput.fill("model");
+  await paletteInput.press("ArrowDown");
+  await paletteInput.press("Enter");
+  await expect(page.locator(".command-palette-backdrop")).toHaveCount(0);
+  await expect(page.locator(".session-inline-settings select").first()).toHaveValue(
+    "gpt-5",
+  );
+
+  await page.keyboard.press("Control+k");
+  await expect(paletteInput).toBeVisible();
+  await paletteInput.fill("new session");
+  await paletteInput.press("Enter");
+  await expect.poll(async () => sessionChips.count()).toBe(initialSessionCount + 1);
 });
 
 test("session stream completion keeps a single assistant reply", async ({

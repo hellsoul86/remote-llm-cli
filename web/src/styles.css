@@ -1092,12 +1092,29 @@ button.ghost.danger-ghost:hover {
   padding: 10px 12px 12px;
   display: grid;
   gap: 8px;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.composer.drop-active {
+  border-top-color: #80a7d4;
+  background: #f3f8ff;
+  box-shadow: inset 0 0 0 1px rgba(106, 151, 204, 0.35);
 }
 
 .composer-status {
   margin: 0;
   font-size: 0.74rem;
   color: #5b6f89;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.composer-drop-indicator {
+  margin: 0;
+  font-size: 0.72rem;
+  color: #2a4d74;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
@@ -1164,6 +1181,82 @@ button.ghost.danger-ghost:hover {
 
 .composer-actions button {
   min-width: 118px;
+}
+
+.command-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(9, 16, 28, 0.42);
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding: 72px 16px 16px;
+}
+
+.command-palette {
+  width: min(680px, 100%);
+  border-radius: 14px;
+  border: 1px solid #d5e0ec;
+  background: #ffffff;
+  box-shadow: 0 22px 50px rgba(12, 24, 40, 0.2);
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.command-palette-input {
+  border-radius: 10px;
+  border-color: #ccd8e7;
+  font-size: 0.84rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  padding: 10px 12px;
+}
+
+.command-palette-list {
+  max-height: min(52vh, 380px);
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.command-palette-item {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #dde5f2;
+  background: #ffffff;
+  color: #152b47;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 10px;
+}
+
+.command-palette-item strong {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: inherit;
+}
+
+.command-palette-item small {
+  font-size: 0.7rem;
+  color: #5d7290;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.command-palette-item.active,
+.command-palette-item:hover {
+  border-color: #8fb3dd;
+  background: #eff5ff;
+}
+
+.command-palette-empty {
+  margin: 0;
+  padding: 10px 8px;
+  font-size: 0.75rem;
+  color: #5d7390;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
 .session-side {
@@ -1502,5 +1595,13 @@ button.ghost.danger-ghost:hover {
 
   .thread-rename-form {
     grid-template-columns: 1fr;
+  }
+
+  .command-palette-backdrop {
+    padding-top: 18px;
+  }
+
+  .command-palette {
+    border-radius: 12px;
   }
 }

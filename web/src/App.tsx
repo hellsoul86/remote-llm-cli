@@ -1,4 +1,6 @@
 import {
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
   FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
@@ -124,6 +126,14 @@ type CodexRuntimeCard = {
   title: string;
   body: string;
   state: TimelineState;
+};
+
+type CommandPaletteAction = {
+  id: string;
+  label: string;
+  detail: string;
+  searchText: string;
+  run: () => void;
 };
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
@@ -909,6 +919,36 @@ function resolveProjectTitle(path: string, title?: string): string {
   return projectTitleFromPath(path);
 }
 
+function firstImageFile(
+  source: FileList | File[] | null | undefined,
+): File | null {
+  if (!source) return null;
+  const files = Array.from(source);
+  for (const file of files) {
+    if (file.type.toLowerCase().startsWith("image/")) {
+      return file;
+    }
+  }
+  return null;
+}
+
+function dataTransferHasImage(data: DataTransfer | null | undefined): boolean {
+  if (!data) return false;
+  const itemTypes = Array.from(data.items ?? []).map((item) =>
+    item.type.toLowerCase(),
+  );
+  if (itemTypes.some((type) => type.startsWith("image/"))) return true;
+  return Boolean(firstImageFile(data.files));
+}
+
+function normalizeSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 type MessageSegment =
   | {
       kind: "text";
@@ -1127,6 +1167,10 @@ export function App() {
   const [projectFormTitle, setProjectFormTitle] = useState("");
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
+  const [composerDropActive, setComposerDropActive] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
+  const [commandPaletteCursor, setCommandPaletteCursor] = useState(0);
   const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
   const [projectFilter, setProjectFilter] = useState(sessionTreePrefs.projectFilter);
   const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
@@ -1142,8 +1186,10 @@ export function App() {
   const timelineForceStickRef = useRef(false);
   const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const commandPaletteInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const composerDragDepthRef = useRef(0);
   const copyResetTimerRef = useRef<number | null>(null);
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
@@ -1434,6 +1480,156 @@ export function App() {
     return out;
   }, [sessionModelDefault, sessionModelOptions, activeThreadModelValue]);
   const hasSessionModelChoices = sessionModelChoices.length > 0;
+  const commandPaletteActions = useMemo<CommandPaletteAction[]>(() => {
+    if (appMode !== "session") return [];
+    const actions: CommandPaletteAction[] = [];
+    const pushAction = (
+      id: string,
+      label: string,
+      detail: string,
+      extraSearch: string,
+      run: () => void,
+    ) => {
+      actions.push({
+        id,
+        label,
+        detail,
+        searchText: normalizeSearchText(`${label} ${detail} ${extraSearch}`),
+        run,
+      });
+    };
+
+    pushAction(
+      "composer:focus",
+      "Focus Prompt",
+      "Cursor to composer",
+      "focus prompt composer input",
+      () => {
+        promptInputRef.current?.focus();
+      },
+    );
+    pushAction(
+      "session:new",
+      "New Session",
+      activeWorkspace?.title?.trim() || "current project",
+      "create add session",
+      () => {
+        createThreadAndFocus();
+      },
+    );
+    if (threads.length > 1) {
+      pushAction(
+        "session:previous",
+        "Previous Session",
+        "Switch to previous",
+        "session prev",
+        () => {
+          switchThreadByOffset(-1);
+        },
+      );
+      pushAction(
+        "session:next",
+        "Next Session",
+        "Switch to next",
+        "session next",
+        () => {
+          switchThreadByOffset(1);
+        },
+      );
+    }
+    if (activeThreadID.trim()) {
+      pushAction(
+        "session:pin",
+        activeThread?.pinned ? "Unpin Session" : "Pin Session",
+        activeThread?.title || "current session",
+        "pin favorite",
+        () => {
+          if (!activeThread) return;
+          setThreadPinned(activeThread.id, !activeThread.pinned);
+        },
+      );
+      if (!activeThreadBusy) {
+        pushAction(
+          "session:archive",
+          "Archive Session",
+          activeThread?.title || "current session",
+          "delete remove archive",
+          () => {
+            void onArchiveActiveSession();
+          },
+        );
+      }
+      pushAction(
+        "session:reconnect",
+        "Reconnect Stream",
+        activeThread?.title || "current session",
+        "stream reconnect",
+        () => {
+          onReconnectActiveStream();
+        },
+      );
+    }
+
+    for (const workspace of workspaces) {
+      const projectTitle = resolveProjectTitle(workspace.path, workspace.title);
+      pushAction(
+        `project:${workspace.id}`,
+        `Open Project: ${projectTitle}`,
+        `${workspace.hostName} · ${workspace.path}`,
+        "project workspace directory",
+        () => {
+          const preferredSession = workspace.activeSessionID.trim();
+          if (preferredSession) {
+            activateThread(preferredSession);
+            return;
+          }
+          setActiveWorkspaceID(workspace.id);
+        },
+      );
+    }
+
+    if (activeThread) {
+      for (const modelName of sessionModelChoices) {
+        const modelDetail =
+          modelName === sessionModelDefault
+            ? `${modelName} (default)`
+            : modelName;
+        pushAction(
+          `model:${modelName}`,
+          `Model: ${modelName}`,
+          modelDetail,
+          "model llm codex",
+          () => {
+            setThreadModel(activeThread.id, modelName);
+          },
+        );
+      }
+    }
+
+    return actions;
+  }, [
+    appMode,
+    activeWorkspace?.title,
+    threads.length,
+    activeThreadID,
+    activeThread,
+    activeThreadBusy,
+    workspaces,
+    sessionModelChoices,
+    sessionModelDefault,
+    setActiveWorkspaceID,
+    setThreadModel,
+    setThreadPinned,
+    switchThreadByOffset,
+    activateThread,
+  ]);
+  const filteredCommandPaletteActions = useMemo(() => {
+    const query = normalizeSearchText(commandPaletteQuery);
+    if (!query) return commandPaletteActions.slice(0, 48);
+    return commandPaletteActions
+      .filter((action) => action.searchText.includes(query))
+      .slice(0, 48);
+  }, [commandPaletteActions, commandPaletteQuery]);
   const activeTimelineTail = activeTimeline[activeTimeline.length - 1];
 
   const activeProgress = useMemo(() => {
@@ -1633,6 +1829,11 @@ export function App() {
   }, [activeThreadID]);
 
   useEffect(() => {
+    composerDragDepthRef.current = 0;
+    setComposerDropActive(false);
+  }, [activeThreadID]);
+
+  useEffect(() => {
     if (visibleTreeSessionIDs.length === 0) {
       setTreeCursorSessionID("");
       return;
@@ -1653,6 +1854,63 @@ export function App() {
   function createThreadAndFocus() {
     createThread();
     promptInputRef.current?.focus();
+  }
+
+  function openCommandPalette(initialQuery = "") {
+    if (appMode !== "session") return;
+    setCommandPaletteQuery(initialQuery);
+    setCommandPaletteCursor(0);
+    setCommandPaletteOpen(true);
+  }
+
+  function closeCommandPalette(options?: { focusComposer?: boolean }) {
+    setCommandPaletteOpen(false);
+    setCommandPaletteQuery("");
+    setCommandPaletteCursor(0);
+    if (options?.focusComposer === false) return;
+    window.requestAnimationFrame(() => {
+      promptInputRef.current?.focus();
+    });
+  }
+
+  function runCommandPaletteAction(index: number) {
+    const action = filteredCommandPaletteActions[index];
+    if (!action) return;
+    action.run();
+    closeCommandPalette({ focusComposer: false });
+  }
+
+  function onCommandPaletteKeyDown(
+    event: ReactKeyboardEvent<HTMLInputElement>,
+  ) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCommandPalette();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setCommandPaletteCursor((prev) => {
+        if (filteredCommandPaletteActions.length === 0) return 0;
+        return (prev + 1) % filteredCommandPaletteActions.length;
+      });
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setCommandPaletteCursor((prev) => {
+        if (filteredCommandPaletteActions.length === 0) return 0;
+        return (
+          (prev - 1 + filteredCommandPaletteActions.length) %
+          filteredCommandPaletteActions.length
+        );
+      });
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runCommandPaletteAction(commandPaletteCursor);
+    }
   }
 
   function openProjectComposer() {
@@ -3242,6 +3500,44 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (appMode === "session") return;
+    if (!commandPaletteOpen) return;
+    setCommandPaletteOpen(false);
+    setCommandPaletteQuery("");
+    setCommandPaletteCursor(0);
+  }, [appMode, commandPaletteOpen]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      commandPaletteInputRef.current?.focus();
+      commandPaletteInputRef.current?.select();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [commandPaletteOpen]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (!commandPaletteOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [commandPaletteOpen]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen) return;
+    setCommandPaletteCursor((prev) => {
+      if (filteredCommandPaletteActions.length === 0) return 0;
+      if (prev < filteredCommandPaletteActions.length) return prev;
+      return filteredCommandPaletteActions.length - 1;
+    });
+  }, [commandPaletteOpen, filteredCommandPaletteActions.length]);
+
+  useEffect(() => {
     const node = timelineViewportRef.current;
     if (!node) return;
     const threadChanged = lastTimelineThreadIDRef.current !== activeThreadID;
@@ -3313,7 +3609,19 @@ export function App() {
     const handleGlobalKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        promptInputRef.current?.focus();
+        if (commandPaletteOpen) {
+          closeCommandPalette();
+          return;
+        }
+        openCommandPalette();
+        return;
+      }
+
+      if (commandPaletteOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeCommandPalette();
+        }
         return;
       }
 
@@ -3353,7 +3661,7 @@ export function App() {
     return () => {
       window.removeEventListener("keydown", handleGlobalKeydown);
     };
-  }, [authPhase, appMode, threads, activeThreadID]);
+  }, [authPhase, appMode, threads, activeThreadID, commandPaletteOpen]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim()) return;
@@ -4436,18 +4744,72 @@ export function App() {
     }
   }
 
-  async function onUploadSessionImage(file: File) {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+  async function onUploadSessionImage(
+    file: File,
+    threadID = activeThread?.id ?? "",
+  ) {
+    if (authPhase !== "ready" || !token.trim()) return;
+    const targetThreadID = threadID.trim();
+    if (!targetThreadID) return;
+    if (!file.type.toLowerCase().startsWith("image/")) {
+      setImageUploadError("Only image files are supported.");
+      return;
+    }
     setUploadingImage(true);
     setImageUploadError("");
     try {
       const uploaded = await uploadImage(token, file);
-      addThreadImagePath(activeThread.id, uploaded.path);
+      addThreadImagePath(targetThreadID, uploaded.path);
     } catch (error) {
       setImageUploadError(String(error));
     } finally {
       setUploadingImage(false);
     }
+  }
+
+  function onComposerPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    if (!activeThread || activeThreadBusy) return;
+    const imageFile = firstImageFile(event.clipboardData?.files);
+    if (!imageFile) return;
+    event.preventDefault();
+    void onUploadSessionImage(imageFile, activeThread.id);
+  }
+
+  function onComposerDragEnter(event: ReactDragEvent<HTMLElement>) {
+    if (!activeThread || activeThreadBusy) return;
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    event.preventDefault();
+    composerDragDepthRef.current += 1;
+    setComposerDropActive(true);
+  }
+
+  function onComposerDragOver(event: ReactDragEvent<HTMLElement>) {
+    if (!activeThread || activeThreadBusy) return;
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    if (!composerDropActive) {
+      setComposerDropActive(true);
+    }
+  }
+
+  function onComposerDragLeave(event: ReactDragEvent<HTMLElement>) {
+    if (!composerDropActive) return;
+    event.preventDefault();
+    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1);
+    if (composerDragDepthRef.current > 0) return;
+    setComposerDropActive(false);
+  }
+
+  function onComposerDrop(event: ReactDragEvent<HTMLElement>) {
+    if (!dataTransferHasImage(event.dataTransfer)) return;
+    event.preventDefault();
+    composerDragDepthRef.current = 0;
+    setComposerDropActive(false);
+    if (!activeThread || activeThreadBusy) return;
+    const imageFile = firstImageFile(event.dataTransfer?.files);
+    if (!imageFile) return;
+    void onUploadSessionImage(imageFile, activeThread.id);
   }
 
   if (authPhase !== "ready") {
@@ -4822,7 +5184,7 @@ export function App() {
 
             <section className="inspect-block compact-session-meta">
               <p className="pane-subtle-light">
-                Ctrl/Cmd+K focus · Enter send · Shift+Enter newline ·
+                Ctrl/Cmd+K palette · Enter send · Shift+Enter newline ·
                 Ctrl/Cmd+Shift+N new session · P pin (on focused session)
               </p>
               <div className="ops-actions-row">
@@ -4952,12 +5314,21 @@ export function App() {
 
             <form
               ref={composerFormRef}
-              className="composer"
+              className={`composer ${composerDropActive ? "drop-active" : ""}`}
               onSubmit={onSendPrompt}
+              onDragEnter={onComposerDragEnter}
+              onDragOver={onComposerDragOver}
+              onDragLeave={onComposerDragLeave}
+              onDrop={onComposerDrop}
             >
               {activeThreadStatusCopy ? (
                 <p className="composer-status" role="status">
                   {activeThreadStatusCopy}
+                </p>
+              ) : null}
+              {composerDropActive ? (
+                <p className="composer-drop-indicator" role="status">
+                  Drop image to attach.
                 </p>
               ) : null}
               <div className="session-inline-settings">
@@ -5032,7 +5403,7 @@ export function App() {
                     onChange={(event) => {
                       const file = event.target.files?.[0];
                       if (!file) return;
-                      void onUploadSessionImage(file);
+                      void onUploadSessionImage(file, activeThread?.id ?? "");
                       event.currentTarget.value = "";
                     }}
                   />
@@ -5053,7 +5424,9 @@ export function App() {
                 ))}
                 {imageUploadError ? (
                   <span className="shortcut-hint">{imageUploadError}</span>
-                ) : null}
+                ) : (
+                  <span className="shortcut-hint">Paste or drop image to attach.</span>
+                )}
               </div>
 
               <textarea
@@ -5071,6 +5444,7 @@ export function App() {
                     : "Select a session to start"
                 }
                 disabled={!activeThread}
+                onPaste={onComposerPaste}
                 onKeyDown={(event) => {
                   const composing =
                     "isComposing" in event.nativeEvent
@@ -5617,6 +5991,53 @@ export function App() {
           </aside>
         </div>
       )}
+
+      {commandPaletteOpen && appMode === "session" ? (
+        <div
+          className="command-palette-backdrop"
+          onMouseDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            closeCommandPalette();
+          }}
+        >
+          <section
+            className="command-palette"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Command Palette"
+          >
+            <input
+              ref={commandPaletteInputRef}
+              className="command-palette-input"
+              placeholder="Type a command..."
+              value={commandPaletteQuery}
+              onChange={(event) => {
+                setCommandPaletteQuery(event.target.value);
+                setCommandPaletteCursor(0);
+              }}
+              onKeyDown={onCommandPaletteKeyDown}
+            />
+            <div className="command-palette-list" role="listbox">
+              {filteredCommandPaletteActions.length === 0 ? (
+                <p className="command-palette-empty">No matching commands.</p>
+              ) : (
+                filteredCommandPaletteActions.map((action, index) => (
+                  <button
+                    key={action.id}
+                    type="button"
+                    className={`command-palette-item ${index === commandPaletteCursor ? "active" : ""}`}
+                    onMouseEnter={() => setCommandPaletteCursor(index)}
+                    onClick={() => runCommandPaletteAction(index)}
+                  >
+                    <strong>{action.label}</strong>
+                    <small>{action.detail}</small>
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
 
     </div>
   );
