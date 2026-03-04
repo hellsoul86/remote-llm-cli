@@ -1075,6 +1075,17 @@ button.ghost.danger-ghost:hover {
   font-size: 0.7rem;
 }
 
+.message-user-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.message-user-actions button {
+  padding: 5px 10px;
+  border-radius: 9px;
+  font-size: 0.7rem;
+}
+
 .composer {
   border-top: 1px solid #e1e7ef;
   background: #ffffff;
@@ -1148,6 +1159,7 @@ button.ghost.danger-ghost:hover {
 .composer-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
 }
 
 .composer-actions button {

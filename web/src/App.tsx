@@ -104,6 +104,11 @@ type SessionStreamHealth = {
   lastError: string;
 };
 
+type SessionEventHandleOptions = {
+  surfaceCompletions?: boolean;
+  surfaceLifecycle?: boolean;
+};
+
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
 const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
 const MAX_SESSION_STREAMS = 4;
@@ -190,6 +195,25 @@ function summarizeJobEventLine(event: RunJobEvent): string {
     default:
       return "";
   }
+}
+
+function sessionEventHostLabel(payload: Record<string, unknown>): string {
+  const hostName =
+    typeof payload.host_name === "string" ? payload.host_name.trim() : "";
+  if (hostName) return hostName;
+  const hostID = typeof payload.host_id === "string" ? payload.host_id.trim() : "";
+  if (hostID) return hostID;
+  return "target";
+}
+
+function lastUserPromptFromTimeline(timeline: TimelineEntry[]): string {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry.kind !== "user") continue;
+    const body = entry.body.trim();
+    if (body) return body;
+  }
+  return "";
 }
 
 function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): {
@@ -699,6 +723,7 @@ export function App() {
     Record<string, SessionStreamHealth>
   >({});
   const [submittingThreadID, setSubmittingThreadID] = useState("");
+  const [cancelingThreadID, setCancelingThreadID] = useState("");
   const [deletingThreadID, setDeletingThreadID] = useState("");
   const [deletingProjectID, setDeletingProjectID] = useState("");
   const [upsertingProjectID, setUpsertingProjectID] = useState("");
@@ -736,7 +761,12 @@ export function App() {
   const sessionStreamStateRef = useRef<
     Map<
       string,
-      { controller: AbortController; ready: boolean; lastEventAt: number }
+      {
+        controller: AbortController;
+        ready: boolean;
+        lastEventAt: number;
+        suppressReplaySurface: boolean;
+      }
     >
   >(new Map());
   const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(
@@ -964,7 +994,12 @@ export function App() {
   const activeThreadBusy =
     Boolean(activeThread?.activeJobID) ||
     (activeThread ? submittingThreadID === activeThread.id : false) ||
-    (activeThread ? deletingThreadID === activeThread.id : false);
+    (activeThread ? deletingThreadID === activeThread.id : false) ||
+    (activeThread ? cancelingThreadID === activeThread.id : false);
+  const activeThreadRunID = activeThread?.activeJobID.trim() ?? "";
+  const hasRegeneratePrompt =
+    activeThread !== null &&
+    lastUserPromptFromTimeline(activeThread.timeline).trim() !== "";
   const activeThreadStatusCopy = activeThreadBusy
     ? "Codex is thinking..."
     : activeThread?.lastJobStatus === "failed"
@@ -1330,6 +1365,8 @@ export function App() {
     const expanded = expandedMessageIDs.includes(entry.id);
     const showCollapsed = collapsible && !expanded;
     const wrapperClass = `message-body${showCollapsed ? " message-body-collapsed" : ""}`;
+    const canEditAndResend =
+      entry.kind === "user" && authPhase === "ready" && token.trim() !== "";
     return (
       <div className={wrapperClass}>
         {segments.map((segment, index) =>
@@ -1360,6 +1397,18 @@ export function App() {
               onClick={() => toggleMessageExpanded(entry.id)}
             >
               {expanded ? "Collapse" : "Expand"}
+            </button>
+          </div>
+        ) : null}
+        {canEditAndResend ? (
+          <div className="message-user-actions">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => void onEditAndResend(entry)}
+              disabled={activeThreadBusy}
+            >
+              Edit & Resend
             </button>
           </div>
         ) : null}
@@ -2050,10 +2099,11 @@ export function App() {
   async function handleSessionEventRecord(
     sessionID: string,
     event: SessionEventRecord,
-    options?: { surfaceCompletions?: boolean },
+    options?: SessionEventHandleOptions,
   ) {
     const payload = sessionPayloadRecord(event);
     const runID = sessionEventRunID(event);
+    const surfaceLifecycle = options?.surfaceLifecycle !== false;
 
     switch (event.type) {
       case "session.title.updated": {
@@ -2068,8 +2118,34 @@ export function App() {
         const id = runID || `run_${Date.now()}`;
         ensureSessionRunState(sessionID, id);
         setThreadJobState(sessionID, id, "running");
+        if (surfaceLifecycle) {
+          addTimelineEntry(
+            {
+              kind: "system",
+              state: "running",
+              title: "Run Started",
+              body: `run=${id}`,
+            },
+            sessionID,
+          );
+        }
         if (sessionID === activeThreadIDRef.current) {
           setActiveJobID(id);
+        }
+        return;
+      }
+      case "target.started": {
+        if (surfaceLifecycle) {
+          const host = sessionEventHostLabel(payload);
+          addTimelineEntry(
+            {
+              kind: "system",
+              state: "running",
+              title: "Target Started",
+              body: `${host} started`,
+            },
+            sessionID,
+          );
         }
         return;
       }
@@ -2129,20 +2205,44 @@ export function App() {
         const state = ensureSessionRunState(sessionID, runID);
         const status =
           typeof payload.status === "string" ? payload.status.trim() : "";
+        const host = sessionEventHostLabel(payload);
+        const exitCode = payload.exit_code;
+        const codeText =
+          typeof exitCode === "number" ? ` exit=${exitCode}` : "";
+        const errorText =
+          typeof payload.error === "string" && payload.error.trim()
+            ? ` error=${payload.error.trim()}`
+            : "";
+        if (surfaceLifecycle) {
+          addTimelineEntry(
+            {
+              kind: "system",
+              state: status && status !== "ok" ? "error" : "success",
+              title: status && status !== "ok" ? "Target Failed" : "Target Done",
+              body:
+                status && status !== "ok"
+                  ? `${host} failed${codeText}${errorText}`
+                  : `${host} completed${codeText}`,
+            },
+            sessionID,
+          );
+        }
         if (status && status !== "ok") {
-          const host =
-            (typeof payload.host_name === "string" &&
-              payload.host_name.trim()) ||
-            (typeof payload.host_id === "string" && payload.host_id.trim()) ||
-            "target";
-          const exitCode = payload.exit_code;
-          const codeText =
-            typeof exitCode === "number" ? ` exit=${exitCode}` : "";
-          const errorText =
-            typeof payload.error === "string" && payload.error.trim()
-              ? ` error=${payload.error.trim()}`
-              : "";
           state.failureHints.push(`${host} failed${codeText}${errorText}`);
+        }
+        return;
+      }
+      case "job.cancel_requested": {
+        if (surfaceLifecycle) {
+          addTimelineEntry(
+            {
+              kind: "system",
+              state: "running",
+              title: "Cancel Requested",
+              body: runID ? `run=${runID}` : "Cancel requested",
+            },
+            sessionID,
+          );
         }
         return;
       }
@@ -2257,6 +2357,7 @@ export function App() {
 
     if (frame.event === "session.ready") {
       state.ready = true;
+      state.suppressReplaySurface = false;
       updateSessionStreamHealth(sessionID, "live", {
         lastEventAt: receivedAt,
         lastError: "",
@@ -2280,6 +2381,7 @@ export function App() {
       });
       const data = asRecord(frame.data);
       const nextAfter = data ? Number(data.next_after) : NaN;
+      state.suppressReplaySurface = !(Number.isFinite(nextAfter) && nextAfter > 0);
       if (
         Number.isFinite(nextAfter) &&
         nextAfter > (sessionEventCursorRef.current.get(sessionID) ?? 0)
@@ -2300,18 +2402,22 @@ export function App() {
       return;
     }
 
-    const surfaceCompletions = state.ready;
     updateSessionStreamHealth(sessionID, "live", {
       lastEventAt: receivedAt,
       lastError: "",
     });
     const event = decodeSessionEventRecord(frame.data);
     if (!event) return;
+
     const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
     if (event.seq <= current) return;
     sessionEventCursorRef.current.set(sessionID, event.seq);
+    const surfaceByReplay = !state.suppressReplaySurface;
+    const surfaceCompletions = state.ready || surfaceByReplay;
+    const surfaceLifecycle = state.ready || surfaceByReplay;
     void handleSessionEventRecord(sessionID, event, {
       surfaceCompletions,
+      surfaceLifecycle,
     });
   }
 
@@ -2325,6 +2431,7 @@ export function App() {
       controller,
       ready: false,
       lastEventAt: 0,
+      suppressReplaySurface: true,
     });
     updateSessionStreamHealth(trimmedSessionID, "connecting", {
       retries: 0,
@@ -2344,6 +2451,10 @@ export function App() {
           });
         }
         const after = sessionEventCursorRef.current.get(trimmedSessionID) ?? 0;
+        const streamState = sessionStreamStateRef.current.get(trimmedSessionID);
+        if (streamState && streamState.controller === controller) {
+          streamState.suppressReplaySurface = after <= 0;
+        }
         try {
           await streamSessionEvents(authToken, trimmedSessionID, {
             after,
@@ -2826,11 +2937,17 @@ export function App() {
           }
           jobEventCursorRef.current.set(item.jobID, nextAfter);
           const alreadyCompleted = completedJobsRef.current.has(item.jobID);
+          const streamRunState = sessionRunStateRef.current.get(item.threadID);
+          const preferSessionStream =
+            streamRunState?.runID === item.jobID &&
+            (streamRunState?.streamSeen || streamRunState?.assistantFinalized);
 
           let stdoutStream = "";
           const terminalHints: string[] = [];
           const showLiveStream =
-            appMode === "session" && item.threadID === activeThreadID;
+            !preferSessionStream &&
+            appMode === "session" &&
+            item.threadID === activeThreadID;
           for (const event of events) {
             if (
               event.type === "target.stdout" &&
@@ -2886,7 +3003,7 @@ export function App() {
               );
             }
           }
-          if (terminalHints.length > 0) {
+          if (!preferSessionStream && terminalHints.length > 0) {
             addTimelineEntry(
               {
                 kind: "system",
@@ -3154,6 +3271,7 @@ export function App() {
     sessionEventCursorRef.current.clear();
     sessionRunStateRef.current.clear();
     setSubmittingThreadID("");
+    setCancelingThreadID("");
     setSessionAlerts([]);
     setSessionModelDefault("");
     setSessionModelOptions([]);
@@ -3394,8 +3512,7 @@ export function App() {
     startSessionStream(sessionID, token);
   }
 
-  async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function submitPromptForActiveThread(trimmedPrompt: string) {
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
     if (activeThread.activeJobID || submittingThreadID === activeThread.id) {
       addTimelineEntry(
@@ -3410,9 +3527,7 @@ export function App() {
       return;
     }
 
-    const editorValue = promptInputRef.current?.value ?? "";
-    const trimmedPrompt = activeThread.draft.trim() || editorValue.trim();
-    if (!trimmedPrompt) {
+    if (!trimmedPrompt.trim()) {
       addTimelineEntry(
         {
           kind: "system",
@@ -3424,8 +3539,9 @@ export function App() {
       );
       return;
     }
+    const prompt = trimmedPrompt.trim();
     if (isGenericSessionTitle(activeThread.title)) {
-      const nextTitle = deriveSessionTitleFromPrompt(trimmedPrompt);
+      const nextTitle = deriveSessionTitleFromPrompt(prompt);
       if (nextTitle) {
         setThreadTitle(activeThread.id, nextTitle);
       }
@@ -3490,7 +3606,7 @@ export function App() {
 
     const request: RunRequest = {
       runtime: activeRuntime?.name ?? selectedRuntime,
-      prompt: trimmedPrompt,
+      prompt,
       session_id: activeThread.id,
       all_hosts: false,
       host_ids: targetHostIDs,
@@ -3515,7 +3631,7 @@ export function App() {
       {
         kind: "user",
         title: "You",
-        body: trimmedPrompt,
+        body: prompt,
       },
       activeThread.id,
     );
@@ -3585,6 +3701,85 @@ export function App() {
       setThreadJobState(activeThread.id, "", "failed");
       setSubmittingThreadID("");
     }
+  }
+
+  async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    const editorValue = promptInputRef.current?.value ?? "";
+    const trimmedPrompt = activeThread.draft.trim() || editorValue.trim();
+    await submitPromptForActiveThread(trimmedPrompt);
+  }
+
+  async function onStopActiveSessionRun() {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    const runID = activeThread.activeJobID.trim();
+    if (!runID) return;
+    if (cancelingThreadID === activeThread.id) return;
+    setCancelingThreadID(activeThread.id);
+    try {
+      await cancelRunJob(token, runID);
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "running",
+          title: "Cancel Requested",
+          body: `run=${runID}`,
+        },
+        activeThread.id,
+      );
+    } catch (error) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Cancel Failed",
+          body: String(error),
+        },
+        activeThread.id,
+      );
+    } finally {
+      setCancelingThreadID("");
+    }
+  }
+
+  async function onRegenerateActiveSession() {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    const prompt = lastUserPromptFromTimeline(activeThread.timeline);
+    if (!prompt) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Regenerate Unavailable",
+          body: "No previous user prompt in this session.",
+        },
+        activeThread.id,
+      );
+      return;
+    }
+    await submitPromptForActiveThread(prompt);
+  }
+
+  async function onEditAndResend(entry: TimelineEntry) {
+    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
+    if (entry.kind !== "user") return;
+    const edited = window.prompt("Edit prompt before resend", entry.body);
+    if (edited === null) return;
+    const trimmed = edited.trim();
+    if (!trimmed) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Prompt Missing",
+          body: "Prompt is required.",
+        },
+        activeThread.id,
+      );
+      return;
+    }
+    await submitPromptForActiveThread(trimmed);
   }
 
   async function onAddHost(event: FormEvent<HTMLFormElement>) {
@@ -4391,6 +4586,32 @@ export function App() {
               />
 
               <div className="composer-actions">
+                {activeThreadRunID ? (
+                  <button
+                    type="button"
+                    className="ghost danger-ghost"
+                    disabled={
+                      !activeThread ||
+                      !activeThreadRunID ||
+                      cancelingThreadID === activeThread.id
+                    }
+                    onClick={() => void onStopActiveSessionRun()}
+                  >
+                    {activeThread &&
+                    cancelingThreadID === activeThread.id
+                      ? "Stopping..."
+                      : "Stop"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!activeThread || !hasRegeneratePrompt || activeThreadBusy}
+                    onClick={() => void onRegenerateActiveSession()}
+                  >
+                    Regenerate
+                  </button>
+                )}
                 <button
                   type="submit"
                   disabled={activeThreadBusy || !activeThread}

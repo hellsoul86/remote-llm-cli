@@ -37,6 +37,7 @@ async function mockSessionApi(
   const jobRunningPolls = Math.max(1, options?.jobRunningPolls ?? 1);
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   let sessionOneStreamAttempts = 0;
+  let canceled = false;
   const nowISO = new Date().toISOString();
   const sessions = [
     {
@@ -275,12 +276,24 @@ async function mockSessionApi(
         },
         {
           seq: 2,
+          type: "target.started",
+          payload: { job_id: "job_ux_1", host_name: "local-default", attempt: 1 },
+          createdAt: "2026-03-03T00:00:00Z",
+        },
+        {
+          seq: 3,
           type: "assistant.delta",
           payload: { job_id: "job_ux_1", chunk },
           createdAt: "2026-03-03T00:00:00Z",
         },
         {
-          seq: 3,
+          seq: 4,
+          type: "target.done",
+          payload: { job_id: "job_ux_1", host_name: "local-default", status: "ok", exit_code: 0 },
+          createdAt: "2026-03-03T00:00:01Z",
+        },
+        {
+          seq: 5,
           type: "assistant.completed",
           payload: { job_id: "job_ux_1", run_id: "job_ux_1" },
           createdAt: "2026-03-03T00:00:01Z",
@@ -442,6 +455,46 @@ async function mockSessionApi(
     });
   });
   await page.route("**/v1/jobs/job_ux_1", async (route) => {
+    if (canceled) {
+      await route.fulfill({
+        status: 200,
+        json: {
+          job: {
+            id: "job_ux_1",
+            type: "run",
+            status: "canceled",
+            runtime: "codex",
+            prompt_preview: "prompt",
+            queued_at: "2026-03-03T00:00:00Z",
+            started_at: "2026-03-03T00:00:01Z",
+            finished_at: "2026-03-03T00:00:02Z",
+            result_status: 499,
+            total_hosts: 1,
+            succeeded_hosts: 0,
+            failed_hosts: 0,
+            fanout: 1,
+            duration_ms: 1000,
+            error: "canceled while running",
+            response: {
+              runtime: "codex",
+              summary: {
+                total: 1,
+                succeeded: 0,
+                failed: 0,
+                fanout: 1,
+                retry_count: 0,
+                retry_backoff_ms: 1000,
+                duration_ms: 1000,
+                started_at: "2026-03-03T00:00:01Z",
+                finished_at: "2026-03-03T00:00:02Z",
+              },
+              targets: [],
+            },
+          },
+        },
+      });
+      return;
+    }
     jobPollCount += 1;
     if (jobPollCount <= jobRunningPolls) {
       await route.fulfill({
@@ -498,6 +551,31 @@ async function mockSessionApi(
     });
   });
   await page.route("**/v1/jobs/job_ux_1/events**", async (route) => {
+    if (canceled) {
+      await route.fulfill({
+        status: 200,
+        json: {
+          job_id: "job_ux_1",
+          after: eventPollCount,
+          next_after: Math.max(eventPollCount, 3),
+          events: [
+            {
+              seq: 2,
+              job_id: "job_ux_1",
+              type: "job.cancel_requested",
+              created_at: "2026-03-03T00:00:01Z",
+            },
+            {
+              seq: 3,
+              job_id: "job_ux_1",
+              type: "job.canceled",
+              created_at: "2026-03-03T00:00:02Z",
+            },
+          ],
+        },
+      });
+      return;
+    }
     if (streamPattern === "completion-once") {
       await route.fulfill({
         status: 200,
@@ -568,6 +646,24 @@ async function mockSessionApi(
       },
     });
   });
+  await page.route("**/v1/jobs/job_ux_1/cancel", async (route) => {
+    canceled = true;
+    await route.fulfill({
+      status: 200,
+      json: {
+        state: "cancel_requested",
+        job: {
+          id: "job_ux_1",
+          type: "run",
+          status: "running",
+          runtime: "codex",
+          prompt_preview: "prompt",
+          queued_at: "2026-03-03T00:00:00Z",
+          started_at: "2026-03-03T00:00:01Z",
+        },
+      },
+    });
+  });
   await page.route("**/v1/jobs**", async (route) => {
     if (route.request().method() !== "GET") {
       await route.fallback();
@@ -578,7 +674,11 @@ async function mockSessionApi(
       await route.fallback();
       return;
     }
-    const status = jobPollCount <= jobRunningPolls ? "running" : "succeeded";
+    const status = canceled
+      ? "canceled"
+      : jobPollCount <= jobRunningPolls
+        ? "running"
+        : "succeeded";
     await route.fulfill({
       status: 200,
       json: {
@@ -612,7 +712,7 @@ async function unlock(page: Page): Promise<void> {
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
   await page.getByRole("button", { name: "Unlock Workspace" }).click();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
 }
 
 test("desktop session UX baseline (layout + interaction + scroll)", async ({
@@ -714,8 +814,69 @@ test("session stream completion keeps a single assistant reply", async ({
   await expect(assistantWithMarker).toHaveCount(1);
   await page.waitForTimeout(1800);
   await expect(assistantWithMarker).toHaveCount(1);
+  await expect(page.getByText("Run Started")).toBeVisible();
+  await expect(page.getByText("Target Done")).toBeVisible();
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
+});
+
+test("stop and regenerate controls work in session composer", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `STOP_REGEN_${Date.now()}`;
+  const harness = await mockSessionApi(page, `regen ${marker}`, marker, {
+    jobRunningPolls: 6,
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`run long task ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const stopButton = page.getByRole("button", { name: "Stop", exact: true });
+  await expect(stopButton).toBeVisible();
+  await stopButton.click();
+  await expect(
+    page.getByRole("heading", { name: "Cancel Requested" }),
+  ).toBeVisible();
+
+  const regenerateButton = page.getByRole("button", { name: "Regenerate" });
+  await expect(regenerateButton).toBeVisible({ timeout: 12000 });
+  await regenerateButton.click();
+  await expect.poll(() => harness.runRequests()).toBe(2);
+});
+
+test("user message supports edit and resend", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `EDIT_RESEND_${Date.now()}`;
+  const harness = await mockSessionApi(page, `edit resend ${marker}`, marker);
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`initial prompt ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    timeout: 12000,
+  });
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Edit prompt before resend");
+    await dialog.accept(`edited prompt ${marker}`);
+  });
+  await page.getByRole("button", { name: "Edit & Resend" }).first().click();
+  await expect.poll(() => harness.runRequests()).toBe(2);
+  await expect(
+    page.locator(".message.message-user pre", {
+      hasText: `edited prompt ${marker}`,
+    }),
+  ).toHaveCount(1);
 });
 
 test("historical stream replay on refresh does not trigger session alerts", async ({
@@ -907,7 +1068,7 @@ test("running state locks session controls then unlocks on completion", async ({
   await expect(sandboxSelect).toBeDisabled();
   await expect(attachInput).toBeDisabled();
 
-  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled({
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
     timeout: 18000,
   });
   await expect(modelSelect).toBeEnabled();
@@ -1000,5 +1161,5 @@ test("mobile session UX baseline (stacked layout + no horizontal overflow)", asy
   await expect(
     page.getByPlaceholder("Tell codex what to do in this workspace..."),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
 });

@@ -390,11 +390,19 @@ export function useSessionDomain() {
     const now = new Date().toISOString();
     updateWorkspacesByThread(threadID, (thread) => {
       const timeline = [...thread.timeline];
-      const last = timeline[timeline.length - 1];
-      if (last && last.kind === "assistant" && last.state === "running") {
-        if (last.body === trimmed) return thread;
-        timeline[timeline.length - 1] = {
-          ...last,
+      let runningIndex = -1;
+      for (let index = timeline.length - 1; index >= 0; index -= 1) {
+        const candidate = timeline[index];
+        if (candidate.kind === "assistant" && candidate.state === "running") {
+          runningIndex = index;
+          break;
+        }
+      }
+      if (runningIndex >= 0) {
+        const running = timeline[runningIndex];
+        if (running.body === trimmed) return thread;
+        timeline[runningIndex] = {
+          ...running,
           body: trimmed
         };
       } else {
@@ -420,12 +428,20 @@ export function useSessionDomain() {
     const now = new Date().toISOString();
     updateWorkspacesByThread(threadID, (thread) => {
       const timeline = [...thread.timeline];
-      const last = timeline[timeline.length - 1];
-      if (last && last.kind === "assistant" && last.state === "running") {
-        timeline[timeline.length - 1] = {
-          ...last,
+      let runningIndex = -1;
+      for (let index = timeline.length - 1; index >= 0; index -= 1) {
+        const candidate = timeline[index];
+        if (candidate.kind === "assistant" && candidate.state === "running") {
+          runningIndex = index;
+          break;
+        }
+      }
+      if (runningIndex >= 0) {
+        const running = timeline[runningIndex];
+        timeline[runningIndex] = {
+          ...running,
           state,
-          body: trimmed || last.body
+          body: trimmed || running.body
         };
         return {
           ...thread,
