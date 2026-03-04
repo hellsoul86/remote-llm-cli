@@ -183,6 +183,31 @@ function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): {
   }
 }
 
+function normalizeSessionTitle(raw: string): string {
+  const collapsed = raw.replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  if (/^session(\s+\d+)?$/i.test(collapsed)) return "";
+  if (collapsed.length <= 72) return collapsed;
+  return `${collapsed.slice(0, 69).trimEnd()}...`;
+}
+
+function isGenericSessionTitle(title: string): boolean {
+  return /^session(\s+\d+)?$/i.test(title.trim());
+}
+
+function deriveSessionTitleFromPrompt(prompt: string): string {
+  const normalized = prompt
+    .replace(/[`*_#>\[\]\(\){}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  const sentenceMatch = normalized.match(/^(.{1,88}?)([.!?。！？]|$)/);
+  const sentence = (sentenceMatch?.[1] ?? normalized).trim();
+  const words = sentence.split(" ").filter((word) => word.trim() !== "");
+  const compact = words.slice(0, 10).join(" ");
+  return normalizeSessionTitle(compact);
+}
+
 function clipStreamText(raw: string, maxChars = 3600): string {
   if (raw.length <= maxChars) return raw;
   return `${raw.slice(raw.length - maxChars)}\n...[stream truncated for UI]...`;
@@ -303,6 +328,53 @@ function parseCodexAssistantTextFromStdout(
     return plainLines.join("\n").trim();
   }
   return "";
+}
+
+function pickSessionTitleFromEvent(event: Record<string, unknown>): string {
+  const direct = normalizeSessionTitle(
+    typeof event.title === "string" ? event.title : "",
+  );
+  if (direct) return direct;
+  const nestedKeys = ["thread", "session", "payload", "item", "data", "meta"];
+  for (const key of nestedKeys) {
+    const record = asRecord(event[key]);
+    if (!record) continue;
+    const title = normalizeSessionTitle(
+      typeof record.title === "string" ? record.title : "",
+    );
+    if (title) return title;
+  }
+  return "";
+}
+
+function parseCodexSessionTitleFromStdout(stdout: string): string {
+  if (!stdout.trim()) return "";
+  const lines = stdout.split(/\r?\n/);
+  let latest = "";
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const event = asRecord(parsed);
+    if (!event) continue;
+    const eventType =
+      typeof event.type === "string" ? event.type.toLowerCase() : "";
+    if (eventType.includes("title")) {
+      const titled = pickSessionTitleFromEvent(event);
+      if (titled) latest = titled;
+      continue;
+    }
+    if (eventType === "thread.started" || eventType === "session.started") {
+      const titled = pickSessionTitleFromEvent(event);
+      if (titled) latest = titled;
+    }
+  }
+  return latest;
 }
 
 function extractAssistantTextFromJob(job: RunJobRecord): string {
@@ -738,6 +810,13 @@ export function App() {
   const activeThreadBusy =
     Boolean(activeThread?.activeJobID) ||
     (activeThread ? submittingThreadID === activeThread.id : false);
+  const activeThreadStatusCopy = activeThreadBusy
+    ? "Codex is thinking..."
+    : activeThread?.lastJobStatus === "failed"
+      ? "Last response failed."
+      : activeThread?.lastJobStatus === "canceled"
+        ? "Last response interrupted."
+        : "";
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
@@ -838,6 +917,12 @@ export function App() {
   useEffect(() => {
     threadWorkspaceMapRef.current = threadWorkspaceMap;
   }, [threadWorkspaceMap]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const title = activeThread?.title.trim() || "Session";
+    document.title = `${title} · Codex Control App`;
+  }, [activeThread?.title]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1581,6 +1666,10 @@ export function App() {
         if (state.stdout.length > 220000) {
           state.stdout = state.stdout.slice(state.stdout.length - 220000);
         }
+        const nextTitle = parseCodexSessionTitleFromStdout(state.stdout);
+        if (nextTitle) {
+          setThreadTitle(sessionID, nextTitle);
+        }
         const contentOnly = parseCodexAssistantTextFromStdout(
           state.stdout,
           false,
@@ -2282,6 +2371,10 @@ export function App() {
           }
           if (!alreadyCompleted && showLiveStream && stdoutStream.trim()) {
             if (job.runtime === "codex") {
+              const nextTitle = parseCodexSessionTitleFromStdout(stdoutStream);
+              if (nextTitle) {
+                setThreadTitle(item.threadID, nextTitle);
+              }
               const contentOnly = parseCodexAssistantTextFromStdout(
                 stdoutStream,
                 false,
@@ -2626,6 +2719,12 @@ export function App() {
         activeThread.id,
       );
       return;
+    }
+    if (isGenericSessionTitle(activeThread.title)) {
+      const nextTitle = deriveSessionTitleFromPrompt(trimmedPrompt);
+      if (nextTitle) {
+        setThreadTitle(activeThread.id, nextTitle);
+      }
     }
 
     const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
@@ -3246,12 +3345,19 @@ export function App() {
               className="composer"
               onSubmit={onSendPrompt}
             >
+              {activeThreadStatusCopy ? (
+                <p className="composer-status" role="status">
+                  {activeThreadStatusCopy}
+                </p>
+              ) : null}
               <div className="session-inline-settings">
                 <label className="session-setting-row">
                   model
                   <select
                     value={activeThreadModelValue}
-                    disabled={!activeThread || !hasSessionModelChoices}
+                    disabled={
+                      !activeThread || !hasSessionModelChoices || activeThreadBusy
+                    }
                     onChange={(event) => {
                       if (!activeThread) return;
                       setThreadModel(activeThread.id, event.target.value);
@@ -3279,7 +3385,7 @@ export function App() {
                   sandbox
                   <select
                     value={activeThread?.sandbox ?? "workspace-write"}
-                    disabled={!activeThread}
+                    disabled={!activeThread || activeThreadBusy}
                     onChange={(event) =>
                       activeThread &&
                       setThreadSandbox(
@@ -3302,11 +3408,17 @@ export function App() {
               </div>
 
               <div className="quick-strip">
-                <label className="quick-chip ghost file-chip">
+                <label
+                  className={`quick-chip ghost file-chip ${
+                    uploadingImage || !activeThread || activeThreadBusy
+                      ? "disabled"
+                      : ""
+                  }`}
+                >
                   <input
                     type="file"
                     accept="image/*"
-                    disabled={uploadingImage || !activeThread}
+                    disabled={uploadingImage || !activeThread || activeThreadBusy}
                     onChange={(event) => {
                       const file = event.target.files?.[0];
                       if (!file) return;

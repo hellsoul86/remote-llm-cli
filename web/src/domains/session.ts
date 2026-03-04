@@ -265,15 +265,24 @@ export function useSessionDomain() {
     return `entry_${Date.now()}_${entryCounter.current}`;
   }
 
-  function updateWorkspacesByThread(threadID: string, updater: (thread: ConversationThread) => ConversationThread) {
+  function updateWorkspacesByThread(
+    threadID: string,
+    updater: (thread: ConversationThread) => ConversationThread,
+  ) {
     setWorkspaces((prev) =>
       prev.map((workspace) => {
-        if (!workspace.sessions.some((thread) => thread.id === threadID)) return workspace;
-        const now = new Date().toISOString();
+        let touched = false;
+        const nextSessions = workspace.sessions.map((thread) => {
+          if (thread.id !== threadID) return thread;
+          const nextThread = updater(thread);
+          if (nextThread !== thread) touched = true;
+          return nextThread;
+        });
+        if (!touched) return workspace;
         return {
           ...workspace,
-          sessions: workspace.sessions.map((thread) => (thread.id === threadID ? updater(thread) : thread)),
-          updatedAt: now
+          sessions: nextSessions,
+          updatedAt: new Date().toISOString()
         };
       })
     );
@@ -534,11 +543,14 @@ export function useSessionDomain() {
   function setThreadTitle(threadID: string, title: string) {
     const trimmed = title.trim();
     if (!trimmed) return;
-    updateWorkspacesByThread(threadID, (thread) => ({
-      ...thread,
-      title: trimmed,
-      updatedAt: new Date().toISOString()
-    }));
+    updateWorkspacesByThread(threadID, (thread) => {
+      if (thread.title.trim() === trimmed) return thread;
+      return {
+        ...thread,
+        title: trimmed,
+        updatedAt: new Date().toISOString()
+      };
+    });
   }
 
   function syncProjectsFromDiscovery(projects: DiscoveredProject[]) {

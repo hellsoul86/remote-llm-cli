@@ -966,6 +966,13 @@ button.ghost.danger-ghost:hover {
   gap: 8px;
 }
 
+.composer-status {
+  margin: 0;
+  font-size: 0.74rem;
+  color: #5b6f89;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
 .session-inline-settings {
   display: grid;
   grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr);
@@ -985,6 +992,11 @@ button.ghost.danger-ghost:hover {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
+.quick-chip.disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
 .file-chip {
   position: relative;
   overflow: hidden;
@@ -995,6 +1007,10 @@ button.ghost.danger-ghost:hover {
   inset: 0;
   opacity: 0;
   cursor: pointer;
+}
+
+.quick-chip.disabled input {
+  cursor: not-allowed;
 }
 
 .shortcut-hint {

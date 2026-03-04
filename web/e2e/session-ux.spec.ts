@@ -8,6 +8,8 @@ type MockOptions = {
   streamPattern?: "ready-only" | "completion-once";
   includeSecondSession?: boolean;
   backgroundCompletion?: boolean;
+  titleUpdate?: string;
+  jobRunningPolls?: number;
 };
 
 function buildLongAssistantReply(marker: string): string {
@@ -30,6 +32,8 @@ async function mockSessionApi(
   const streamPattern = options?.streamPattern ?? "ready-only";
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
+  const titleUpdate = options?.titleUpdate?.trim() ?? "";
+  const jobRunningPolls = Math.max(1, options?.jobRunningPolls ?? 1);
   const nowISO = new Date().toISOString();
   const sessions = [
     {
@@ -193,24 +197,61 @@ async function mockSessionApi(
         `{"type":"thread.started","thread_id":"t_ux"}\n` +
         `{"type":"turn.started"}\n` +
         `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: assistantReply } })}\n`;
-      const streamBody = [
+      const events = [
+        {
+          seq: 1,
+          type: "run.started",
+          payload: { job_id: "job_ux_1" },
+          createdAt: "2026-03-03T00:00:00Z",
+        },
+        {
+          seq: 2,
+          type: "assistant.delta",
+          payload: { job_id: "job_ux_1", chunk },
+          createdAt: "2026-03-03T00:00:00Z",
+        },
+        {
+          seq: 3,
+          type: "assistant.completed",
+          payload: { job_id: "job_ux_1", run_id: "job_ux_1" },
+          createdAt: "2026-03-03T00:00:01Z",
+        },
+      ];
+      if (titleUpdate) {
+        events.push({
+          seq: events.length + 1,
+          type: "session.title.updated",
+          payload: { title: titleUpdate },
+          createdAt: "2026-03-03T00:00:01Z",
+        });
+      }
+      events.push({
+        seq: events.length + 1,
+        type: "run.completed",
+        payload: { job_id: "job_ux_1" },
+        createdAt: "2026-03-03T00:00:01Z",
+      });
+      const streamLines = [
         `event: session.ready`,
         `data: {"session_id":"session_cli_1","cursor":0}`,
         ``,
-        `event: session.event`,
-        `data: {"seq":1,"session_id":"session_cli_1","run_id":"job_ux_1","type":"run.started","payload":{"job_id":"job_ux_1"},"created_at":"2026-03-03T00:00:00Z"}`,
-        ``,
-        `event: session.event`,
-        `data: {"seq":2,"session_id":"session_cli_1","run_id":"job_ux_1","type":"assistant.delta","payload":{"job_id":"job_ux_1","chunk":${JSON.stringify(chunk)}},"created_at":"2026-03-03T00:00:00Z"}`,
-        ``,
-        `event: session.event`,
-        `data: {"seq":3,"session_id":"session_cli_1","run_id":"job_ux_1","type":"assistant.completed","payload":{"job_id":"job_ux_1","run_id":"job_ux_1"},"created_at":"2026-03-03T00:00:01Z"}`,
-        ``,
-        `event: session.event`,
-        `data: {"seq":4,"session_id":"session_cli_1","run_id":"job_ux_1","type":"run.completed","payload":{"job_id":"job_ux_1"},"created_at":"2026-03-03T00:00:01Z"}`,
-        ``,
-        ``,
-      ].join("\n");
+      ];
+      for (const event of events) {
+        streamLines.push(`event: session.event`);
+        streamLines.push(
+          `data: ${JSON.stringify({
+            seq: event.seq,
+            session_id: "session_cli_1",
+            run_id: "job_ux_1",
+            type: event.type,
+            payload: event.payload,
+            created_at: event.createdAt,
+          })}`,
+        );
+        streamLines.push(``);
+      }
+      streamLines.push(``);
+      const streamBody = streamLines.join("\n");
       await route.fulfill({
         status: 200,
         headers: { "content-type": "text/event-stream" },
@@ -333,7 +374,7 @@ async function mockSessionApi(
   });
   await page.route("**/v1/jobs/job_ux_1", async (route) => {
     jobPollCount += 1;
-    if (jobPollCount < 2) {
+    if (jobPollCount <= jobRunningPolls) {
       await route.fulfill({
         status: 200,
         json: {
@@ -426,10 +467,17 @@ async function mockSessionApi(
             job_id: "job_ux_1",
             type: "target.stdout",
             host_name: "local-default",
-            chunk:
-              `{"type":"thread.started","thread_id":"t_ux"}\n` +
-              `{"type":"turn.started"}\n` +
-              `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: assistantReply } })}\n`,
+            chunk: [
+              `{"type":"thread.started","thread_id":"t_ux"}`,
+              `{"type":"turn.started"}`,
+              ...(titleUpdate
+                ? [JSON.stringify({ type: "session.title.updated", title: titleUpdate })]
+                : []),
+              JSON.stringify({
+                type: "item.completed",
+                item: { type: "agent_message", text: assistantReply },
+              }),
+            ].join("\n") + "\n",
             created_at: "2026-03-03T00:00:00Z",
           },
           {
@@ -461,7 +509,7 @@ async function mockSessionApi(
       await route.fallback();
       return;
     }
-    const status = jobPollCount < 2 ? "running" : "succeeded";
+    const status = jobPollCount <= jobRunningPolls ? "running" : "succeeded";
     await route.fulfill({
       status: 200,
       json: {
@@ -684,6 +732,84 @@ test("background completion shows one alert and unread badge", async ({ page }) 
       '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.unread',
     ),
   ).toHaveCount(0);
+});
+
+test("generic session title is auto-derived from first prompt", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TITLE_${Date.now()}`;
+  await mockSessionApi(page, `title ${marker}`, marker);
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await expect(page.getByRole("heading", { name: "Session 1" })).toBeVisible();
+  await composer.fill("Plan deployment rollback strategy for staging API");
+  await composer.press("Enter");
+
+  await expect(
+    page.getByRole("heading", {
+      name: /Plan deployment rollback strategy for staging API/i,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.locator('.session-chip-tree[data-session-id="session_cli_1"]'),
+  ).toContainText(/Plan deployment rollback strategy for staging API/i);
+});
+
+test("session title stream update overrides fallback title", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TITLE_EVT_${Date.now()}`;
+  await mockSessionApi(page, `title-evt ${marker}`, marker, {
+    titleUpdate: "QA Release Checklist",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill("Create rollout checklist for QA and release validation");
+  await composer.press("Enter");
+
+  await expect(
+    page.getByRole("heading", { name: "QA Release Checklist" }),
+  ).toBeVisible();
+  await expect(
+    page.locator('.session-chip-tree[data-session-id="session_cli_1"]'),
+  ).toContainText("QA Release Checklist");
+});
+
+test("running state locks session controls then unlocks on completion", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `LOCK_${Date.now()}`;
+  await mockSessionApi(page, `lock ${marker}`, marker, { jobRunningPolls: 4 });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  const runningButton = page.getByRole("button", { name: "Running..." });
+  const modelSelect = page.locator(".session-inline-settings select").first();
+  const sandboxSelect = page.locator(".session-inline-settings select").nth(1);
+  const attachInput = page.locator('.file-chip input[type="file"]');
+
+  await composer.fill(`reply once with marker: ${marker}`);
+  await composer.press("Enter");
+
+  await expect(page.getByText("Codex is thinking...")).toBeVisible();
+  await expect(runningButton).toBeDisabled();
+  await expect(modelSelect).toBeDisabled();
+  await expect(sandboxSelect).toBeDisabled();
+  await expect(attachInput).toBeDisabled();
+
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled({
+    timeout: 18000,
+  });
+  await expect(modelSelect).toBeEnabled();
+  await expect(sandboxSelect).toBeEnabled();
+  await expect(attachInput).toBeEnabled();
 });
 
 test.use({ viewport: { width: 390, height: 844 } });
