@@ -67,6 +67,7 @@ import { SessionHeader } from "./features/session/components/SessionHeader";
 import { SessionSidebar } from "./features/session/components/SessionSidebar";
 import { SessionTimeline } from "./features/session/components/SessionTimeline";
 import { TokenGate } from "./features/session/components/TokenGate";
+import { useCommandPaletteController } from "./features/session/use-command-palette";
 import {
   buildSessionCommandPaletteActions,
   normalizeSearchText,
@@ -948,9 +949,6 @@ export function App() {
   const [enableFlagDraft, setEnableFlagDraft] = useState("");
   const [disableFlagDraft, setDisableFlagDraft] = useState("");
   const [composerDropActive, setComposerDropActive] = useState(false);
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
-  const [commandPaletteCursor, setCommandPaletteCursor] = useState(0);
   const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
   const [projectFilter, setProjectFilter] = useState(sessionTreePrefs.projectFilter);
   const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
@@ -971,7 +969,6 @@ export function App() {
   const timelineLastTailStateRef = useRef("");
   const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
-  const commandPaletteInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const composerDragDepthRef = useRef(0);
@@ -1230,6 +1227,27 @@ export function App() {
     switchThreadByOffset,
     activateThread,
   ]);
+  const {
+    commandPaletteOpen,
+    commandPaletteQuery,
+    commandPaletteCursor,
+    commandPaletteInputRef,
+    setCommandPaletteCursor,
+    openCommandPalette,
+    closeCommandPalette,
+    runCommandPaletteAction,
+    onCommandPaletteKeyDown,
+    onCommandPaletteQueryChange,
+  } = useCommandPaletteController({
+    sessionModeActive: appMode === "session",
+    getFilteredActionsLength: () => filteredCommandPaletteActions.length,
+    onRunActionAt: (index) => {
+      const action = filteredCommandPaletteActions[index];
+      if (!action) return;
+      action.run();
+    },
+    onFocusComposer: focusComposerSoon,
+  });
   const filteredCommandPaletteActions = useMemo(() => {
     const query = normalizeSearchText(commandPaletteQuery);
     if (!query) return commandPaletteActions.slice(0, 48);
@@ -1507,61 +1525,6 @@ export function App() {
     window.requestAnimationFrame(() => {
       promptInputRef.current?.focus();
     });
-  }
-
-  function openCommandPalette(initialQuery = "") {
-    if (appMode !== "session") return;
-    setCommandPaletteQuery(initialQuery);
-    setCommandPaletteCursor(0);
-    setCommandPaletteOpen(true);
-  }
-
-  function closeCommandPalette(options?: { focusComposer?: boolean }) {
-    setCommandPaletteOpen(false);
-    setCommandPaletteQuery("");
-    setCommandPaletteCursor(0);
-    if (options?.focusComposer === false) return;
-    focusComposerSoon();
-  }
-
-  function runCommandPaletteAction(index: number) {
-    const action = filteredCommandPaletteActions[index];
-    if (!action) return;
-    action.run();
-    closeCommandPalette({ focusComposer: false });
-  }
-
-  function onCommandPaletteKeyDown(
-    event: ReactKeyboardEvent<HTMLInputElement>,
-  ) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeCommandPalette();
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setCommandPaletteCursor((prev) => {
-        if (filteredCommandPaletteActions.length === 0) return 0;
-        return (prev + 1) % filteredCommandPaletteActions.length;
-      });
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setCommandPaletteCursor((prev) => {
-        if (filteredCommandPaletteActions.length === 0) return 0;
-        return (
-          (prev - 1 + filteredCommandPaletteActions.length) %
-          filteredCommandPaletteActions.length
-        );
-      });
-      return;
-    }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      runCommandPaletteAction(commandPaletteCursor);
-    }
   }
 
   function onAddDirDraftSubmit() {
@@ -3189,44 +3152,6 @@ export function App() {
       window.removeEventListener("hashchange", syncFromHash);
     };
   }, []);
-
-  useEffect(() => {
-    if (appMode === "session") return;
-    if (!commandPaletteOpen) return;
-    setCommandPaletteOpen(false);
-    setCommandPaletteQuery("");
-    setCommandPaletteCursor(0);
-  }, [appMode, commandPaletteOpen]);
-
-  useEffect(() => {
-    if (!commandPaletteOpen) return;
-    const frame = window.requestAnimationFrame(() => {
-      commandPaletteInputRef.current?.focus();
-      commandPaletteInputRef.current?.select();
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
-  }, [commandPaletteOpen]);
-
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    if (!commandPaletteOpen) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [commandPaletteOpen]);
-
-  useEffect(() => {
-    if (!commandPaletteOpen) return;
-    setCommandPaletteCursor((prev) => {
-      if (filteredCommandPaletteActions.length === 0) return 0;
-      if (prev < filteredCommandPaletteActions.length) return prev;
-      return filteredCommandPaletteActions.length - 1;
-    });
-  }, [commandPaletteOpen, filteredCommandPaletteActions.length]);
 
   useEffect(() => {
     const node = timelineViewportRef.current;
@@ -5896,10 +5821,7 @@ export function App() {
         cursor={commandPaletteCursor}
         actions={filteredCommandPaletteActions}
         onClose={closeCommandPalette}
-        onQueryChange={(value) => {
-          setCommandPaletteQuery(value);
-          setCommandPaletteCursor(0);
-        }}
+        onQueryChange={onCommandPaletteQueryChange}
         onKeyDown={onCommandPaletteKeyDown}
         onHoverAction={setCommandPaletteCursor}
         onRunAction={runCommandPaletteAction}
