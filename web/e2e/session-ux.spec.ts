@@ -20,6 +20,7 @@ type MockOptions = {
   streamFailAttempts?: number;
   runtimeCommandEvents?: boolean;
   assistantDeltaEvents?: number;
+  ignoreStreamAfterCursor?: boolean;
 };
 
 function buildLongAssistantReply(marker: string): string {
@@ -55,6 +56,7 @@ async function mockSessionApi(
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
+  const ignoreStreamAfterCursor = options?.ignoreStreamAfterCursor ?? false;
 
   let sessionOneStreamAttempts = 0;
   let firstTurnDelayApplied = false;
@@ -1068,7 +1070,11 @@ async function mockSessionApi(
       await route.fulfill({
         status: 200,
         headers: { "content-type": "text/event-stream" },
-        body: buildSSEBody(sessionID, safeStreamAfter, sessionOneEvents),
+        body: buildSSEBody(
+          sessionID,
+          ignoreStreamAfterCursor ? 0 : safeStreamAfter,
+          sessionOneEvents,
+        ),
       });
       return;
     }
@@ -1694,6 +1700,37 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
   ).toHaveCount(1);
   await expect(page.getByText("Response Started")).toHaveCount(0);
   await expect(page.getByText("Server Completed")).toHaveCount(0);
+  await expect.poll(
+    () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
+  ).toBe(true);
+  await expect(page.locator(".session-alert")).toHaveCount(0);
+});
+
+test("server replay ignores cursor but timeline stays deduped", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `CURSOR_IGNORE_${Date.now()}`;
+  const harness = await mockSessionApi(page, `dedupe replay ${marker}`, marker, {
+    streamPattern: "completion-once",
+    ignoreStreamAfterCursor: true,
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`dedupe replay ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  const assistantEntry = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
+  await expect(assistantEntry).toHaveCount(1);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(assistantEntry).toHaveCount(1);
   await expect.poll(
     () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
   ).toBe(true);
