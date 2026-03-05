@@ -113,6 +113,104 @@ func TestPersistCodexNotificationNormalizesThreadTitleEvents(t *testing.T) {
 	}
 }
 
+func TestPendingRequestsClearedOnTurnTerminal(t *testing.T) {
+	srv, httpSrv, _, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_pending_terminal"
+	upsertCodexTestSession(t, srv, sessionID)
+	srv.putCodexPendingRequest(codexPendingRequest{
+		SessionID:  sessionID,
+		RequestID:  "req_terminal_1",
+		HostID:     "host_1",
+		Method:     "approval/request",
+		RawID:      json.RawMessage(`"req_terminal_1"`),
+		Params:     json.RawMessage(`{"thread_id":"session_pending_terminal"}`),
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	pending := srv.listCodexPendingRequests(sessionID)
+	if len(pending) != 1 {
+		t.Fatalf("expected pending request before terminal event, got=%d", len(pending))
+	}
+
+	params := json.RawMessage(`{"thread_id":"session_pending_terminal","turn":{"id":"turn_term_1","thread_id":"session_pending_terminal"}}`)
+	srv.persistCodexNotification("host_1", "turn/completed", params, time.Now().UTC())
+
+	pending = srv.listCodexPendingRequests(sessionID)
+	if len(pending) != 0 {
+		t.Fatalf("expected pending requests to be cleared on terminal event, got=%d", len(pending))
+	}
+}
+
+func TestListCodexPendingRequestsPrunesExpiredRecords(t *testing.T) {
+	srv, httpSrv, _, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_pending_ttl"
+	srv.mu.Lock()
+	srv.codexPending[sessionID] = map[string]codexPendingRequest{
+		"req_expired": {
+			SessionID:  sessionID,
+			RequestID:  "req_expired",
+			HostID:     "host_1",
+			Method:     "approval/request",
+			ReceivedAt: time.Now().UTC().Add(-codexPendingTTL - 2*time.Minute),
+		},
+	}
+	srv.mu.Unlock()
+
+	items := srv.listCodexPendingRequests(sessionID)
+	if len(items) != 0 {
+		t.Fatalf("expected expired pending requests to be pruned, got=%d", len(items))
+	}
+
+	srv.mu.Lock()
+	_, exists := srv.codexPending[sessionID]
+	srv.mu.Unlock()
+	if exists {
+		t.Fatalf("expected empty pending session bucket to be removed")
+	}
+}
+
+func TestExtractCodexResolvedRequestIDVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  json.RawMessage
+		want string
+	}{
+		{
+			name: "request_id root",
+			raw:  json.RawMessage(`{"request_id":"req_1"}`),
+			want: "req_1",
+		},
+		{
+			name: "requestId root",
+			raw:  json.RawMessage(`{"requestId":"req_2"}`),
+			want: "req_2",
+		},
+		{
+			name: "id root",
+			raw:  json.RawMessage(`{"id":"req_3"}`),
+			want: "req_3",
+		},
+		{
+			name: "request nested",
+			raw:  json.RawMessage(`{"request":{"id":"req_4"}}`),
+			want: "req_4",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractCodexResolvedRequestID(tc.raw)
+			if got != tc.want {
+				t.Fatalf("request id=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
+
 func upsertCodexTestSession(t *testing.T, srv *Server, sessionID string) {
 	t.Helper()
 	_, err := srv.store.UpsertSession(model.SessionRecord{

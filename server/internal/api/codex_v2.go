@@ -1002,6 +1002,9 @@ func (s *Server) persistCodexNotification(hostID string, method string, params j
 			s.deleteCodexPendingRequest(sessionID, requestID)
 		}
 	}
+	if codexMethodIsTurnTerminal(method) {
+		s.clearCodexPendingRequests(sessionID)
+	}
 }
 
 func (s *Server) persistCodexServerRequest(hostID string, req codexrpc.ServerRequest) {
@@ -1029,6 +1032,7 @@ func (s *Server) putCodexPendingRequest(record codexPendingRequest) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneCodexPendingLocked(time.Now().UTC())
 	if s.codexPending == nil {
 		s.codexPending = map[string]map[string]codexPendingRequest{}
 	}
@@ -1045,6 +1049,7 @@ func (s *Server) listCodexPendingRequests(sessionID string) []codexPendingReques
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneCodexPendingLocked(time.Now().UTC())
 	bySession := s.codexPending[sessionID]
 	if len(bySession) == 0 {
 		return nil
@@ -1064,6 +1069,7 @@ func (s *Server) getCodexPendingRequest(sessionID string, requestID string) (cod
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneCodexPendingLocked(time.Now().UTC())
 	bySession := s.codexPending[sessionID]
 	if len(bySession) == 0 {
 		return codexPendingRequest{}, false
@@ -1080,6 +1086,7 @@ func (s *Server) deleteCodexPendingRequest(sessionID string, requestID string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneCodexPendingLocked(time.Now().UTC())
 	bySession := s.codexPending[sessionID]
 	if len(bySession) == 0 {
 		return
@@ -1087,6 +1094,40 @@ func (s *Server) deleteCodexPendingRequest(sessionID string, requestID string) {
 	delete(bySession, requestID)
 	if len(bySession) == 0 {
 		delete(s.codexPending, sessionID)
+	}
+}
+
+func (s *Server) clearCodexPendingRequests(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.codexPending, sessionID)
+}
+
+func (s *Server) pruneCodexPendingLocked(now time.Time) {
+	if s.codexPending == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cutoff := now.Add(-codexPendingTTL)
+	for sessionID, bySession := range s.codexPending {
+		for requestID, record := range bySession {
+			receivedAt := record.ReceivedAt
+			if receivedAt.IsZero() {
+				receivedAt = now
+			}
+			if receivedAt.Before(cutoff) {
+				delete(bySession, requestID)
+			}
+		}
+		if len(bySession) == 0 {
+			delete(s.codexPending, sessionID)
+		}
 	}
 }
 
@@ -1104,7 +1145,32 @@ func extractCodexResolvedRequestID(params json.RawMessage) string {
 	if value := strings.TrimSpace(asString(payload["request_id"])); value != "" {
 		return value
 	}
+	if value := strings.TrimSpace(asString(payload["id"])); value != "" {
+		return value
+	}
+	requestObj, ok := payload["request"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if value := strings.TrimSpace(asString(requestObj["id"])); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(asString(requestObj["requestId"])); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(asString(requestObj["request_id"])); value != "" {
+		return value
+	}
 	return ""
+}
+
+func codexMethodIsTurnTerminal(method string) bool {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "turn/completed", "turn/failed", "turn/canceled", "turn/interrupted":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractCodexNotificationSessionID(method string, params json.RawMessage) string {

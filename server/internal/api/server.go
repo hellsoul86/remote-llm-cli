@@ -77,6 +77,7 @@ const (
 	sessionStreamBatch    = 1000
 	codexNotifDedupTTL    = 8 * time.Minute
 	codexNotifDedupMax    = 2048
+	codexPendingTTL       = 45 * time.Minute
 	auditQueueSize        = 4096
 	auditBatchSize        = 64
 	auditFlushInterval    = 400 * time.Millisecond
