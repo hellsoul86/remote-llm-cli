@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 type MockHarness = {
   runRequests: () => number;
   sessionOneStreamAfterValues: () => number[];
+  sessionOneSSECalls: () => number;
   imageUploads: () => number;
   lastRunRequest: () => Record<string, unknown> | null;
   lastPlatformLoginRequest: () => Record<string, unknown> | null;
@@ -59,6 +60,7 @@ async function mockSessionApi(
   const ignoreStreamAfterCursor = options?.ignoreStreamAfterCursor ?? false;
 
   let sessionOneStreamAttempts = 0;
+  let sessionOneSSECalls = 0;
   let firstTurnDelayApplied = false;
   let backgroundCompletionEmitted = false;
   let sessionStartCounter = 0;
@@ -1057,6 +1059,7 @@ async function mockSessionApi(
       : 0;
 
     if (sessionID === "session_cli_1") {
+      sessionOneSSECalls += 1;
       sessionOneStreamAfterValues.push(safeStreamAfter);
       if (sessionOneStreamAttempts < streamFailAttempts) {
         sessionOneStreamAttempts += 1;
@@ -1099,12 +1102,198 @@ async function mockSessionApi(
   return {
     runRequests: () => runReqCount,
     sessionOneStreamAfterValues: () => [...sessionOneStreamAfterValues],
+    sessionOneSSECalls: () => sessionOneSSECalls,
     imageUploads: () => imageUploadCount,
     lastRunRequest: () => lastRunRequest,
     lastPlatformLoginRequest: () => lastPlatformLoginRequest,
     lastPlatformMCPRequest: () => lastPlatformMCPRequest,
     lastPlatformCloudRequest: () => lastPlatformCloudRequest,
   };
+}
+
+async function installMockSessionWebSocket(
+  page: Page,
+  opts: { sessionID: string; marker: string },
+): Promise<void> {
+  await page.addInitScript((config: { sessionID: string; marker: string }) => {
+    const globalAny = window as unknown as {
+      __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+      WebSocket: typeof WebSocket;
+    };
+    const emitted = new Set<string>();
+    const nowISO = () => new Date().toISOString();
+
+    class SessionMockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      url: string;
+      readyState = SessionMockWebSocket.CONNECTING;
+      bufferedAmount = 0;
+      extensions = "";
+      protocol = "";
+      binaryType: BinaryType = "blob";
+      onopen: ((ev: Event) => void) | null = null;
+      onclose: ((ev: CloseEvent) => void) | null = null;
+      onerror: ((ev: Event) => void) | null = null;
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+
+      constructor(url: string | URL) {
+        this.url = typeof url === "string" ? url : String(url);
+        if (!globalAny.__mockWsState) {
+          globalAny.__mockWsState = { calls: [] };
+        }
+        const parsed = new URL(this.url, window.location.href);
+        const parts = parsed.pathname.split("/");
+        const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+        const rawAfter = parsed.searchParams.get("after") ?? "0";
+        const after = Number.parseInt(rawAfter, 10);
+        const safeAfter = Number.isFinite(after) && after > 0 ? after : 0;
+        globalAny.__mockWsState.calls.push({ sessionID, after: safeAfter });
+
+        window.setTimeout(() => {
+          if (this.readyState !== SessionMockWebSocket.CONNECTING) return;
+          this.readyState = SessionMockWebSocket.OPEN;
+          this.onopen?.(new Event("open"));
+
+          const send = (frame: Record<string, unknown>) => {
+            if (this.readyState !== SessionMockWebSocket.OPEN) return;
+            this.onmessage?.(
+              new MessageEvent("message", { data: JSON.stringify(frame) }),
+            );
+          };
+
+          const readyCursor = safeAfter;
+          const shouldReplay =
+            sessionID === config.sessionID &&
+            safeAfter <= 0 &&
+            !emitted.has(sessionID);
+          if (shouldReplay) {
+            emitted.add(sessionID);
+            const runID = "turn_ws_mock_1";
+            const chunk =
+              '{"type":"thread.started","thread_id":"ws_mock"}\n' +
+              '{"type":"turn.started"}\n' +
+              JSON.stringify({
+                type: "item.completed",
+                item: { type: "agent_message", text: `ws replay ${config.marker}` },
+              }) +
+              "\n";
+            const frames: Array<Record<string, unknown>> = [
+              {
+                type: "session.event",
+                id: "1",
+                event: {
+                  seq: 1,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "run.started",
+                  payload: { turn_id: runID },
+                  created_at: nowISO(),
+                },
+              },
+              {
+                type: "session.event",
+                id: "2",
+                event: {
+                  seq: 2,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "assistant.delta",
+                  payload: { chunk },
+                  created_at: nowISO(),
+                },
+              },
+              {
+                type: "session.event",
+                id: "3",
+                event: {
+                  seq: 3,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "assistant.completed",
+                  payload: { turn_id: runID },
+                  created_at: nowISO(),
+                },
+              },
+              {
+                type: "session.event",
+                id: "4",
+                event: {
+                  seq: 4,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "run.completed",
+                  payload: { turn_id: runID },
+                  created_at: nowISO(),
+                },
+              },
+              {
+                type: "session.ready",
+                session_id: config.sessionID,
+                cursor: 4,
+              },
+            ];
+            let index = 0;
+            const pump = () => {
+              if (index >= frames.length) {
+                return;
+              }
+              send(frames[index] ?? {});
+              index += 1;
+              if (index < frames.length) {
+                window.setTimeout(pump, 8);
+              }
+            };
+            window.setTimeout(pump, 8);
+            return;
+          }
+
+          send({
+            type: "session.ready",
+            session_id: sessionID,
+            cursor: readyCursor,
+          });
+        }, 0);
+      }
+
+      send(_data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+        // no-op for test transport
+      }
+
+      close(code?: number, reason?: string): void {
+        if (this.readyState === SessionMockWebSocket.CLOSED) return;
+        this.readyState = SessionMockWebSocket.CLOSED;
+        this.onclose?.(
+          new CloseEvent("close", {
+            code: code ?? 1000,
+            reason: reason ?? "mock-closed",
+            wasClean: true,
+          }),
+        );
+      }
+
+      addEventListener(): void {
+        // on* handlers are sufficient for this test path
+      }
+
+      removeEventListener(): void {
+        // on* handlers are sufficient for this test path
+      }
+
+      dispatchEvent(): boolean {
+        return true;
+      }
+    }
+
+    // Use mocked WebSocket transport for deterministic stream tests.
+    globalAny.WebSocket =
+      SessionMockWebSocket as unknown as typeof WebSocket;
+    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      SessionMockWebSocket as unknown as typeof WebSocket;
+  }, opts);
 }
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
@@ -1735,6 +1924,46 @@ test("server replay ignores cursor but timeline stays deduped", async ({
     () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
   ).toBe(true);
   await expect(page.locator(".session-alert")).toHaveCount(0);
+});
+
+test("websocket stream replay renders once without SSE fallback", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `WS_REPLAY_${Date.now()}`;
+  await installMockSessionWebSocket(page, {
+    sessionID: "session_cli_1",
+    marker,
+  });
+  const harness = await mockSessionApi(page, `ws replay ${marker}`, marker, {
+    streamPattern: "ready-only",
+  });
+  await unlock(page);
+
+  const assistantEntry = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
+  await expect(assistantEntry).toHaveCount(1);
+  await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(assistantEntry).toHaveCount(1);
+  await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as unknown as {
+            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+          }
+        ).__mockWsState;
+        return Array.isArray(state?.calls)
+          ? state.calls.some((item) => item.sessionID === "session_cli_1" && item.after > 0)
+          : false;
+      }),
+    )
+    .toBe(true);
 });
 
 test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
