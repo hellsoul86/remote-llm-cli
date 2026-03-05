@@ -4,6 +4,11 @@
 
 Align WebCLI with the real Codex CLI user experience, while keeping controller architecture (`job + SSE`) internal and invisible to users.
 
+Execution tracking:
+
+- UX contract: `docs/codex-native-ux-contract-v1.md`
+- Epic: #137
+
 This document defines:
 
 - what Codex CLI can do (baseline),

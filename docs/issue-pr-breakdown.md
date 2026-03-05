@@ -68,3 +68,33 @@ Current merge order:
 - `feat(issue-xxx): ...`
 - `fix(issue-xxx): ...`
 - `chore(issue-xxx): ...`
+
+## Native Parity Wave (2026-03)
+
+Epic:
+
+- [#137](https://github.com/hellsoul86/remote-llm-cli/issues/137) codex native UX parity v1
+
+Issue queue:
+
+1. [#138](https://github.com/hellsoul86/remote-llm-cli/issues/138) session state contract: server truth + local cache boundaries
+2. [#139](https://github.com/hellsoul86/remote-llm-cli/issues/139) stream pipeline: dedupe/order/reconnect/cursor resume
+3. [#140](https://github.com/hellsoul86/remote-llm-cli/issues/140) timeline UX: content-only rendering + scroll pin behavior
+4. [#141](https://github.com/hellsoul86/remote-llm-cli/issues/141) sidebar IA: server/project/session operations parity
+5. [#142](https://github.com/hellsoul86/remote-llm-cli/issues/142) background sync: inactive session completion notifications
+6. [#143](https://github.com/hellsoul86/remote-llm-cli/issues/143) composer parity: model discovery + permission/image controls
+7. [#144](https://github.com/hellsoul86/remote-llm-cli/issues/144) session title lifecycle: derive/update/persist consistency
+8. [#145](https://github.com/hellsoul86/remote-llm-cli/issues/145) parity e2e suite: mock/live scenario matrix
+9. [#146](https://github.com/hellsoul86/remote-llm-cli/issues/146) release gate: staging soak checklist for native parity
+
+Planned PR order:
+
+1. PR-A -> #138
+2. PR-B -> #139
+3. PR-C -> #140
+4. PR-D -> #141
+5. PR-E -> #142
+6. PR-F -> #143
+7. PR-G -> #144
+8. PR-H -> #145
+9. PR-I -> #146
