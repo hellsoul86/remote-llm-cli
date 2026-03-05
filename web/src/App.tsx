@@ -39,7 +39,6 @@ import {
   upsertHost,
   upsertProject,
   type Host,
-  type SessionEventRecord,
   type SessionRecord,
   type SessionStreamFrame,
   type RunJobEvent,
@@ -114,17 +113,17 @@ import {
 import { runSessionStreamLoop } from "./features/session/stream-loop";
 import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
 import {
-  buildCodexRuntimeCardFromEvent,
   extractThreadIDFromCodexSessionResponse,
   extractTurnIDFromPayload,
-  parseCodexEventsIncremental,
   parseCodexAssistantTextFromStdout,
   parseCodexSessionTitleFromStdout,
 } from "./features/session/codex-parsing";
+import { decodeSessionEventRecord } from "./features/session/session-events";
 import {
-  decodeSessionEventRecord,
-  normalizeSessionEvent,
-} from "./features/session/session-events";
+  createSessionRunEventHandlers,
+  ensureSessionRunState,
+  surfaceRuntimeCardsFromRunState,
+} from "./features/session/session-run-events";
 import type {
   SessionRunStreamState,
   SessionStreamHealthState,
@@ -137,7 +136,6 @@ import {
   jobHasTargetFailures,
   lastUserPromptFromTimeline,
   sessionCompletionCopy,
-  sessionEventHostLabel,
   summarizeTargetFailures,
 } from "./features/session/runtime-utils";
 import {
@@ -158,11 +156,6 @@ import {
   resolveProjectTitle,
 } from "./features/session/utils";
 type AuthPhase = "checking" | "locked" | "ready";
-
-type SessionEventHandleOptions = {
-  surfaceCompletions?: boolean;
-  surfaceLifecycle?: boolean;
-};
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") return null;
@@ -1274,83 +1267,6 @@ export function App() {
     );
   }
 
-  function sessionActiveRunID(sessionID: string): string {
-    const normalizedSessionID = sessionID.trim();
-    if (!normalizedSessionID) return "";
-    for (const workspace of workspaces) {
-      for (const thread of workspace.sessions) {
-        if (thread.id !== normalizedSessionID) continue;
-        return thread.activeJobID.trim();
-      }
-    }
-    return "";
-  }
-
-  function ensureSessionRunState(
-    sessionID: string,
-    runID: string,
-  ): SessionRunStreamState {
-    const existing = sessionRunStateRef.current.get(sessionID);
-    if (existing && existing.runID === runID) return existing;
-    const next: SessionRunStreamState = {
-      runID,
-      stdout: "",
-      streamSeen: false,
-      assistantFinalized: false,
-      failureHints: [],
-      eventParseOffset: 0,
-      surfacedEventKeys: new Set(),
-    };
-    sessionRunStateRef.current.set(sessionID, next);
-    return next;
-  }
-
-  function surfaceRuntimeCardsFromRunState(
-    sessionID: string,
-    runID: string,
-    state: SessionRunStreamState,
-    surface: boolean,
-  ) {
-    const parsed = parseCodexEventsIncremental(state.stdout, state.eventParseOffset);
-    state.eventParseOffset = parsed.nextOffset;
-    if (parsed.events.length === 0) return;
-    for (const event of parsed.events) {
-      const card = buildCodexRuntimeCardFromEvent(event, runID);
-      if (!card) continue;
-      if (state.surfacedEventKeys.has(card.key)) continue;
-      state.surfacedEventKeys.add(card.key);
-      if (!surface) continue;
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: card.state,
-          title: card.title,
-          body: card.body,
-        },
-        sessionID,
-      );
-    }
-  }
-
-  function markSessionDone(
-    sessionID: string,
-    runID: string,
-    status: "succeeded" | "failed" | "canceled",
-    options?: { surface?: boolean },
-  ): boolean {
-    if (!runID || !markRunCompleted(runID)) return false;
-    if (!options?.surface) return false;
-    const sessionTitle = threadTitleMapRef.current.get(sessionID) ?? "Session";
-    const completion = sessionCompletionCopy(status);
-    notifySessionDone(`${sessionTitle} ${completion.suffix}`, completion.body);
-    pushSessionAlert({
-      threadID: sessionID,
-      title: `${sessionTitle} ${completion.suffix}`,
-      body: completion.body,
-    });
-    return true;
-  }
-
   function stopSessionStream(
     sessionID: string,
     options?: { preserveRunState?: boolean; preserveHealth?: boolean },
@@ -1378,269 +1294,24 @@ export function App() {
     clearAllSessionStreamHealth();
   }
 
-  async function finalizeStreamCompleted(
-    sessionID: string,
-    runID: string,
-    completedAt?: string,
-    options?: { surfaceCompletions?: boolean },
-  ) {
-    if (runID && hasCompletedRun(runID)) {
-      return;
-    }
-    const state = sessionRunStateRef.current.get(sessionID);
-    let assistantText = state
-      ? parseCodexAssistantTextFromStdout(state.stdout, false)
-      : "";
-    let failureSummary = state?.failureHints.join("\n") ?? "";
-    let failed = failureSummary.trim() !== "";
-
-    if (failed) {
-      if (state?.streamSeen) {
-        finalizeAssistantStreamEntry(sessionID, "error");
-      }
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Failed",
-          body: failureSummary || "Session failed.",
-        },
-        sessionID,
-      );
-      setThreadJobState(sessionID, "", "failed");
-      const surfaced = markSessionDone(sessionID, runID, "failed", {
-        surface:
-          options?.surfaceCompletions !== false &&
-          shouldSurfaceCompletion(completedAt),
-      });
-      if (surfaced && sessionID !== activeThreadIDRef.current) {
-        setThreadUnread(sessionID, true);
-      }
-      sessionRunStateRef.current.delete(sessionID);
-      return;
-    }
-
-    setThreadJobState(sessionID, "", "succeeded");
-    if (assistantText.trim()) {
-      if (state?.streamSeen && !state.assistantFinalized) {
-        finalizeAssistantStreamEntry(
-          sessionID,
-          "success",
-          clipStreamText(assistantText),
-        );
-      } else if (!state?.assistantFinalized) {
-        addTimelineEntry(
-          {
-            kind: "assistant",
-            state: "success",
-            title: "Assistant",
-            body: assistantText,
-          },
-          sessionID,
-        );
-      }
-    } else if (state?.streamSeen && !state?.assistantFinalized) {
-      finalizeAssistantStreamEntry(
-        sessionID,
-        "success",
-        EMPTY_ASSISTANT_FALLBACK,
-      );
-    }
-    const surfaced = markSessionDone(sessionID, runID, "succeeded", {
-      surface:
-        options?.surfaceCompletions !== false &&
-        shouldSurfaceCompletion(completedAt),
-    });
-    if (surfaced && sessionID !== activeThreadIDRef.current) {
-      setThreadUnread(sessionID, true);
-    }
-    sessionRunStateRef.current.delete(sessionID);
-  }
-
-  async function handleSessionEventRecord(
-    sessionID: string,
-    event: SessionEventRecord,
-    options?: SessionEventHandleOptions,
-  ) {
-    const normalized = normalizeSessionEvent(event);
-    if (!normalized) return;
-    let { eventType, payload, runID } = normalized;
-    if (!runID) {
-      runID = sessionActiveRunID(sessionID);
-    }
-    const surfaceLifecycle = options?.surfaceLifecycle !== false;
-
-    switch (eventType) {
-      case "session.title.updated": {
-        const title =
-          typeof payload.title === "string" ? payload.title.trim() : "";
-        if (title) {
-          setThreadTitle(sessionID, title);
-        }
-        return;
-      }
-      case "run.started": {
-        const id = runID || `run_${Date.now()}`;
-        ensureSessionRunState(sessionID, id);
-        setThreadJobState(sessionID, id, "running");
-        if (sessionID === activeThreadIDRef.current) {
-          setActiveJobID(id);
-        }
-        return;
-      }
-      case "target.started": {
-        return;
-      }
-      case "assistant.delta": {
-        if (!runID) return;
-        const state = ensureSessionRunState(sessionID, runID);
-        const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
-        if (!chunk.trim()) return;
-        appendCodexStdoutChunk(state, chunk);
-        surfaceRuntimeCardsFromRunState(
-          sessionID,
-          runID,
-          state,
-          surfaceLifecycle,
-        );
-        const nextTitle = parseCodexSessionTitleFromStdout(state.stdout);
-        if (nextTitle) {
-          setThreadTitle(sessionID, nextTitle);
-        }
-        const contentOnly = parseCodexAssistantTextFromStdout(
-          state.stdout,
-          false,
-        );
-        if (contentOnly.trim()) {
-          state.streamSeen = true;
-          upsertAssistantStreamEntry(sessionID, clipStreamText(contentOnly));
-        } else if (
-          state.stdout.includes('"type":"turn.started"') ||
-          state.stdout.includes('"type":"thread.started"')
-        ) {
-          state.streamSeen = true;
-        }
-        return;
-      }
-      case "assistant.completed": {
-        if (!runID) return;
-        const state = ensureSessionRunState(sessionID, runID);
-        const contentOnly = parseCodexAssistantTextFromStdout(
-          state.stdout,
-          false,
-        );
-        if (contentOnly.trim()) {
-          state.streamSeen = true;
-          finalizeAssistantStreamEntry(
-            sessionID,
-            "success",
-            clipStreamText(contentOnly),
-          );
-          state.assistantFinalized = true;
-          return;
-        }
-        // Keep stream entry in running state when content is unavailable here.
-        // run.completed/job.succeeded handler will perform job-response fallback.
-        state.assistantFinalized = false;
-        return;
-      }
-      case "target.done": {
-        if (!runID) return;
-        const state = ensureSessionRunState(sessionID, runID);
-        const status =
-          typeof payload.status === "string" ? payload.status.trim() : "";
-        const host = sessionEventHostLabel(payload);
-        const exitCode = payload.exit_code;
-        const codeText =
-          typeof exitCode === "number" ? ` exit=${exitCode}` : "";
-        const errorText =
-          typeof payload.error === "string" && payload.error.trim()
-            ? ` error=${payload.error.trim()}`
-            : "";
-        if (status && status !== "ok") {
-          state.failureHints.push(`${host} failed${codeText}${errorText}`);
-        }
-        return;
-      }
-      case "job.cancel_requested": {
-        return;
-      }
-      case "run.failed":
-      case "job.failed": {
-        const id = runID || `run_${Date.now()}`;
-        const state = ensureSessionRunState(sessionID, id);
-        const errorRecord = asRecord(payload.error);
-        const errText =
-          typeof payload.error === "string" && payload.error.trim()
-            ? payload.error.trim()
-            : typeof errorRecord?.message === "string" &&
-                errorRecord.message.trim()
-              ? errorRecord.message.trim()
-            : "Session failed.";
-        if (state.streamSeen) {
-          finalizeAssistantStreamEntry(sessionID, "error");
-        }
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Failed",
-            body: errText,
-          },
-          sessionID,
-        );
-        setThreadJobState(sessionID, "", "failed");
-        const surfaced = markSessionDone(sessionID, id, "failed", {
-          surface:
-            options?.surfaceCompletions !== false &&
-            shouldSurfaceCompletion(event.created_at),
-        });
-        if (surfaced && sessionID !== activeThreadIDRef.current) {
-          setThreadUnread(sessionID, true);
-        }
-        sessionRunStateRef.current.delete(sessionID);
-        return;
-      }
-      case "run.canceled":
-      case "job.canceled": {
-        const id = runID || `run_${Date.now()}`;
-        const state = ensureSessionRunState(sessionID, id);
-        if (state.streamSeen) {
-          finalizeAssistantStreamEntry(sessionID, "error");
-        }
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Interrupted",
-            body: "Session interrupted.",
-          },
-          sessionID,
-        );
-        setThreadJobState(sessionID, "", "canceled");
-        const surfaced = markSessionDone(sessionID, id, "canceled", {
-          surface:
-            options?.surfaceCompletions !== false &&
-            shouldSurfaceCompletion(event.created_at),
-        });
-        if (surfaced && sessionID !== activeThreadIDRef.current) {
-          setThreadUnread(sessionID, true);
-        }
-        sessionRunStateRef.current.delete(sessionID);
-        return;
-      }
-      case "run.completed":
-      case "job.succeeded": {
-        if (!runID) return;
-        await finalizeStreamCompleted(sessionID, runID, event.created_at, {
-          surfaceCompletions: options?.surfaceCompletions !== false,
-        });
-        return;
-      }
-      default:
-        return;
-    }
-  }
+  const { handleSessionEventRecord } = createSessionRunEventHandlers({
+    workspaces,
+    sessionRunStateRef,
+    activeThreadIDRef,
+    threadTitleMapRef,
+    setThreadJobState,
+    setThreadUnread,
+    setThreadTitle,
+    setActiveJobID,
+    addTimelineEntry,
+    upsertAssistantStreamEntry,
+    finalizeAssistantStreamEntry,
+    notifySessionDone,
+    pushSessionAlert,
+    markRunCompleted,
+    hasCompletedRun,
+    shouldSurfaceCompletion,
+  });
 
   function handleSessionStreamFrame(
     sessionID: string,
@@ -2083,7 +1754,11 @@ export function App() {
             item.threadID === activeThreadID;
           const fallbackRunState =
             !preferSessionStream && job.runtime === "codex"
-              ? ensureSessionRunState(item.threadID, item.jobID)
+              ? ensureSessionRunState(
+                  sessionRunStateRef,
+                  item.threadID,
+                  item.jobID,
+                )
               : null;
           for (const event of events) {
             if (
@@ -2098,6 +1773,7 @@ export function App() {
           }
           if (!alreadyCompleted && showLiveStream && fallbackRunState) {
             surfaceRuntimeCardsFromRunState(
+              addTimelineEntry,
               item.threadID,
               item.jobID,
               fallbackRunState,
@@ -2883,7 +2559,7 @@ export function App() {
       });
       const turnID = extractTurnIDFromPayload(turnResp);
       const runID = turnID || `run_${Date.now()}`;
-      ensureSessionRunState(sessionID, runID);
+      ensureSessionRunState(sessionRunStateRef, sessionID, runID);
       setThreadJobState(sessionID, runID, "running");
       setActiveJobThreadID(sessionID);
       if (sessionID === activeThreadIDRef.current) {
