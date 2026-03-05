@@ -96,6 +96,7 @@ Default API URL is `http://localhost:8080`.
 - Go TUI CLI for terminal-first operations (`server/cmd/remote-llm-cli`)
 - Web console MVP (health, runtime list, host list/add)
 - Operational runbook: [`docs/operations-runbook.md`](docs/operations-runbook.md)
+- Codex session v2 contract: [`docs/codex-v2-session-contract.md`](docs/codex-v2-session-contract.md)
 - Merge-triggered deploy workflow (API via SSH + web via Cloudflare Pages): [`docs/deployment-github-actions.md`](docs/deployment-github-actions.md)
 
 ## TUI controls
