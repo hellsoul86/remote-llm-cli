@@ -40,7 +40,6 @@ import {
   upsertProject,
   type Host,
   type SessionRecord,
-  type SessionStreamFrame,
   type RunJobEvent,
   type RunJobRecord,
   type CodexPlatformResult,
@@ -110,7 +109,6 @@ import {
   filterSessionTreeHosts,
   buildSessionTreeHosts,
 } from "./features/session/tree";
-import { runSessionStreamLoop } from "./features/session/stream-loop";
 import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
 import {
   extractThreadIDFromCodexSessionResponse,
@@ -118,12 +116,15 @@ import {
   parseCodexAssistantTextFromStdout,
   parseCodexSessionTitleFromStdout,
 } from "./features/session/codex-parsing";
-import { decodeSessionEventRecord } from "./features/session/session-events";
 import {
   createSessionRunEventHandlers,
   ensureSessionRunState,
   surfaceRuntimeCardsFromRunState,
 } from "./features/session/session-run-events";
+import {
+  createSessionStreamController,
+  type SessionStreamRuntimeState,
+} from "./features/session/session-stream-controller";
 import type {
   SessionRunStreamState,
   SessionStreamHealthState,
@@ -156,11 +157,6 @@ import {
   resolveProjectTitle,
 } from "./features/session/utils";
 type AuthPhase = "checking" | "locked" | "ready";
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object") return null;
-  return value as Record<string, unknown>;
-}
 
 function isLocalDraftSessionID(sessionID: string): boolean {
   return /^session_\d+_\d+$/.test(sessionID.trim());
@@ -390,17 +386,9 @@ export function App() {
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
   const jobNoTextFinalizeRetriesRef = useRef<Map<string, number>>(new Map());
-  const sessionStreamStateRef = useRef<
-    Map<
-      string,
-      {
-        controller: AbortController;
-        ready: boolean;
-        lastEventAt: number;
-        suppressReplaySurface: boolean;
-      }
-    >
-  >(new Map());
+  const sessionStreamStateRef = useRef<Map<string, SessionStreamRuntimeState>>(
+    new Map(),
+  );
   const sessionEventQueueRef = useRef<Map<string, Promise<void>>>(new Map());
   const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(
     new Map(),
@@ -1267,33 +1255,6 @@ export function App() {
     );
   }
 
-  function stopSessionStream(
-    sessionID: string,
-    options?: { preserveRunState?: boolean; preserveHealth?: boolean },
-  ) {
-    const state = sessionStreamStateRef.current.get(sessionID);
-    if (!state) return;
-    state.controller.abort();
-    sessionStreamStateRef.current.delete(sessionID);
-    sessionEventQueueRef.current.delete(sessionID);
-    if (!options?.preserveRunState) {
-      sessionRunStateRef.current.delete(sessionID);
-    }
-    if (!options?.preserveHealth) {
-      clearSessionStreamHealth(sessionID);
-    }
-  }
-
-  function stopAllSessionStreams() {
-    for (const state of sessionStreamStateRef.current.values()) {
-      state.controller.abort();
-    }
-    sessionStreamStateRef.current.clear();
-    sessionEventQueueRef.current.clear();
-    sessionRunStateRef.current.clear();
-    clearAllSessionStreamHealth();
-  }
-
   const { handleSessionEventRecord } = createSessionRunEventHandlers({
     workspaces,
     sessionRunStateRef,
@@ -1312,142 +1273,19 @@ export function App() {
     hasCompletedRun,
     shouldSurfaceCompletion,
   });
-
-  function handleSessionStreamFrame(
-    sessionID: string,
-    frame: SessionStreamFrame,
-  ) {
-    const state = sessionStreamStateRef.current.get(sessionID);
-    if (!state) return;
-    const receivedAt = Date.now();
-    state.lastEventAt = receivedAt;
-
-    if (frame.event === "session.ready") {
-      state.ready = true;
-      state.suppressReplaySurface = false;
-      updateSessionStreamHealth(sessionID, "live", {
-        lastEventAt: receivedAt,
-        lastError: "",
-      });
-      const data = asRecord(frame.data);
-      const cursor = data ? Number(data.cursor) : NaN;
-      if (Number.isFinite(cursor)) {
-        setSessionEventCursor(sessionID, cursor);
-      }
-      return;
-    }
-
-    if (frame.event === "session.reset") {
-      state.ready = false;
-      updateSessionStreamHealth(sessionID, "reconnecting", {
-        lastEventAt: receivedAt,
-        throttleMS: 0,
-      });
-      const data = asRecord(frame.data);
-      const nextAfter = data ? Number(data.next_after) : NaN;
-      state.suppressReplaySurface = !(Number.isFinite(nextAfter) && nextAfter > 0);
-      if (Number.isFinite(nextAfter)) {
-        setSessionEventCursor(sessionID, nextAfter);
-      }
-      return;
-    }
-
-    if (frame.event === "heartbeat") {
-      updateSessionStreamHealth(sessionID, "live", {
-        lastEventAt: receivedAt,
-      });
-      return;
-    }
-
-    if (frame.event !== "session.event") {
-      return;
-    }
-
-    updateSessionStreamHealth(sessionID, "live", {
-      lastEventAt: receivedAt,
-      lastError: "",
+  const { stopSessionStream, stopAllSessionStreams, startSessionStream } =
+    createSessionStreamController({
+      sessionStreamStateRef,
+      sessionEventQueueRef,
+      sessionRunStateRef,
+      runningSessionIDsRef,
+      sessionEventCursorRef,
+      setSessionEventCursor,
+      updateSessionStreamHealth,
+      clearSessionStreamHealth,
+      clearAllSessionStreamHealth,
+      handleSessionEventRecord,
     });
-    const event = decodeSessionEventRecord(frame.data);
-    if (!event) return;
-
-    const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
-    if (event.seq <= current) return;
-    setSessionEventCursor(sessionID, event.seq);
-    const surfaceByReplay = !state.suppressReplaySurface;
-    const surfaceCompletions = state.ready || surfaceByReplay;
-    const surfaceLifecycle = state.ready || surfaceByReplay;
-    const previousQueue =
-      sessionEventQueueRef.current.get(sessionID) ?? Promise.resolve();
-    const nextQueue = previousQueue
-      .catch(() => undefined)
-      .then(() =>
-        handleSessionEventRecord(sessionID, event, {
-          surfaceCompletions,
-          surfaceLifecycle,
-        }),
-      )
-      .catch(() => undefined);
-    sessionEventQueueRef.current.set(sessionID, nextQueue);
-    void nextQueue.finally(() => {
-      const currentQueue = sessionEventQueueRef.current.get(sessionID);
-      if (currentQueue !== nextQueue) return;
-      sessionEventQueueRef.current.delete(sessionID);
-    });
-  }
-
-  function startSessionStream(sessionID: string, authToken: string) {
-    const trimmedSessionID = sessionID.trim();
-    if (!trimmedSessionID) return;
-    if (sessionStreamStateRef.current.has(trimmedSessionID)) return;
-
-    const controller = new AbortController();
-    sessionStreamStateRef.current.set(trimmedSessionID, {
-      controller,
-      ready: false,
-      lastEventAt: 0,
-      suppressReplaySurface: true,
-    });
-    updateSessionStreamHealth(trimmedSessionID, "connecting", {
-      retries: 0,
-      lastEventAt: 0,
-      lastError: "",
-      throttleMS: 0,
-    });
-    void runSessionStreamLoop({
-      authToken,
-      sessionID: trimmedSessionID,
-      controller,
-      getAfter: () => sessionEventCursorRef.current.get(trimmedSessionID) ?? 0,
-      setSuppressReplaySurface: (value) => {
-        const streamState = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (streamState && streamState.controller === controller) {
-          streamState.suppressReplaySurface = value;
-        }
-      },
-      onFrame: (frame) => handleSessionStreamFrame(trimmedSessionID, frame),
-      isRunningSession: () => runningSessionIDsRef.current.has(trimmedSessionID),
-      onState: (state, options) => {
-        const active = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (!active || active.controller !== controller) return;
-        updateSessionStreamHealth(trimmedSessionID, state, {
-          retries: options?.retries,
-          lastError: options?.lastError,
-          throttleMS: 0,
-        });
-      },
-      onBeforeBackoff: () => {
-        const active = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (!active || active.controller !== controller) return;
-        active.ready = false;
-      },
-      onFinalize: () => {
-        const active = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (!active || active.controller !== controller) return;
-        sessionStreamStateRef.current.delete(trimmedSessionID);
-        sessionEventQueueRef.current.delete(trimmedSessionID);
-      },
-    });
-  }
 
   async function loadWorkspace(authToken: string) {
     const refreshStartedAtMS = Date.now();
