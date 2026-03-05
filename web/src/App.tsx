@@ -48,6 +48,7 @@ import { useCommandPaletteController } from "./features/session/use-command-pale
 import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
 import { useSessionAlerts } from "./features/session/use-session-alerts";
 import { useSessionEventCursor } from "./features/session/use-session-event-cursor";
+import { useOpsPolling } from "./features/session/use-ops-polling";
 import { useSessionStreamHealth } from "./features/session/use-session-stream-health";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import {
@@ -1748,41 +1749,18 @@ export function App() {
     runtimes,
   ]);
 
-  useEffect(() => {
-    if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
-
-    let canceled = false;
-    const timer = window.setInterval(async () => {
-      try {
-        const [nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
-          listRunJobs(token, 20),
-          listRuns(token, 20),
-          listAudit(token, 80),
-          getMetrics(token),
-        ]);
-        if (canceled) return;
-        setJobs(nextJobs);
-        setRuns(nextRuns);
-        setAuditEvents(nextAudit);
-        setMetrics(nextMetrics);
-
-        if (!activeJobID) {
-          const running = nextJobs.find((job) => isJobActive(job));
-          if (running) {
-            setActiveJobID(running.id);
-            setActiveJob(running);
-          }
-        }
-      } catch {
-        if (canceled) return;
-      }
-    }, 5000);
-
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, [authPhase, token, appMode, activeJobID]);
+  useOpsPolling({
+    authPhase,
+    token,
+    appMode,
+    activeJobID,
+    setJobs,
+    setRuns,
+    setAuditEvents,
+    setMetrics,
+    setActiveJobID,
+    setActiveJob,
+  });
 
   async function onSubmitToken(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
