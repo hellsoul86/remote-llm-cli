@@ -1,6 +1,5 @@
 import {
   FormEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
   useMemo,
   useRef,
@@ -47,6 +46,7 @@ import { createComposerImageActions } from "./features/session/composer-image-ac
 import { createSessionControlActions } from "./features/session/session-control-actions";
 import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
 import { createSessionSubmitAction } from "./features/session/session-submit-action";
+import { createSessionUIActions } from "./features/session/session-ui-actions";
 import { createWorkspaceAuthActions } from "./features/session/workspace-auth-actions";
 import {
   buildSessionCommandPaletteActions,
@@ -71,7 +71,6 @@ import {
   persistSessionTreePrefs,
 } from "./features/session/persistence";
 import {
-  type SessionAlert,
   type SessionTreeHost,
 } from "./features/session/types";
 import {
@@ -446,6 +445,53 @@ export function App() {
     return out;
   }, [sessionModelDefault, sessionModelOptions, activeThreadModelValue]);
   const hasSessionModelChoices = sessionModelChoices.length > 0;
+  const {
+    createThreadAndFocus,
+    focusComposerSoon,
+    onAddDirDraftSubmit,
+    onConfigFlagDraftSubmit,
+    onEnableFlagDraftSubmit,
+    onDisableFlagDraftSubmit,
+    openProjectComposer,
+    closeProjectComposer,
+    registerSessionButtonRef,
+    onSessionTreeKeyDown,
+    toggleHostCollapsed,
+    openSessionFromAlert,
+  } = createSessionUIActions({
+    createThread,
+    promptInputRef,
+    activeThread,
+    addDirDraft,
+    setAddDirDraft,
+    addThreadAddDir,
+    configFlagDraft,
+    setConfigFlagDraft,
+    addThreadConfigFlag,
+    enableFlagDraft,
+    setEnableFlagDraft,
+    addThreadEnableFlag,
+    disableFlagDraft,
+    setDisableFlagDraft,
+    addThreadDisableFlag,
+    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+    activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
+    hosts,
+    setProjectComposerOpen,
+    setProjectFormHostID,
+    setProjectFormPath,
+    setProjectFormTitle,
+    sessionButtonRefs,
+    visibleTreeSessionIDs,
+    treeCursorSessionID,
+    setTreeCursorSessionID,
+    activateThread,
+    setThreadPinned,
+    setCollapsedHostIDs,
+    threadWorkspaceMap,
+    switchMode,
+    dismissSessionAlert,
+  });
   const commandPaletteActions = useMemo<CommandPaletteAction[]>(() => {
     if (appMode !== "session") return [];
     return buildSessionCommandPaletteActions({
@@ -794,157 +840,12 @@ export function App() {
     );
   }, [visibleTreeSessionIDs]);
 
-  function createThreadAndFocus() {
-    createThread();
-    focusComposerSoon();
-  }
-
-  function focusComposerSoon() {
-    window.requestAnimationFrame(() => {
-      promptInputRef.current?.focus();
-    });
-  }
-
-  function onAddDirDraftSubmit() {
-    if (!activeThread) return;
-    const trimmed = addDirDraft.trim();
-    if (!trimmed) return;
-    addThreadAddDir(activeThread.id, trimmed);
-    setAddDirDraft("");
-  }
-
-  function onConfigFlagDraftSubmit() {
-    if (!activeThread) return;
-    const trimmed = configFlagDraft.trim();
-    if (!trimmed) return;
-    addThreadConfigFlag(activeThread.id, trimmed);
-    setConfigFlagDraft("");
-  }
-
-  function onEnableFlagDraftSubmit() {
-    if (!activeThread) return;
-    const trimmed = enableFlagDraft.trim();
-    if (!trimmed) return;
-    addThreadEnableFlag(activeThread.id, trimmed);
-    setEnableFlagDraft("");
-  }
-
-  function onDisableFlagDraftSubmit() {
-    if (!activeThread) return;
-    const trimmed = disableFlagDraft.trim();
-    if (!trimmed) return;
-    addThreadDisableFlag(activeThread.id, trimmed);
-    setDisableFlagDraft("");
-  }
-
-  function openProjectComposer() {
-    const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
-    const fallbackPath = activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH;
-    setProjectComposerOpen(true);
-    setProjectFormHostID(fallbackHostID);
-    setProjectFormPath(fallbackPath);
-    setProjectFormTitle("");
-  }
-
-  function closeProjectComposer() {
-    setProjectComposerOpen(false);
-    setProjectFormTitle("");
-  }
-
-  function registerSessionButtonRef(
-    sessionID: string,
-    node: HTMLButtonElement | null,
-  ) {
-    if (!sessionID) return;
-    if (node) {
-      sessionButtonRefs.current.set(sessionID, node);
-      return;
-    }
-    sessionButtonRefs.current.delete(sessionID);
-  }
-
-  function moveTreeCursor(step: number) {
-    if (visibleTreeSessionIDs.length === 0) return;
-    const currentIndex = Math.max(
-      0,
-      visibleTreeSessionIDs.findIndex((id) => id === treeCursorSessionID),
-    );
-    const nextIndex =
-      (currentIndex + step + visibleTreeSessionIDs.length) %
-      visibleTreeSessionIDs.length;
-    const nextID = visibleTreeSessionIDs[nextIndex];
-    setTreeCursorSessionID(nextID);
-    const node = sessionButtonRefs.current.get(nextID);
-    node?.focus();
-  }
-
-  function onSessionTreeKeyDown(
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-    sessionID: string,
-    pinned: boolean,
-  ) {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      moveTreeCursor(1);
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      moveTreeCursor(-1);
-      return;
-    }
-    if (event.key === "Home") {
-      event.preventDefault();
-      const nextID = visibleTreeSessionIDs[0];
-      if (!nextID) return;
-      setTreeCursorSessionID(nextID);
-      sessionButtonRefs.current.get(nextID)?.focus();
-      return;
-    }
-    if (event.key === "End") {
-      event.preventDefault();
-      const nextID = visibleTreeSessionIDs[visibleTreeSessionIDs.length - 1];
-      if (!nextID) return;
-      setTreeCursorSessionID(nextID);
-      sessionButtonRefs.current.get(nextID)?.focus();
-      return;
-    }
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      setTreeCursorSessionID(sessionID);
-      activateThread(sessionID);
-      focusComposerSoon();
-      return;
-    }
-    if (event.key.toLowerCase() === "p") {
-      event.preventDefault();
-      setThreadPinned(sessionID, !pinned);
-    }
-  }
-
-  function toggleHostCollapsed(hostID: string) {
-    setCollapsedHostIDs((prev) =>
-      prev.includes(hostID)
-        ? prev.filter((id) => id !== hostID)
-        : [...prev, hostID],
-    );
-  }
-
   function shouldSurfaceCompletion(createdAt?: string): boolean {
     const ts = createdAt?.trim();
     if (!ts) return false;
     const parsed = Date.parse(ts);
     if (!Number.isFinite(parsed)) return false;
     return parsed >= completionAlertCutoffMSRef.current;
-  }
-
-  function openSessionFromAlert(alert: SessionAlert) {
-    if (threadWorkspaceMap.has(alert.threadID)) {
-      activateThread(alert.threadID);
-      switchMode("session");
-      focusComposerSoon();
-    }
-    dismissSessionAlert(alert.id);
   }
 
   const { ensureLocalCodexHost, refreshProjectsFromSource } =
