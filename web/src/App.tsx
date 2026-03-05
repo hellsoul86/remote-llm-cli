@@ -12,14 +12,12 @@ import {
   discoverCodexModels,
   getMetrics,
   getRunJob,
-  healthz,
   listAudit,
   listHosts,
   listProjects,
   listRunJobEvents,
   listRunJobs,
   listRuns,
-  listRuntimes,
   listSessions,
   upsertHost,
   type Host,
@@ -32,7 +30,6 @@ import { useOpsDomain } from "./domains/ops";
 import {
   clearStoredToken,
   loadStoredToken,
-  storeToken,
 } from "./domains/auth-token";
 import {
   type TimelineEntry,
@@ -65,6 +62,7 @@ import { createComposerImageActions } from "./features/session/composer-image-ac
 import { createSessionControlActions } from "./features/session/session-control-actions";
 import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
 import { createSessionSubmitAction } from "./features/session/session-submit-action";
+import { createWorkspaceAuthActions } from "./features/session/workspace-auth-actions";
 import {
   buildSessionCommandPaletteActions,
   normalizeSearchText,
@@ -1275,122 +1273,32 @@ export function App() {
       handleSessionEventRecord,
     });
 
-  async function loadWorkspace(authToken: string) {
-    const refreshStartedAtMS = Date.now();
-    setIsRefreshing(true);
-    try {
-      const [
-        healthBody,
-        fetchedHosts,
-        nextRuntimes,
-        nextJobs,
-        nextRuns,
-        nextAudit,
-        nextMetrics,
-      ] = await Promise.all([
-        healthz(),
-        listHosts(authToken),
-        listRuntimes(authToken),
-        listRunJobs(authToken, 20),
-        listRuns(authToken, 20),
-        listAudit(authToken, 80),
-        getMetrics(authToken),
-      ]);
-      const nextHosts = await ensureLocalCodexHost(authToken, fetchedHosts);
-
-      setHealth(`ok ${healthBody.timestamp}`);
-      setHosts(nextHosts);
-      setRuntimes(nextRuntimes);
-      setJobs(nextJobs);
-      setRuns(nextRuns);
-      setAuditEvents(nextAudit);
-      setMetrics(nextMetrics);
-
-      const localHost = nextHosts.find(
-        (host) => host.connection_mode === "local",
-      );
-      if (localHost) {
-        setAllHosts(false);
-        setSelectedHostIDs([localHost.id]);
-      } else {
-        setSelectedHostIDs((prev) => {
-          const nextSelected = prev.filter((id) =>
-            nextHosts.some((host) => host.id === id),
-          );
-          if (nextSelected.length > 0) return nextSelected;
-          if (nextHosts.length > 0) return [nextHosts[0].id];
-          return [];
-        });
-      }
-      const codexRuntime = nextRuntimes.find(
-        (runtime) => runtime.name === "codex",
-      );
-      if (codexRuntime) {
-        setSelectedRuntime("codex");
-      } else if (
-        !nextRuntimes.some((runtime) => runtime.name === selectedRuntime)
-      ) {
-        setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
-      }
-      await refreshProjectsFromSource(
-        authToken,
-        nextHosts,
-        nextRuntimes.some((runtime) => runtime.name === "codex"),
-        workspaces.length > 0,
-      );
-
-      const running = nextJobs.find((job) => isJobActive(job));
-      if (running) {
-        setActiveJobID(running.id);
-        setActiveJob(running);
-      } else {
-        setActiveJobID("");
-        setActiveJob(null);
-      }
-      for (const job of nextJobs) {
-        if (!isJobActive(job)) continue;
-        if (!jobEventCursorRef.current.has(job.id)) {
-          jobEventCursorRef.current.set(job.id, 0);
-        }
-        if (!jobStreamSeenRef.current.has(job.id)) {
-          jobStreamSeenRef.current.set(job.id, false);
-        }
-      }
-      // Only surface completion alerts for events that happen after this sync starts.
-      completionAlertCutoffMSRef.current = refreshStartedAtMS;
-    } catch (error) {
-      setHealth(`error: ${String(error)}`);
-      throw error;
-    } finally {
-      setIsRefreshing(false);
-    }
-  }
-
-  async function unlockWorkspace(candidateToken: string) {
-    const trimmed = candidateToken.trim();
-    if (!trimmed) {
-      setAuthError("token is required");
-      setAuthPhase("locked");
-      return;
-    }
-
-    setAuthPhase("checking");
-    setAuthError("");
-
-    try {
-      await Promise.all([listRuntimes(trimmed), listHosts(trimmed)]);
-      storeToken(trimmed);
-      setToken(trimmed);
-      setTokenInput(trimmed);
-      await loadWorkspace(trimmed);
-      setAuthPhase("ready");
-    } catch (error) {
-      clearStoredToken();
-      setToken("");
-      setAuthPhase("locked");
-      setAuthError(`token validation failed: ${String(error)}`);
-    }
-  }
+  const { loadWorkspace, unlockWorkspace } = createWorkspaceAuthActions({
+    selectedRuntime,
+    workspacesLength: workspaces.length,
+    setIsRefreshing,
+    setHealth,
+    setHosts,
+    setRuntimes,
+    setJobs,
+    setRuns,
+    setAuditEvents,
+    setMetrics,
+    setAllHosts,
+    setSelectedHostIDs,
+    setSelectedRuntime,
+    setActiveJobID,
+    setActiveJob,
+    setToken,
+    setTokenInput,
+    setAuthError,
+    setAuthPhase,
+    ensureLocalCodexHost,
+    refreshProjectsFromSource,
+    jobEventCursorRef,
+    jobStreamSeenRef,
+    completionAlertCutoffMSRef,
+  });
 
   useEffect(() => {
     const cached = loadStoredToken();
