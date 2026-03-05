@@ -61,6 +61,12 @@ import {
   type TimelineState,
   useSessionDomain,
 } from "./domains/session";
+import { CommandPalette } from "./features/session/components/CommandPalette";
+import { SessionComposer } from "./features/session/components/SessionComposer";
+import { SessionHeader } from "./features/session/components/SessionHeader";
+import { SessionSidebar } from "./features/session/components/SessionSidebar";
+import { SessionTimeline } from "./features/session/components/SessionTimeline";
+import { TokenGate } from "./features/session/components/TokenGate";
 const SESSION_TREE_PREFS_KEY = "remote_llm_session_tree_prefs_v1";
 const SESSION_EVENT_CURSOR_KEY = "remote_llm_session_event_cursor_v1";
 const COMPLETED_RUNS_KEY = "remote_llm_completed_runs_v1";
@@ -5479,33 +5485,14 @@ export function App() {
 
   if (authPhase !== "ready") {
     return (
-      <div className="gate-shell">
-        <div className="gate-noise" />
-        <section className="gate-card">
-          <p className="gate-eyebrow">remote-llm workspace</p>
-          <h1>Token Required</h1>
-          <p className="gate-copy">
-            Use your access token to unlock the operator console. No token means
-            no workspace access.
-          </p>
-          <form onSubmit={onSubmitToken} className="gate-form">
-            <label>
-              Access Token
-              <input
-                placeholder="rlm_xxx.yyy"
-                value={tokenInput}
-                onChange={(event) => setTokenInput(event.target.value)}
-                autoComplete="off"
-              />
-            </label>
-            <button type="submit" disabled={authPhase === "checking"}>
-              {authPhase === "checking" ? "Unlocking..." : "Unlock Workspace"}
-            </button>
-          </form>
-          {authError ? <p className="gate-error">{authError}</p> : null}
-          <p className="gate-hint">API base: {API_BASE || "not configured"}</p>
-        </section>
-      </div>
+      <TokenGate
+        tokenInput={tokenInput}
+        authPhase={authPhase}
+        authError={authError}
+        apiBase={API_BASE}
+        onTokenInputChange={setTokenInput}
+        onSubmitToken={onSubmitToken}
+      />
     );
   }
 
@@ -5558,925 +5545,194 @@ export function App() {
 
       {appMode === "session" ? (
         <div className="session-stage">
-          <aside className="session-side codex-sidebar">
-            <section className="inspect-block focus-block">
-              <div className="pane-title-line">
-                <h3>Projects</h3>
-                <div className="pane-title-actions">
-                  <button
-                    type="button"
-                    className="ghost new-thread"
-                    onClick={openProjectComposer}
-                  >
-                    New Project
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost new-thread"
-                    onClick={createThreadAndFocus}
-                  >
-                    New Session
-                  </button>
-                </div>
-              </div>
-              {projectComposerOpen ? (
-                <form className="project-create-form" onSubmit={onCreateProject}>
-                  <label className="project-create-field">
-                    <span>Server</span>
-                    <select
-                      value={projectFormHostID}
-                      onChange={(event) => setProjectFormHostID(event.target.value)}
-                      disabled={
-                        authPhase !== "ready" ||
-                        !token.trim() ||
-                        upsertingProjectID !== ""
-                      }
-                    >
-                      {hosts.map((host) => (
-                        <option key={host.id} value={host.id}>
-                          {host.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="project-create-field">
-                    <span>Path</span>
-                    <input
-                      placeholder="/path/to/project"
-                      value={projectFormPath}
-                      onChange={(event) => setProjectFormPath(event.target.value)}
-                      disabled={
-                        authPhase !== "ready" ||
-                        !token.trim() ||
-                        upsertingProjectID !== ""
-                      }
-                    />
-                  </label>
-                  <label className="project-create-field">
-                    <span>Name</span>
-                    <input
-                      placeholder="My Project"
-                      value={projectFormTitle}
-                      onChange={(event) => setProjectFormTitle(event.target.value)}
-                      disabled={
-                        authPhase !== "ready" ||
-                        !token.trim() ||
-                        upsertingProjectID !== ""
-                      }
-                    />
-                  </label>
-                  <div className="project-create-actions">
-                    <button
-                      type="submit"
-                      disabled={
-                        authPhase !== "ready" ||
-                        !token.trim() ||
-                        upsertingProjectID !== "" ||
-                        !projectFormHostID.trim() ||
-                        !projectFormPath.trim()
-                      }
-                    >
-                      {upsertingProjectID === "__create__" ? "Creating..." : "Create"}
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={closeProjectComposer}
-                      disabled={upsertingProjectID !== ""}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              ) : null}
-              <label className="tree-filter">
-                <input
-                  value={projectFilter}
-                  onChange={(event) => setProjectFilter(event.target.value)}
-                  placeholder="Filter projects or sessions"
-                />
-              </label>
-              <div className="project-tree">
-                {sessionTreeHosts.length === 0 ? (
-                  <p className="pane-subtle-light">
-                    No servers/projects discovered yet.
-                  </p>
-                ) : filteredSessionTreeHosts.length === 0 ? (
-                  <p className="pane-subtle-light">
-                    No matching projects or sessions.
-                  </p>
-                ) : (
-                  filteredSessionTreeHosts.map((hostNode) => {
-                    const isCollapsed = collapsedHostIDs.includes(
-                      hostNode.hostID,
-                    );
-                    return (
-                      <article
-                        key={hostNode.hostID}
-                        className="project-host-group"
-                      >
-                        <header className="project-host-head">
-                          <div className="project-host-headline">
-                            <strong>{hostNode.hostName}</strong>
-                            {hostNode.hostAddress ? (
-                              <small>{hostNode.hostAddress}</small>
-                            ) : null}
-                          </div>
-                          <button
-                            type="button"
-                            className="ghost host-toggle"
-                            onClick={() => toggleHostCollapsed(hostNode.hostID)}
-                          >
-                            {isCollapsed ? "Expand" : "Collapse"}
-                          </button>
-                        </header>
-                        {isCollapsed ? null : hostNode.projects.length === 0 ? (
-                          <p className="pane-subtle-light compact-empty">
-                            No projects available.
-                          </p>
-                        ) : (
-                          hostNode.projects.map((projectNode) => (
-                            <div key={projectNode.id} className="project-node">
-                              <button
-                                type="button"
-                                className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
-                                onClick={() => {
-                                  setActiveWorkspaceID(projectNode.id);
-                                  focusComposerSoon();
-                                }}
-                                title={projectNode.path}
-                              >
-                                <span className="project-chip-main">
-                                  <strong>
-                                    {projectNode.title}
-                                  </strong>
-                                  <em>{projectNode.path}</em>
-                                </span>
-                                <small>
-                                  {projectNode.sessions.length === 0
-                                    ? "empty"
-                                    : `${projectNode.sessions.length}`}
-                                </small>
-                              </button>
-                              <div className="project-node-actions">
-                                <button
-                                  type="button"
-                                  className="ghost project-archive-btn"
-                                  disabled={
-                                    authPhase !== "ready" ||
-                                    !token.trim() ||
-                                    upsertingProjectID !== ""
-                                  }
-                                  onClick={() => void onRenameProject(projectNode)}
-                                >
-                                  {upsertingProjectID === projectNode.id
-                                    ? "Saving..."
-                                    : "Rename"}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ghost danger-ghost project-archive-btn"
-                                  disabled={
-                                    authPhase !== "ready" ||
-                                    !token.trim() ||
-                                    upsertingProjectID !== "" ||
-                                    deletingProjectID === projectNode.id ||
-                                    deletingProjectID !== ""
-                                  }
-                                  title="Archive project (empty only)"
-                                  onClick={() =>
-                                    void onArchiveProject(
-                                      projectNode.id,
-                                      projectNode.hostID,
-                                      projectNode.path,
-                                      projectNode.sessions.length,
-                                    )
-                                  }
-                                >
-                                  {deletingProjectID === projectNode.id
-                                    ? "Archiving..."
-                                    : "Archive"}
-                                </button>
-                              </div>
-                              <div className="project-session-list">
-                                {projectNode.sessions.length === 0 ? (
-                                  <p className="pane-subtle-light compact-empty">
-                                    No sessions in this project.
-                                  </p>
-                                ) : (
-                                  projectNode.sessions.map((sessionNode) => (
-                                    <button
-                                      key={sessionNode.id}
-                                      type="button"
-                                      ref={(node) =>
-                                        registerSessionButtonRef(sessionNode.id, node)
-                                      }
-                                      className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
-                                      data-session-id={sessionNode.id}
-                                      data-pinned={sessionNode.pinned ? "true" : "false"}
-                                      tabIndex={
-                                        treeCursorSessionID === sessionNode.id ? 0 : -1
-                                      }
-                                      onClick={(event) => {
-                                        if (event.metaKey || event.ctrlKey) {
-                                          event.preventDefault();
-                                          setThreadPinned(
-                                            sessionNode.id,
-                                            !sessionNode.pinned,
-                                          );
-                                          return;
-                                        }
-                                        setTreeCursorSessionID(sessionNode.id);
-                                        activateThread(sessionNode.id);
-                                        focusComposerSoon();
-                                      }}
-                                      onFocus={() =>
-                                        setTreeCursorSessionID(sessionNode.id)
-                                      }
-                                      onKeyDown={(event) =>
-                                        onSessionTreeKeyDown(
-                                          event,
-                                          sessionNode.id,
-                                          sessionNode.pinned,
-                                        )
-                                      }
-                                      title={sessionNode.title}
-                                    >
-                                      <span className="session-chip-label">
-                                        {sessionNode.title}
-                                      </span>
-                                      <span className="session-chip-state">
-                                        {sessionNode.pinned ? (
-                                          <small className="session-chip-badge pinned">
-                                            pin
-                                          </small>
-                                        ) : null}
-                                        {sessionNode.activeJobID ? (
-                                          <small className="session-chip-badge running">
-                                            running
-                                          </small>
-                                        ) : null}
-                                        {sessionNode.unreadDone ? (
-                                          <small className="session-chip-badge unread">
-                                            new
-                                          </small>
-                                        ) : null}
-                                        {!sessionNode.activeJobID &&
-                                        !sessionNode.unreadDone &&
-                                        sessionNode.lastJobStatus !== "idle" ? (
-                                          <small className="session-chip-badge status">
-                                            {sessionNode.lastJobStatus}
-                                          </small>
-                                        ) : null}
-                                      </span>
-                                    </button>
-                                  ))
-                                )}
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </article>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-
-            <section className="inspect-block compact-session-meta">
-              <p className="pane-subtle-light">
-                Ctrl/Cmd+K palette · Enter send · Shift+Enter newline ·
-                Ctrl/Cmd+Shift+N new session · P pin (on focused session)
-              </p>
-              <div className="ops-actions-row">
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => void onEnableNotifications()}
-                >
-                  Alerts: {notificationPermission}
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => setSessionAlertsExpanded((prev) => !prev)}
-                  disabled={sessionAlerts.length === 0}
-                >
-                  Notifications {sessionAlerts.length > 0 ? `(${sessionAlerts.length})` : ""}
-                </button>
-              </div>
-              {sessionAlerts.length === 0 ? (
-                <p className="pane-subtle-light">No notifications yet.</p>
-              ) : sessionAlertsExpanded ? (
-                <div className="notification-center">
-                  <div className="notification-head">
-                    <strong>Recent</strong>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={clearSessionAlerts}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                  <div className="notification-list" role="status" aria-live="polite">
-                    {sessionAlerts
-                      .slice(Math.max(0, sessionAlerts.length - 8))
-                      .reverse()
-                      .map((alert) => (
-                        <button
-                          key={alert.id}
-                          type="button"
-                          className="session-alert"
-                          onClick={() => openSessionFromAlert(alert)}
-                        >
-                          <strong>{alert.title}</strong>
-                          <span>{alert.body}</span>
-                        </button>
-                      ))}
-                  </div>
-                </div>
-              ) : null}
-            </section>
-          </aside>
-
+          <SessionSidebar
+            authReady={authPhase === "ready"}
+            hasToken={token.trim() !== ""}
+            hosts={hosts}
+            projectComposerOpen={projectComposerOpen}
+            onOpenProjectComposer={openProjectComposer}
+            onCreateThread={createThreadAndFocus}
+            onCreateProject={onCreateProject}
+            projectFormHostID={projectFormHostID}
+            setProjectFormHostID={setProjectFormHostID}
+            projectFormPath={projectFormPath}
+            setProjectFormPath={setProjectFormPath}
+            projectFormTitle={projectFormTitle}
+            setProjectFormTitle={setProjectFormTitle}
+            upsertingProjectID={upsertingProjectID}
+            onCloseProjectComposer={closeProjectComposer}
+            projectFilter={projectFilter}
+            setProjectFilter={setProjectFilter}
+            sessionTreeHosts={sessionTreeHosts}
+            filteredSessionTreeHosts={filteredSessionTreeHosts}
+            collapsedHostIDs={collapsedHostIDs}
+            onToggleHostCollapsed={toggleHostCollapsed}
+            activeWorkspaceID={activeWorkspaceID}
+            onSelectWorkspace={setActiveWorkspaceID}
+            onFocusComposer={focusComposerSoon}
+            onRenameProject={(projectNode) => {
+              void onRenameProject(projectNode);
+            }}
+            onArchiveProject={(projectID, hostID, path, sessionCount) => {
+              void onArchiveProject(projectID, hostID, path, sessionCount);
+            }}
+            deletingProjectID={deletingProjectID}
+            registerSessionButtonRef={registerSessionButtonRef}
+            activeThreadID={activeThreadID}
+            treeCursorSessionID={treeCursorSessionID}
+            setTreeCursorSessionID={setTreeCursorSessionID}
+            onActivateThread={activateThread}
+            onSetThreadPinned={setThreadPinned}
+            onSessionTreeKeyDown={onSessionTreeKeyDown}
+            notificationPermission={notificationPermission}
+            onEnableNotifications={() => {
+              void onEnableNotifications();
+            }}
+            onToggleAlertsExpanded={() =>
+              setSessionAlertsExpanded((prev) => !prev)}
+            sessionAlertsExpanded={sessionAlertsExpanded}
+            sessionAlerts={sessionAlerts}
+            onClearSessionAlerts={clearSessionAlerts}
+            onOpenSessionFromAlert={openSessionFromAlert}
+          />
           <main className="chat-pane">
-            <header className="chat-head">
-              <div>
-                <h1>{activeThread?.title ?? "Session"}</h1>
-                <p className="chat-context">
-                  {(activeWorkspace?.hostName?.trim() || "local-default") +
-                    " · " +
-                    (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH)}
-                </p>
-              </div>
-              <div className="chat-head-side">
-                <span
-                  className={`stream-pill ${activeStreamTone}`}
-                  data-testid="stream-status"
-                  title={activeStreamLastError || `stream ${activeStreamCopy}`}
-                >
-                  stream {activeStreamCopy}
-                </span>
-                <button
-                  type="button"
-                  className="ghost danger-ghost stream-reconnect-btn"
-                  disabled={!activeThread || activeThreadBusy}
-                  onClick={() => void onArchiveActiveSession()}
-                >
-                  {activeThread && deletingThreadID === activeThread.id
-                    ? "Archiving..."
-                    : "Archive"}
-                </button>
-                <button
-                  type="button"
-                  className="ghost stream-reconnect-btn"
-                  disabled={!canReconnectActiveStream}
-                  onClick={onReconnectActiveStream}
-                >
-                  Reconnect
-                </button>
-              </div>
-            </header>
-
-            <div className="timeline-shell">
-              <section
-                className="timeline"
-                aria-live="polite"
-                ref={timelineViewportRef}
-                onScroll={onTimelineScroll}
-              >
-                {activeTimeline.length === 0 ? (
-                  <article className="message message-system">
-                    <div className="message-title-row">
-                      <h4>{isRefreshing ? "Loading" : "Start"}</h4>
-                    </div>
-                    <pre>
-                      {isRefreshing
-                        ? "Preparing session..."
-                        : "Ask Codex what to do in this workspace."}
-                    </pre>
-                  </article>
-                ) : (
-                  activeTimeline.map((entry) => (
-                    <article
-                      key={entry.id}
-                      className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}
-                    >
-                      <div className="message-title-row">
-                        <h4>{entry.title}</h4>
-                        <time>{formatClock(entry.createdAt)}</time>
-                      </div>
-                      {renderTimelineEntryBody(entry)}
-                    </article>
-                  ))
-                )}
-                <div ref={timelineBottomRef} />
-              </section>
-              {timelineUnreadCount > 0 ? (
-                <button
-                  type="button"
-                  className="timeline-jump-latest"
-                  data-testid="timeline-jump-latest"
-                  onClick={jumpTimelineToLatest}
-                >
-                  {timelineUnreadCount > 1
-                    ? `Jump to latest (${timelineUnreadCount})`
-                    : "Jump to latest"}
-                </button>
-              ) : null}
-            </div>
-
-            <form
-              ref={composerFormRef}
-              className={`composer ${composerDropActive ? "drop-active" : ""}`}
+            <SessionHeader
+              title={activeThread?.title ?? "Session"}
+              context={
+                (activeWorkspace?.hostName?.trim() || "local-default") +
+                " · " +
+                (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH)
+              }
+              streamTone={activeStreamTone}
+              streamCopy={activeStreamCopy}
+              streamLastError={activeStreamLastError}
+              canArchive={Boolean(activeThread) && !activeThreadBusy}
+              archiving={Boolean(activeThread && deletingThreadID === activeThread.id)}
+              onArchive={() => {
+                void onArchiveActiveSession();
+              }}
+              canReconnect={canReconnectActiveStream}
+              onReconnect={onReconnectActiveStream}
+            />
+            <SessionTimeline
+              timeline={activeTimeline}
+              isRefreshing={isRefreshing}
+              renderTimelineEntryBody={renderTimelineEntryBody}
+              formatClock={formatClock}
+              timelineViewportRef={timelineViewportRef}
+              timelineBottomRef={timelineBottomRef}
+              onTimelineScroll={onTimelineScroll}
+              timelineUnreadCount={timelineUnreadCount}
+              onJumpTimelineToLatest={jumpTimelineToLatest}
+            />
+            <SessionComposer
+              formRef={composerFormRef}
+              promptInputRef={promptInputRef}
+              composerDropActive={composerDropActive}
               onSubmit={onSendPrompt}
               onDragEnter={onComposerDragEnter}
               onDragOver={onComposerDragOver}
               onDragLeave={onComposerDragLeave}
               onDrop={onComposerDrop}
-            >
-              {activeThreadStatusCopy ? (
-                <p className="composer-status" role="status">
-                  {activeThreadStatusCopy}
-                </p>
-              ) : null}
-              {composerDropActive ? (
-                <p className="composer-drop-indicator" role="status">
-                  Drop image to attach.
-                </p>
-              ) : null}
-              <div className="session-inline-settings">
-                <label className="session-setting-row">
-                  model
-                  <select
-                    data-testid="session-model-select"
-                    value={activeThreadModelValue}
-                    disabled={
-                      !activeThread || !hasSessionModelChoices || activeThreadBusy
-                    }
-                    onChange={(event) => {
-                      if (!activeThread) return;
-                      setThreadModel(activeThread.id, event.target.value);
-                    }}
-                  >
-                    {hasSessionModelChoices ? (
-                      sessionModelChoices.map((modelName) => (
-                        <option key={modelName} value={modelName}>
-                          {modelName === sessionModelDefault
-                            ? `${modelName} (default)`
-                            : modelName}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">model unavailable</option>
-                    )}
-                  </select>
-                  {!hasSessionModelChoices ? (
-                    <small className="pane-subtle-light">
-                      No models discovered on this server.
-                    </small>
-                  ) : null}
-                </label>
-                <label className="session-setting-row">
-                  sandbox
-                  <select
-                    data-testid="session-sandbox-select"
-                    value={activeThread?.sandbox ?? "workspace-write"}
-                    disabled={!activeThread || activeThreadBusy}
-                    onChange={(event) =>
-                      activeThread &&
-                      setThreadSandbox(
-                        activeThread.id,
-                        event.target.value as
-                          | ""
-                          | "read-only"
-                          | "workspace-write"
-                          | "danger-full-access",
-                      )
-                    }
-                  >
-                    <option value="read-only">read-only</option>
-                    <option value="workspace-write">workspace-write</option>
-                    <option value="danger-full-access">
-                      danger-full-access
-                    </option>
-                  </select>
-                </label>
-              </div>
-
-              <div className="session-controls-row">
-                <button
-                  type="button"
-                  className="ghost advanced-toggle-btn"
-                  data-testid="fork-session-btn"
-                  onClick={onForkActiveSession}
-                  disabled={!activeThread || activeThreadBusy}
-                >
-                  Fork Session
-                </button>
-                <button
-                  type="button"
-                  className="ghost advanced-toggle-btn"
-                  data-testid="advanced-toggle-btn"
-                  onClick={() => setSessionAdvancedOpen((prev) => !prev)}
-                  disabled={!activeThread}
-                >
-                  {sessionAdvancedOpen ? "Hide Advanced" : "Advanced"}
-                </button>
-              </div>
-
-              {sessionAdvancedOpen ? (
-                <div className="session-advanced-panel">
-                  <label className="session-setting-row">
-                    approval
-                    <select
-                      data-testid="advanced-approval-select"
-                      value={activeThread?.approvalPolicy ?? ""}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadApprovalPolicy(
-                          activeThread.id,
-                          event.target.value as CodexApprovalPolicy,
-                        )
-                      }
-                    >
-                      {APPROVAL_POLICY_OPTIONS.map((option) => (
-                        <option key={option.label} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label className="session-setting-row toggle-setting-row">
-                    <span>web search</span>
-                    <input
-                      type="checkbox"
-                      data-testid="advanced-web-search-toggle"
-                      checked={Boolean(activeThread?.webSearch)}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadWebSearch(activeThread.id, event.target.checked)
-                      }
-                    />
-                  </label>
-
-                  <label className="session-setting-row">
-                    profile
-                    <input
-                      data-testid="advanced-profile-input"
-                      placeholder="default"
-                      value={activeThread?.profile ?? ""}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadProfile(activeThread.id, event.target.value)
-                      }
-                    />
-                  </label>
-
-                  <label className="session-setting-row">
-                    config (-c)
-                    <div className="add-dir-row">
-                      <input
-                        data-testid="advanced-config-input"
-                        placeholder="sandbox_workspace_write=true"
-                        value={configFlagDraft}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          setConfigFlagDraft(event.target.value)
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          onConfigFlagDraftSubmit();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={
-                          !activeThread ||
-                          activeThreadBusy ||
-                          !configFlagDraft.trim()
-                        }
-                        onClick={onConfigFlagDraftSubmit}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    <div className="add-dir-list">
-                      {(activeThread?.configFlags ?? []).map((value) => (
-                        <button
-                          key={value}
-                          type="button"
-                          className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy}
-                          onClick={() =>
-                            activeThread &&
-                            removeThreadConfigFlag(activeThread.id, value)
-                          }
-                        >
-                          {value} ×
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-
-                  <label className="session-setting-row">
-                    enable
-                    <div className="add-dir-row">
-                      <input
-                        data-testid="advanced-enable-input"
-                        placeholder="web_search"
-                        value={enableFlagDraft}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          setEnableFlagDraft(event.target.value)
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          onEnableFlagDraftSubmit();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={
-                          !activeThread ||
-                          activeThreadBusy ||
-                          !enableFlagDraft.trim()
-                        }
-                        onClick={onEnableFlagDraftSubmit}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    <div className="add-dir-list">
-                      {(activeThread?.enableFlags ?? []).map((value) => (
-                        <button
-                          key={value}
-                          type="button"
-                          className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy}
-                          onClick={() =>
-                            activeThread &&
-                            removeThreadEnableFlag(activeThread.id, value)
-                          }
-                        >
-                          {value} ×
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-
-                  <label className="session-setting-row">
-                    disable
-                    <div className="add-dir-row">
-                      <input
-                        data-testid="advanced-disable-input"
-                        placeholder="legacy_preview"
-                        value={disableFlagDraft}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          setDisableFlagDraft(event.target.value)
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          onDisableFlagDraftSubmit();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={
-                          !activeThread ||
-                          activeThreadBusy ||
-                          !disableFlagDraft.trim()
-                        }
-                        onClick={onDisableFlagDraftSubmit}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    <div className="add-dir-list">
-                      {(activeThread?.disableFlags ?? []).map((value) => (
-                        <button
-                          key={value}
-                          type="button"
-                          className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy}
-                          onClick={() =>
-                            activeThread &&
-                            removeThreadDisableFlag(activeThread.id, value)
-                          }
-                        >
-                          {value} ×
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-
-                  <label className="session-setting-row">
-                    add dir
-                    <div className="add-dir-row">
-                      <input
-                        data-testid="advanced-add-dir-input"
-                        placeholder="/opt/shared"
-                        value={addDirDraft}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) => setAddDirDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          onAddDirDraftSubmit();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={!activeThread || activeThreadBusy || !addDirDraft.trim()}
-                        onClick={onAddDirDraftSubmit}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    <div className="add-dir-list">
-                      {(activeThread?.addDirs ?? []).map((dir) => (
-                        <button
-                          key={dir}
-                          type="button"
-                          className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy}
-                          onClick={() =>
-                            activeThread && removeThreadAddDir(activeThread.id, dir)
-                          }
-                        >
-                          {dir} ×
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-
-                  <div className="advanced-toggle-grid">
-                    <label className="session-setting-row toggle-setting-row">
-                      <span>skip repo check</span>
-                      <input
-                        type="checkbox"
-                        data-testid="advanced-skip-git-toggle"
-                        checked={activeThread?.skipGitRepoCheck ?? true}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          activeThread &&
-                          setThreadSkipGitRepoCheck(
-                            activeThread.id,
-                            event.target.checked,
-                          )
-                        }
-                      />
-                    </label>
-                    <label className="session-setting-row toggle-setting-row">
-                      <span>json output</span>
-                      <input
-                        type="checkbox"
-                        data-testid="advanced-json-output-toggle"
-                        checked={activeThread?.jsonOutput ?? true}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          activeThread &&
-                          setThreadJSONOutput(activeThread.id, event.target.checked)
-                        }
-                      />
-                    </label>
-                    <label className="session-setting-row toggle-setting-row">
-                      <span>ephemeral</span>
-                      <input
-                        type="checkbox"
-                        data-testid="advanced-ephemeral-toggle"
-                        checked={activeThread?.ephemeral ?? false}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          activeThread &&
-                          setThreadEphemeral(activeThread.id, event.target.checked)
-                        }
-                      />
-                    </label>
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="quick-strip">
-                <label
-                  className={`quick-chip ghost file-chip ${
-                    uploadingImage || !activeThread || activeThreadBusy
-                      ? "disabled"
-                      : ""
-                  }`}
-                >
-                  <input
-                    type="file"
-                    accept="image/*"
-                    disabled={uploadingImage || !activeThread || activeThreadBusy}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (!file) return;
-                      void onUploadSessionImage(file, activeThread?.id ?? "");
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                  {uploadingImage ? "uploading..." : "Attach Image"}
-                </label>
-                {(activeThread?.imagePaths ?? []).map((imagePath) => (
-                  <button
-                    key={imagePath}
-                    type="button"
-                    className="quick-chip ghost"
-                    onClick={() =>
-                      activeThread &&
-                      removeThreadImagePath(activeThread.id, imagePath)
-                    }
-                  >
-                    {imagePath.split("/").pop() ?? imagePath} ×
-                  </button>
-                ))}
-                {imageUploadError ? (
-                  <span className="shortcut-hint">{imageUploadError}</span>
-                ) : (
-                  <span className="shortcut-hint">Paste or drop image to attach.</span>
-                )}
-              </div>
-
-              <textarea
-                ref={promptInputRef}
-                value={activeDraft}
-                onChange={(event) => {
-                  if (activeThread) {
-                    updateThreadDraft(activeThread.id, event.target.value);
-                  }
-                }}
-                rows={1}
-                placeholder={
-                  activeThread
-                    ? "Tell codex what to do in this workspace..."
-                    : "Select a session to start"
-                }
-                disabled={!activeThread}
-                onPaste={onComposerPaste}
-                onKeyDown={(event) => {
-                  const composing =
-                    "isComposing" in event.nativeEvent
-                      ? Boolean(
-                          (event.nativeEvent as { isComposing?: boolean })
-                            .isComposing,
-                        )
-                      : false;
-                  if (event.key === "Enter" && !event.shiftKey && !composing) {
-                    event.preventDefault();
-                    composerFormRef.current?.requestSubmit();
-                  }
-                }}
-              />
-
-              <div className="composer-actions">
-                {activeThreadRunID ? (
-                  <button
-                    type="button"
-                    className="ghost danger-ghost"
-                    disabled={
-                      !activeThread ||
-                      !activeThreadRunID ||
-                      cancelingThreadID === activeThread.id
-                    }
-                    onClick={() => void onStopActiveSessionRun()}
-                  >
-                    {activeThread &&
-                    cancelingThreadID === activeThread.id
-                      ? "Stopping..."
-                      : "Stop"}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="ghost"
-                    disabled={!activeThread || !hasRegeneratePrompt || activeThreadBusy}
-                    onClick={() => void onRegenerateActiveSession()}
-                  >
-                    Regenerate
-                  </button>
-                )}
-                <button
-                  type="submit"
-                  disabled={activeThreadBusy || !activeThread}
-                >
-                  {activeThreadBusy ? "Running..." : "Send"}
-                </button>
-              </div>
-            </form>
+              activeThreadStatusCopy={activeThreadStatusCopy}
+              activeThread={activeThread}
+              activeThreadBusy={activeThreadBusy}
+              activeThreadModelValue={activeThreadModelValue}
+              hasSessionModelChoices={hasSessionModelChoices}
+              sessionModelChoices={sessionModelChoices}
+              sessionModelDefault={sessionModelDefault}
+              onSetThreadModel={(modelName) => {
+                if (!activeThread) return;
+                setThreadModel(activeThread.id, modelName);
+              }}
+              onSetThreadSandbox={(value) => {
+                if (!activeThread) return;
+                setThreadSandbox(activeThread.id, value);
+              }}
+              onForkSession={() => {
+                void onForkActiveSession();
+              }}
+              sessionAdvancedOpen={sessionAdvancedOpen}
+              onToggleSessionAdvanced={() =>
+                setSessionAdvancedOpen((prev) => !prev)}
+              approvalPolicyOptions={APPROVAL_POLICY_OPTIONS}
+              onSetThreadApprovalPolicy={(value) => {
+                if (!activeThread) return;
+                setThreadApprovalPolicy(activeThread.id, value);
+              }}
+              onSetThreadWebSearch={(next) => {
+                if (!activeThread) return;
+                setThreadWebSearch(activeThread.id, next);
+              }}
+              onSetThreadProfile={(value) => {
+                if (!activeThread) return;
+                setThreadProfile(activeThread.id, value);
+              }}
+              configFlagDraft={configFlagDraft}
+              onConfigFlagDraftChange={setConfigFlagDraft}
+              onConfigFlagDraftSubmit={onConfigFlagDraftSubmit}
+              onRemoveConfigFlag={(value) => {
+                if (!activeThread) return;
+                removeThreadConfigFlag(activeThread.id, value);
+              }}
+              enableFlagDraft={enableFlagDraft}
+              onEnableFlagDraftChange={setEnableFlagDraft}
+              onEnableFlagDraftSubmit={onEnableFlagDraftSubmit}
+              onRemoveEnableFlag={(value) => {
+                if (!activeThread) return;
+                removeThreadEnableFlag(activeThread.id, value);
+              }}
+              disableFlagDraft={disableFlagDraft}
+              onDisableFlagDraftChange={setDisableFlagDraft}
+              onDisableFlagDraftSubmit={onDisableFlagDraftSubmit}
+              onRemoveDisableFlag={(value) => {
+                if (!activeThread) return;
+                removeThreadDisableFlag(activeThread.id, value);
+              }}
+              addDirDraft={addDirDraft}
+              onAddDirDraftChange={setAddDirDraft}
+              onAddDirDraftSubmit={onAddDirDraftSubmit}
+              onRemoveAddDir={(value) => {
+                if (!activeThread) return;
+                removeThreadAddDir(activeThread.id, value);
+              }}
+              onSetThreadSkipGitRepoCheck={(next) => {
+                if (!activeThread) return;
+                setThreadSkipGitRepoCheck(activeThread.id, next);
+              }}
+              onSetThreadJSONOutput={(next) => {
+                if (!activeThread) return;
+                setThreadJSONOutput(activeThread.id, next);
+              }}
+              onSetThreadEphemeral={(next) => {
+                if (!activeThread) return;
+                setThreadEphemeral(activeThread.id, next);
+              }}
+              uploadingImage={uploadingImage}
+              imageUploadError={imageUploadError}
+              onUploadImage={(file, threadID) => {
+                void onUploadSessionImage(file, threadID);
+              }}
+              onRemoveImagePath={(imagePath) => {
+                if (!activeThread) return;
+                removeThreadImagePath(activeThread.id, imagePath);
+              }}
+              activeDraft={activeDraft}
+              onDraftChange={(value) => {
+                if (!activeThread) return;
+                updateThreadDraft(activeThread.id, value);
+              }}
+              onComposerPaste={onComposerPaste}
+              activeThreadRunID={activeThreadRunID}
+              cancelingThreadID={cancelingThreadID}
+              onStopRun={() => {
+                void onStopActiveSessionRun();
+              }}
+              hasRegeneratePrompt={hasRegeneratePrompt}
+              onRegenerate={() => {
+                void onRegenerateActiveSession();
+              }}
+            />
           </main>
         </div>
       ) : (
@@ -7273,52 +6529,21 @@ export function App() {
         </div>
       )}
 
-      {commandPaletteOpen && appMode === "session" ? (
-        <div
-          className="command-palette-backdrop"
-          onMouseDown={(event) => {
-            if (event.target !== event.currentTarget) return;
-            closeCommandPalette();
-          }}
-        >
-          <section
-            className="command-palette"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Command Palette"
-          >
-            <input
-              ref={commandPaletteInputRef}
-              className="command-palette-input"
-              placeholder="Type a command..."
-              value={commandPaletteQuery}
-              onChange={(event) => {
-                setCommandPaletteQuery(event.target.value);
-                setCommandPaletteCursor(0);
-              }}
-              onKeyDown={onCommandPaletteKeyDown}
-            />
-            <div className="command-palette-list" role="listbox">
-              {filteredCommandPaletteActions.length === 0 ? (
-                <p className="command-palette-empty">No matching commands.</p>
-              ) : (
-                filteredCommandPaletteActions.map((action, index) => (
-                  <button
-                    key={action.id}
-                    type="button"
-                    className={`command-palette-item ${index === commandPaletteCursor ? "active" : ""}`}
-                    onMouseEnter={() => setCommandPaletteCursor(index)}
-                    onClick={() => runCommandPaletteAction(index)}
-                  >
-                    <strong>{action.label}</strong>
-                    <small>{action.detail}</small>
-                  </button>
-                ))
-              )}
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <CommandPalette
+        open={commandPaletteOpen && appMode === "session"}
+        inputRef={commandPaletteInputRef}
+        query={commandPaletteQuery}
+        cursor={commandPaletteCursor}
+        actions={filteredCommandPaletteActions}
+        onClose={closeCommandPalette}
+        onQueryChange={(value) => {
+          setCommandPaletteQuery(value);
+          setCommandPaletteCursor(0);
+        }}
+        onKeyDown={onCommandPaletteKeyDown}
+        onHoverAction={setCommandPaletteCursor}
+        onRunAction={runCommandPaletteAction}
+      />
 
     </div>
   );
