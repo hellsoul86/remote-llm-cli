@@ -2,43 +2,15 @@ import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import {
+  type SessionAlert,
+  type SessionTreeHost,
+  type SessionTreeProject,
+} from "../types";
 
 type HostOption = {
   id: string;
   name: string;
-};
-
-type SessionTreeSessionNode = {
-  id: string;
-  title: string;
-  pinned: boolean;
-  activeJobID: string;
-  unreadDone: boolean;
-  lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
-  updatedAt: string;
-};
-
-type SessionTreeProjectNode = {
-  id: string;
-  hostID: string;
-  title: string;
-  path: string;
-  updatedAt: string;
-  sessions: SessionTreeSessionNode[];
-};
-
-type SessionTreeHostNode = {
-  hostID: string;
-  hostName: string;
-  hostAddress: string;
-  projects: SessionTreeProjectNode[];
-};
-
-type SessionAlert = {
-  id: string;
-  threadID: string;
-  title: string;
-  body: string;
 };
 
 type SessionSidebarProps = {
@@ -59,14 +31,14 @@ type SessionSidebarProps = {
   onCloseProjectComposer: () => void;
   projectFilter: string;
   setProjectFilter: (value: string) => void;
-  sessionTreeHosts: SessionTreeHostNode[];
-  filteredSessionTreeHosts: SessionTreeHostNode[];
+  sessionTreeHosts: SessionTreeHost[];
+  filteredSessionTreeHosts: SessionTreeHost[];
   collapsedHostIDs: string[];
   onToggleHostCollapsed: (hostID: string) => void;
   activeWorkspaceID: string;
   onSelectWorkspace: (workspaceID: string) => void;
   onFocusComposer: () => void;
-  onRenameProject: (project: SessionTreeProjectNode) => void;
+  onRenameProject: (project: SessionTreeProject) => void;
   onArchiveProject: (
     projectID: string,
     hostID: string,
