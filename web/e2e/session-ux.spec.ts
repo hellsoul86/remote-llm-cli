@@ -14,6 +14,7 @@ type MockOptions = {
   streamPattern?: "ready-only" | "completion-once";
   includeSecondSession?: boolean;
   backgroundCompletion?: boolean;
+  shuffleSessionUpdates?: boolean;
   titleUpdate?: string;
   jobRunningPolls?: number;
   jobEventFirstPollDelayMS?: number;
@@ -47,6 +48,7 @@ async function mockSessionApi(
   const streamPattern = options?.streamPattern ?? "ready-only";
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
+  const shuffleSessionUpdates = options?.shuffleSessionUpdates ?? false;
   const titleUpdate = options?.titleUpdate?.trim() ?? "";
   const jobRunningPolls = Math.max(1, options?.jobRunningPolls ?? 1);
   const jobEventFirstPollDelayMS = Math.max(
@@ -58,6 +60,7 @@ async function mockSessionApi(
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
   let sessionOneStreamAttempts = 0;
   const sessionOneStreamAfterValues: number[] = [];
+  let sessionListRequestCount = 0;
   let canceled = false;
   const nowISO = new Date().toISOString();
   const sessions = [
@@ -457,6 +460,21 @@ async function mockSessionApi(
     await route.fallback();
   });
   await page.route("**/v1/sessions?**", async (route, request) => {
+    sessionListRequestCount += 1;
+    if (
+      shuffleSessionUpdates &&
+      includeSecondSession &&
+      sessionListRequestCount > 1 &&
+      sessions.length > 1
+    ) {
+      const bumped = new Date(
+        Date.now() + sessionListRequestCount * 1000,
+      ).toISOString();
+      sessions[1] = {
+        ...sessions[1],
+        updated_at: bumped,
+      };
+    }
     const url = new URL(request.url());
     const projectIDFilter = (url.searchParams.get("project_id") ?? "").trim();
     const filteredSessions = sessions.filter((sessionItem) => {
@@ -1710,6 +1728,113 @@ test("active project is prioritized to top of project list", async ({ page }) =>
     })
     .click();
   await expect(projectTitles.first()).toHaveText("work");
+});
+
+test("session list order stays stable while session timestamps update", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SESSION_ORDER_${Date.now()}`;
+  await mockSessionApi(page, `stable order ${marker}`, marker, {
+    includeSecondSession: true,
+    streamPattern: "completion-once",
+    shuffleSessionUpdates: true,
+  });
+  await unlock(page);
+
+  const sessionChips = page.locator(".project-node .session-chip-tree");
+  await expect(sessionChips).toHaveCount(2);
+  const initialOrder = await sessionChips.evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("data-session-id") ?? ""),
+  );
+  expect(initialOrder).toEqual(["session_cli_1", "session_cli_2"]);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill("keep ordering stable");
+  await composer.press("Enter");
+  await expect(
+    page.locator(".message.message-assistant pre", { hasText: marker }),
+  ).toBeVisible();
+  await page.waitForTimeout(1200);
+
+  const finalOrder = await sessionChips.evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("data-session-id") ?? ""),
+  );
+  expect(finalOrder).toEqual(["session_cli_1", "session_cli_2"]);
+});
+
+test("timeline hides legacy transport status noise entries", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TIMELINE_NOISE_${Date.now()}`;
+  await mockSessionApi(page, `timeline ${marker}`, marker);
+  await page.addInitScript((seedMarker: string) => {
+    const now = new Date().toISOString();
+    const seededState = {
+      workspaces: [
+        {
+          id: "project_local_1__srv_work",
+          hostID: "local_1",
+          hostName: "local-default",
+          path: "/srv/work",
+          title: "work",
+          sessions: [
+            {
+              id: "session_cli_1",
+              title: "Session 1",
+              draft: "",
+              timeline: [
+                {
+                  id: "legacy_connected",
+                  kind: "system",
+                  title: "Connected",
+                  body: "Connected. hosts=1 runtimes=3 queue_depth=0",
+                  createdAt: now,
+                },
+                {
+                  id: "legacy_server_completed",
+                  kind: "system",
+                  title: "Server Completed",
+                  body: "local-default completed exit=0",
+                  createdAt: now,
+                },
+                {
+                  id: "assistant_visible",
+                  kind: "assistant",
+                  title: "Assistant",
+                  body: `visible ${seedMarker}`,
+                  state: "success",
+                  createdAt: now,
+                },
+              ],
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+          activeSessionID: "session_cli_1",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      activeWorkspaceID: "project_local_1__srv_work",
+    };
+    window.localStorage.setItem(
+      "remote_llm_session_state_v1",
+      JSON.stringify(seededState),
+    );
+  }, marker);
+  await unlock(page);
+
+  await expect(
+    page.locator(".message.message-assistant pre", {
+      hasText: `visible ${marker}`,
+    }),
+  ).toBeVisible();
+  await expect(page.locator(".message", { hasText: "Connected. hosts=" })).toHaveCount(0);
+  await expect(
+    page.locator(".message", { hasText: "local-default completed exit=0" }),
+  ).toHaveCount(0);
 });
 
 test("server snapshot prunes stale local project cache on unlock", async ({
