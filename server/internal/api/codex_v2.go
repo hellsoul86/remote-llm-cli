@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -963,6 +965,10 @@ func (s *Server) persistCodexNotification(hostID string, method string, params j
 		return
 	}
 	runID := extractCodexNotificationRunID(method, params)
+	dedupeKey := codexNotificationDedupKey(method, params, runID)
+	if s.markCodexNotificationSeen(sessionID, dedupeKey, at) {
+		return
+	}
 	eventType := "codexrpc." + strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(method), "/", "."), " ", "_")
 	payload := map[string]any{
 		"host_id":     strings.TrimSpace(hostID),
@@ -1182,6 +1188,83 @@ func (s *Server) updateCodexSessionRunStateFromNotification(sessionID string, me
 	session.LastStatus = nextStatus
 	session.UpdatedAt = time.Now().UTC()
 	_, _ = s.store.UpsertSession(session)
+}
+
+func codexNotificationDedupKey(method string, params json.RawMessage, runID string) string {
+	normalizedMethod := strings.ToLower(strings.TrimSpace(method))
+	if normalizedMethod == "" {
+		return ""
+	}
+	normalizedParams := compactJSONRaw(params)
+	sum := sha256.Sum256([]byte(normalizedMethod + "\n" + strings.TrimSpace(runID) + "\n" + string(normalizedParams)))
+	return hex.EncodeToString(sum[:])
+}
+
+func compactJSONRaw(raw json.RawMessage) json.RawMessage {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return json.RawMessage(`{}`)
+	}
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return json.RawMessage(trimmed)
+	}
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return json.RawMessage(trimmed)
+	}
+	return normalized
+}
+
+func (s *Server) markCodexNotificationSeen(sessionID string, dedupeKey string, at time.Time) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	dedupeKey = strings.TrimSpace(dedupeKey)
+	if sessionID == "" || dedupeKey == "" {
+		return false
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	cutoff := at.Add(-codexNotifDedupTTL)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.codexNotifSeen == nil {
+		s.codexNotifSeen = map[string]map[string]time.Time{}
+	}
+	bySession := s.codexNotifSeen[sessionID]
+	if bySession == nil {
+		bySession = map[string]time.Time{}
+		s.codexNotifSeen[sessionID] = bySession
+	}
+	for key, seenAt := range bySession {
+		if seenAt.Before(cutoff) {
+			delete(bySession, key)
+		}
+	}
+	if _, exists := bySession[dedupeKey]; exists {
+		bySession[dedupeKey] = at
+		return true
+	}
+	if len(bySession) >= codexNotifDedupMax {
+		dropOldestCodexNotificationEntry(bySession)
+	}
+	bySession[dedupeKey] = at
+	return false
+}
+
+func dropOldestCodexNotificationEntry(entries map[string]time.Time) {
+	oldestKey := ""
+	var oldestAt time.Time
+	for key, seenAt := range entries {
+		if oldestKey == "" || seenAt.Before(oldestAt) {
+			oldestKey = key
+			oldestAt = seenAt
+		}
+	}
+	if oldestKey != "" {
+		delete(entries, oldestKey)
+	}
 }
 
 func asString(v any) string {

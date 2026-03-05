@@ -47,6 +47,7 @@ type Server struct {
 	codexBridge    *codexrpc.Manager
 	codexBridgeSub map[string]func()
 	codexPending   map[string]map[string]codexPendingRequest
+	codexNotifSeen map[string]map[string]time.Time
 }
 
 type authIdentity struct {
@@ -74,6 +75,8 @@ const (
 	sessionStreamBuffer   = 256
 	sessionStreamHB       = 12 * time.Second
 	sessionStreamBatch    = 1000
+	codexNotifDedupTTL    = 8 * time.Minute
+	codexNotifDedupMax    = 2048
 	auditQueueSize        = 4096
 	auditBatchSize        = 64
 	auditFlushInterval    = 400 * time.Millisecond
@@ -121,6 +124,7 @@ func NewWithOptions(st *store.Store, rt *runtime.Registry, opts ServerOptions) *
 		}),
 		codexBridgeSub: map[string]func(){},
 		codexPending:   map[string]map[string]codexPendingRequest{},
+		codexNotifSeen: map[string]map[string]time.Time{},
 		runViaSSH:      executor.RunViaSSH,
 		runRsyncViaSSH: executor.RunRsyncViaSSH,
 	}
