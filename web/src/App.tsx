@@ -10,20 +10,13 @@ import {
   API_BASE,
   discoverCodexSessions,
   discoverCodexModels,
-  getMetrics,
   getRunJob,
-  listAudit,
   listHosts,
   listProjects,
-  listRunJobEvents,
-  listRunJobs,
-  listRuns,
   listSessions,
   upsertHost,
   type Host,
   type SessionRecord,
-  type RunJobEvent,
-  type RunJobRecord,
   type CodexPlatformResult,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
@@ -49,6 +42,7 @@ import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
 import { useSessionAlerts } from "./features/session/use-session-alerts";
 import { useSessionEventCursor } from "./features/session/use-session-event-cursor";
 import { useOpsPolling } from "./features/session/use-ops-polling";
+import { useSessionJobPolling } from "./features/session/use-session-job-polling";
 import { useSessionStreamHealth } from "./features/session/use-session-stream-health";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import {
@@ -76,7 +70,6 @@ import {
   COMPOSER_MAX_HEIGHT,
   COMPOSER_MIN_HEIGHT,
   DEFAULT_WORKSPACE_PATH,
-  EMPTY_ASSISTANT_FALLBACK,
   MAX_COMPLETED_RUN_CACHE_SIZE,
   MAX_SESSION_STREAMS,
   TIMELINE_JUMP_COUNT_CAP,
@@ -101,13 +94,7 @@ import {
 } from "./features/session/tree";
 import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
 import {
-  parseCodexAssistantTextFromStdout,
-  parseCodexSessionTitleFromStdout,
-} from "./features/session/codex-parsing";
-import {
   createSessionRunEventHandlers,
-  ensureSessionRunState,
-  surfaceRuntimeCardsFromRunState,
 } from "./features/session/session-run-events";
 import {
   createSessionStreamController,
@@ -118,14 +105,10 @@ import type {
   SessionStreamHealthState,
 } from "./features/session/stream-types";
 import {
-  extractAssistantTextFromJob,
   formatClock,
   formatDateTime,
   isJobActive,
-  jobHasTargetFailures,
   lastUserPromptFromTimeline,
-  sessionCompletionCopy,
-  summarizeTargetFailures,
 } from "./features/session/runtime-utils";
 import {
   formatCodexPlatformResult,
@@ -135,23 +118,10 @@ import {
   streamHealthCopy,
   streamHealthTone,
 } from "./features/session/view-helpers";
-import {
-  clipStreamText,
-} from "./features/session/utils";
 type AuthPhase = "checking" | "locked" | "ready";
 
 function isLocalDraftSessionID(sessionID: string): boolean {
   return /^session_\d+_\d+$/.test(sessionID.trim());
-}
-
-function appendCodexStdoutChunk(state: SessionRunStreamState, chunk: string) {
-  if (!chunk) return;
-  state.stdout = `${state.stdout}${chunk}`;
-  if (state.stdout.length > 220000) {
-    const trim = state.stdout.length - 220000;
-    state.stdout = state.stdout.slice(trim);
-    state.eventParseOffset = Math.max(0, state.eventParseOffset - trim);
-  }
 }
 
 export function App() {
@@ -1419,327 +1389,7 @@ export function App() {
       });
   }, [appMode, authPhase, token, activeThread?.id, activeThread?.activeJobID, knownJobIDSet]);
 
-  useEffect(() => {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (runningJobPollTargets.length === 0) return;
-
-    let canceled = false;
-    const poll = async () => {
-      const pollingJobs = runningJobPollTargets;
-      if (pollingJobs.length === 0) return;
-      try {
-        const jobResults = await Promise.all(
-          pollingJobs.map(async (item) => {
-            try {
-              const after = jobEventCursorRef.current.get(item.jobID) ?? 0;
-              const [job, eventFeed] = await Promise.all([
-                getRunJob(token, item.jobID),
-                listRunJobEvents(token, item.jobID, after, 240).catch(() => ({
-                  events: [] as RunJobEvent[],
-                  next_after: after,
-                })),
-              ]);
-              return {
-                item,
-                job,
-                error: "",
-                events: eventFeed.events,
-                nextAfter: eventFeed.next_after,
-              };
-            } catch (error) {
-              return {
-                item,
-                job: null as RunJobRecord | null,
-                error: String(error),
-                events: [] as RunJobEvent[],
-                nextAfter: jobEventCursorRef.current.get(item.jobID) ?? 0,
-              };
-            }
-          }),
-        );
-        if (canceled) return;
-
-        let needsProjectRefresh = false;
-        for (const result of jobResults) {
-          const { item, job, error, events, nextAfter } = result;
-          if (!job) {
-            addTimelineEntry(
-              {
-                kind: "system",
-                state: "error",
-                title: "Session Update Failed",
-                body: error,
-              },
-              item.threadID,
-            );
-            setThreadJobState(item.threadID, "", "failed");
-            continue;
-          }
-          jobEventCursorRef.current.set(item.jobID, nextAfter);
-          const alreadyCompleted = hasCompletedRun(item.jobID);
-          const streamRunState = sessionRunStateRef.current.get(item.threadID);
-          const preferSessionStream =
-            streamRunState?.runID === item.jobID &&
-            (streamRunState?.streamSeen || streamRunState?.assistantFinalized);
-
-          let stdoutStream = "";
-          const showLiveStream =
-            !preferSessionStream &&
-            appMode === "session" &&
-            item.threadID === activeThreadID;
-          const fallbackRunState =
-            !preferSessionStream && job.runtime === "codex"
-              ? ensureSessionRunState(
-                  sessionRunStateRef,
-                  item.threadID,
-                  item.jobID,
-                )
-              : null;
-          for (const event of events) {
-            if (
-              event.type === "target.stdout" &&
-              typeof event.chunk === "string"
-            ) {
-              stdoutStream += event.chunk;
-              if (fallbackRunState) {
-                appendCodexStdoutChunk(fallbackRunState, event.chunk);
-              }
-            }
-          }
-          if (!alreadyCompleted && showLiveStream && fallbackRunState) {
-            surfaceRuntimeCardsFromRunState(
-              addTimelineEntry,
-              item.threadID,
-              item.jobID,
-              fallbackRunState,
-              true,
-            );
-          }
-          if (!alreadyCompleted && showLiveStream && stdoutStream.trim()) {
-            if (job.runtime === "codex") {
-              const sourceStdout = fallbackRunState
-                ? fallbackRunState.stdout
-                : stdoutStream;
-              const nextTitle = parseCodexSessionTitleFromStdout(sourceStdout);
-              if (nextTitle) {
-                setThreadTitle(item.threadID, nextTitle);
-              }
-              const contentOnly = parseCodexAssistantTextFromStdout(
-                sourceStdout,
-                false,
-              );
-              if (contentOnly.trim()) {
-                jobStreamSeenRef.current.set(item.jobID, true);
-                upsertAssistantStreamEntry(
-                  item.threadID,
-                  clipStreamText(contentOnly),
-                );
-              } else if (
-                sourceStdout.includes('"type":"turn.started"') ||
-                sourceStdout.includes('"type":"thread.started"')
-              ) {
-                jobStreamSeenRef.current.set(item.jobID, true);
-              }
-            } else {
-              jobStreamSeenRef.current.set(item.jobID, true);
-              upsertAssistantStreamEntry(
-                item.threadID,
-                clipStreamText(stdoutStream),
-              );
-            }
-          }
-          if (item.threadID === activeThreadID) {
-            setActiveJob(job);
-            setActiveJobID(job.id);
-          }
-
-          if (isJobActive(job)) {
-            setThreadJobState(item.threadID, job.id, "running");
-            continue;
-          }
-
-          const responseFailed = jobHasTargetFailures(job);
-          const assistantText =
-            job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
-          if (
-            job.runtime === "codex" &&
-            job.status === "succeeded" &&
-            !responseFailed &&
-            !assistantText.trim()
-          ) {
-            const retries =
-              jobNoTextFinalizeRetriesRef.current.get(job.id) ?? 0;
-            if (retries < 4) {
-              jobNoTextFinalizeRetriesRef.current.set(job.id, retries + 1);
-              setThreadJobState(item.threadID, job.id, "running");
-              continue;
-            }
-          } else {
-            jobNoTextFinalizeRetriesRef.current.delete(job.id);
-          }
-
-          if (job.runtime === "codex") {
-            needsProjectRefresh = true;
-          }
-          const terminalStatus =
-            job.status === "failed" || job.status === "canceled"
-              ? job.status
-              : responseFailed
-                ? "failed"
-                : job.status === "succeeded"
-                  ? "succeeded"
-                  : "failed";
-          const shouldSurfaceJobCompletion = shouldSurfaceCompletion(
-            job.finished_at || job.started_at || job.queued_at,
-          );
-          setThreadJobState(item.threadID, "", terminalStatus);
-          jobEventCursorRef.current.delete(item.jobID);
-          jobNoTextFinalizeRetriesRef.current.delete(job.id);
-          const pollRunState = sessionRunStateRef.current.get(item.threadID);
-          if (!preferSessionStream && pollRunState?.runID === item.jobID) {
-            sessionRunStateRef.current.delete(item.threadID);
-          }
-          const sawSessionStream =
-            streamRunState?.runID === item.jobID &&
-            (streamRunState.streamSeen || streamRunState.assistantFinalized);
-          const sawJobStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
-          jobStreamSeenRef.current.delete(item.jobID);
-          const sawAnyStream = Boolean(sawSessionStream || sawJobStream);
-          if (shouldSurfaceJobCompletion && item.threadID !== activeThreadID) {
-            setThreadUnread(item.threadID, true);
-          }
-
-          if (hasCompletedRun(job.id)) {
-            if (job.status === "succeeded") {
-              if (assistantText) {
-                if (sawAnyStream) {
-                  finalizeAssistantStreamEntry(
-                    item.threadID,
-                    "success",
-                    assistantText,
-                  );
-                }
-              } else if (sawAnyStream) {
-                finalizeAssistantStreamEntry(
-                  item.threadID,
-                  "success",
-                  EMPTY_ASSISTANT_FALLBACK,
-                );
-              }
-            }
-            continue;
-          }
-
-          markRunCompleted(job.id);
-          {
-            const failedSummary = summarizeTargetFailures(job);
-            if (
-              job.status === "failed" ||
-              job.status === "canceled" ||
-              responseFailed
-            ) {
-              if (sawAnyStream) {
-                finalizeAssistantStreamEntry(item.threadID, "error");
-              }
-              addTimelineEntry(
-                {
-                  kind: "system",
-                  state: "error",
-                  title: job.status === "canceled" ? "Interrupted" : "Failed",
-                  body:
-                    failedSummary ||
-                    (job.status === "canceled"
-                      ? "Session interrupted."
-                      : job.error
-                        ? String(job.error)
-                        : "Session failed."),
-                },
-                item.threadID,
-              );
-            } else if (assistantText) {
-              if (sawAnyStream) {
-                finalizeAssistantStreamEntry(
-                  item.threadID,
-                  "success",
-                  assistantText,
-                );
-              } else {
-                addTimelineEntry(
-                  {
-                    kind: "assistant",
-                    state: "success",
-                    title: "Assistant",
-                    body: assistantText,
-                  },
-                  item.threadID,
-                );
-              }
-            } else if (sawAnyStream) {
-              finalizeAssistantStreamEntry(
-                item.threadID,
-                "success",
-                EMPTY_ASSISTANT_FALLBACK,
-              );
-            }
-            const sessionTitle =
-              threadTitleMapRef.current.get(item.threadID) ?? "Session";
-            const completionStatus: "succeeded" | "failed" | "canceled" =
-              job.status === "canceled"
-                ? "canceled"
-                : job.status === "succeeded" && !responseFailed
-                  ? "succeeded"
-                  : "failed";
-            const completion = sessionCompletionCopy(completionStatus);
-            if (shouldSurfaceJobCompletion) {
-              notifySessionDone(
-                `${sessionTitle} ${completion.suffix}`,
-                completion.body,
-              );
-              pushSessionAlert({
-                threadID: item.threadID,
-                title: `${sessionTitle} ${completion.suffix}`,
-                body: completion.body,
-              });
-            }
-          }
-        }
-
-        const [nextJobs, nextRuns, nextAudit, refreshedMetrics] =
-          await Promise.all([
-            listRunJobs(token, 20),
-            listRuns(token, 20),
-            listAudit(token, 80),
-            getMetrics(token),
-          ]);
-        if (canceled) return;
-        setJobs(nextJobs);
-        setRuns(nextRuns);
-        setAuditEvents(nextAudit);
-        setMetrics(refreshedMetrics);
-        if (needsProjectRefresh) {
-          await refreshProjectsFromSource(
-            token,
-            hosts,
-            runtimes.some((runtime) => runtime.name === "codex"),
-            true,
-          );
-          if (canceled) return;
-        }
-      } catch {
-        if (canceled) return;
-      }
-    };
-
-    void poll();
-    const timer = window.setInterval(() => {
-      void poll();
-    }, 2100);
-
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, [
+  useSessionJobPolling({
     authPhase,
     token,
     appMode,
@@ -1747,7 +1397,30 @@ export function App() {
     activeThreadID,
     hosts,
     runtimes,
-  ]);
+    jobEventCursorRef,
+    jobStreamSeenRef,
+    jobNoTextFinalizeRetriesRef,
+    sessionRunStateRef,
+    threadTitleMapRef,
+    hasCompletedRun,
+    markRunCompleted,
+    shouldSurfaceCompletion,
+    addTimelineEntry,
+    upsertAssistantStreamEntry,
+    finalizeAssistantStreamEntry,
+    setThreadTitle,
+    setThreadJobState,
+    setThreadUnread,
+    notifySessionDone,
+    pushSessionAlert,
+    setActiveJobID,
+    setActiveJob,
+    setJobs,
+    setRuns,
+    setAuditEvents,
+    setMetrics,
+    refreshProjectsFromSource,
+  });
 
   useOpsPolling({
     authPhase,
