@@ -97,6 +97,7 @@ Default API URL is `http://localhost:8080`.
 - Web console MVP (health, runtime list, host list/add)
 - Operational runbook: [`docs/operations-runbook.md`](docs/operations-runbook.md)
 - Codex session v2 contract: [`docs/codex-v2-session-contract.md`](docs/codex-v2-session-contract.md)
+- Staging soak guide: [`docs/staging-soak-codex-v2.md`](docs/staging-soak-codex-v2.md)
 - Merge-triggered deploy workflow (API via SSH + web via Cloudflare Pages): [`docs/deployment-github-actions.md`](docs/deployment-github-actions.md)
 
 ## TUI controls
