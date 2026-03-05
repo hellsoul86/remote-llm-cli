@@ -1455,6 +1455,46 @@ test("advanced codex controls map into run payload", async ({ page }) => {
     const req = harness.lastRunRequest() as { model?: string } | null;
     return String(req?.model ?? "").trim().length > 0;
   }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { mode?: string } | null;
+    return String(req?.mode ?? "");
+  }).toBe("exec");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { search?: boolean } | null;
+    return Boolean(req?.search);
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { profile?: string } | null;
+    return String(req?.profile ?? "");
+  }).toBe("default");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { config?: string[] } | null;
+    return Array.isArray(req?.config) && req.config.includes("sandbox_workspace_write=true");
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { enable?: string[] } | null;
+    return Array.isArray(req?.enable) && req.enable.includes("web_search");
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { disable?: string[] } | null;
+    return Array.isArray(req?.disable) && req.disable.includes("legacy_preview");
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { add_dirs?: string[] } | null;
+    return Array.isArray(req?.add_dirs) && req.add_dirs.includes("/srv/extra");
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { skip_git_repo_check?: boolean } | null;
+    return req?.skip_git_repo_check === false;
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { ephemeral?: boolean } | null;
+    return Boolean(req?.ephemeral);
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { json_output?: boolean } | null;
+    return Boolean(req?.json_output);
+  }).toBe(true);
 });
 
 test("composer submits codex exec payload", async ({ page }) => {
@@ -1474,10 +1514,11 @@ test("composer submits codex exec payload", async ({ page }) => {
     const req = harness.lastRunRequest() as {
       input?: Array<{ type?: string; text?: string }>;
       cwd?: string;
+      mode?: string;
     } | null;
     const first = Array.isArray(req?.input) ? req.input[0] : undefined;
-    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}|${String(req?.cwd ?? "")}`;
-  }).toBe(`text:exec payload ${marker}|/srv/work`);
+    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}|${String(req?.cwd ?? "")}|${String(req?.mode ?? "")}`;
+  }).toBe(`text:exec payload ${marker}|/srv/work|exec`);
 });
 
 test("fork session creates a branch session in project list", async ({ page }) => {

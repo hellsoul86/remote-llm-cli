@@ -4871,6 +4871,19 @@ export function App() {
     timelineStickToBottomRef.current = true;
     updateThreadDraft(activeThread.id, "");
 
+    const normalizedStringList = (values: string[]): string[] | undefined => {
+      if (!Array.isArray(values) || values.length === 0) return undefined;
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const value of values) {
+        const trimmed = value.trim();
+        if (!trimmed || seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        out.push(trimmed);
+      }
+      return out.length > 0 ? out : undefined;
+    };
+
     setSubmittingThreadID(activeThread.id);
     try {
       const targetHostID = targetHostIDs[0]?.trim() ?? "";
@@ -4921,10 +4934,26 @@ export function App() {
       const turnResp = await startCodexV2Turn(token, sessionID, {
         host_id: targetHostID,
         input: turnInput,
+        mode: activeThread.codexMode,
+        resume_last: activeThread.resumeLast,
+        resume_session_id: activeThread.resumeSessionID.trim() || undefined,
+        review_uncommitted: activeThread.reviewUncommitted,
+        review_base: activeThread.reviewBase.trim() || undefined,
+        review_commit: activeThread.reviewCommit.trim() || undefined,
+        review_title: activeThread.reviewTitle.trim() || undefined,
         model: effectiveModel,
         cwd: effectiveWorkdir,
         approval_policy: activeThread.approvalPolicy || undefined,
         sandbox: effectiveSandbox,
+        search: activeThread.webSearch,
+        profile: activeThread.profile.trim() || undefined,
+        config: normalizedStringList(activeThread.configFlags),
+        enable: normalizedStringList(activeThread.enableFlags),
+        disable: normalizedStringList(activeThread.disableFlags),
+        add_dirs: normalizedStringList(activeThread.addDirs),
+        skip_git_repo_check: activeThread.skipGitRepoCheck,
+        ephemeral: activeThread.ephemeral,
+        json_output: activeThread.jsonOutput,
       });
       const turnID = extractTurnIDFromPayload(turnResp);
       const runID = turnID || `run_${Date.now()}`;

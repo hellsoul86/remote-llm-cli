@@ -400,10 +400,26 @@ export type CodexV2TurnStartRequest = {
   host_id?: string;
   prompt?: string;
   input?: CodexV2TurnStartInputItem[];
+  mode?: "exec" | "resume" | "review";
+  resume_last?: boolean;
+  resume_session_id?: string;
+  review_uncommitted?: boolean;
+  review_base?: string;
+  review_commit?: string;
+  review_title?: string;
   model?: string;
   cwd?: string;
   approval_policy?: string;
   sandbox?: string;
+  search?: boolean;
+  profile?: string;
+  config?: string[];
+  enable?: string[];
+  disable?: string[];
+  add_dirs?: string[];
+  skip_git_repo_check?: boolean;
+  ephemeral?: boolean;
+  json_output?: boolean;
   metadata?: Record<string, string>;
 };
 

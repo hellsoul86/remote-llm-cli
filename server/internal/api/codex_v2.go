@@ -34,14 +34,30 @@ type codexV2SessionActionRequest struct {
 }
 
 type codexV2TurnStartRequest struct {
-	HostID         string            `json:"host_id,omitempty"`
-	Prompt         string            `json:"prompt,omitempty"`
-	Input          []map[string]any  `json:"input,omitempty"`
-	Model          string            `json:"model,omitempty"`
-	Cwd            string            `json:"cwd,omitempty"`
-	ApprovalPolicy string            `json:"approval_policy,omitempty"`
-	Sandbox        string            `json:"sandbox,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+	HostID            string            `json:"host_id,omitempty"`
+	Prompt            string            `json:"prompt,omitempty"`
+	Input             []map[string]any  `json:"input,omitempty"`
+	Mode              string            `json:"mode,omitempty"`
+	ResumeLast        *bool             `json:"resume_last,omitempty"`
+	ResumeSessionID   string            `json:"resume_session_id,omitempty"`
+	ReviewUncommitted *bool             `json:"review_uncommitted,omitempty"`
+	ReviewBase        string            `json:"review_base,omitempty"`
+	ReviewCommit      string            `json:"review_commit,omitempty"`
+	ReviewTitle       string            `json:"review_title,omitempty"`
+	Model             string            `json:"model,omitempty"`
+	Cwd               string            `json:"cwd,omitempty"`
+	ApprovalPolicy    string            `json:"approval_policy,omitempty"`
+	Sandbox           string            `json:"sandbox,omitempty"`
+	Search            *bool             `json:"search,omitempty"`
+	Profile           string            `json:"profile,omitempty"`
+	Config            []string          `json:"config,omitempty"`
+	Enable            []string          `json:"enable,omitempty"`
+	Disable           []string          `json:"disable,omitempty"`
+	AddDirs           []string          `json:"add_dirs,omitempty"`
+	SkipGitRepoCheck  *bool             `json:"skip_git_repo_check,omitempty"`
+	Ephemeral         *bool             `json:"ephemeral,omitempty"`
+	JSONOutput        *bool             `json:"json_output,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
 }
 
 type codexV2TurnSteerRequest struct {
@@ -401,6 +417,27 @@ func (s *Server) handleCodexV2TurnStart(w http.ResponseWriter, r *http.Request) 
 		"threadId": threadID,
 		"input":    input,
 	}
+	if mode := normalizeCodexV2Mode(req.Mode); mode != "" {
+		payload["mode"] = mode
+	}
+	if req.ResumeLast != nil {
+		payload["resumeLast"] = *req.ResumeLast
+	}
+	if resumeSessionID := strings.TrimSpace(req.ResumeSessionID); resumeSessionID != "" {
+		payload["resumeSessionId"] = resumeSessionID
+	}
+	if req.ReviewUncommitted != nil {
+		payload["reviewUncommitted"] = *req.ReviewUncommitted
+	}
+	if reviewBase := strings.TrimSpace(req.ReviewBase); reviewBase != "" {
+		payload["reviewBase"] = reviewBase
+	}
+	if reviewCommit := strings.TrimSpace(req.ReviewCommit); reviewCommit != "" {
+		payload["reviewCommit"] = reviewCommit
+	}
+	if reviewTitle := strings.TrimSpace(req.ReviewTitle); reviewTitle != "" {
+		payload["reviewTitle"] = reviewTitle
+	}
 	if modelName := strings.TrimSpace(req.Model); modelName != "" {
 		payload["model"] = modelName
 	}
@@ -415,6 +452,33 @@ func (s *Server) handleCodexV2TurnStart(w http.ResponseWriter, r *http.Request) 
 	if sandbox := normalizeCodexV2Sandbox(req.Sandbox); sandbox != "" {
 		payload["sandbox"] = sandbox
 	}
+	if req.Search != nil {
+		payload["search"] = *req.Search
+	}
+	if profile := strings.TrimSpace(req.Profile); profile != "" {
+		payload["profile"] = profile
+	}
+	if config := sanitizeCodexV2StringList(req.Config); len(config) > 0 {
+		payload["config"] = config
+	}
+	if enable := sanitizeCodexV2StringList(req.Enable); len(enable) > 0 {
+		payload["enable"] = enable
+	}
+	if disable := sanitizeCodexV2StringList(req.Disable); len(disable) > 0 {
+		payload["disable"] = disable
+	}
+	if addDirs := sanitizeCodexV2StringList(req.AddDirs); len(addDirs) > 0 {
+		payload["addDirs"] = addDirs
+	}
+	if req.SkipGitRepoCheck != nil {
+		payload["skipGitRepoCheck"] = *req.SkipGitRepoCheck
+	}
+	if req.Ephemeral != nil {
+		payload["ephemeral"] = *req.Ephemeral
+	}
+	if req.JSONOutput != nil {
+		payload["jsonOutput"] = *req.JSONOutput
+	}
 	if len(req.Metadata) > 0 {
 		payload["metadata"] = req.Metadata
 	}
@@ -425,7 +489,7 @@ func (s *Server) handleCodexV2TurnStart(w http.ResponseWriter, r *http.Request) 
 	}
 	if session.ID != "" {
 		session.LastStatus = "running"
-		session.LastRunID = ""
+		session.LastRunID = extractCodexRunIDMap(out)
 		_, _ = s.store.UpsertSession(session)
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -621,6 +685,39 @@ func normalizeCodexV2Sandbox(v string) string {
 	default:
 		return strings.TrimSpace(v)
 	}
+}
+
+func normalizeCodexV2Mode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "exec":
+		return "exec"
+	case "resume":
+		return "resume"
+	case "review":
+		return "review"
+	default:
+		return strings.TrimSpace(v)
+	}
+}
+
+func sanitizeCodexV2StringList(input []string) []string {
+	if len(input) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(input))
+	seen := map[string]struct{}{}
+	for _, item := range input {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func codexV2BuildInput(prompt string, input []map[string]any) []map[string]any {
@@ -865,6 +962,7 @@ func (s *Server) persistCodexNotification(hostID string, method string, params j
 	if sessionID == "" {
 		return
 	}
+	runID := extractCodexNotificationRunID(method, params)
 	eventType := "codexrpc." + strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(method), "/", "."), " ", "_")
 	payload := map[string]any{
 		"host_id":     strings.TrimSpace(hostID),
@@ -878,6 +976,7 @@ func (s *Server) persistCodexNotification(hostID string, method string, params j
 	}
 	persisted, err := s.store.AppendSessionEvent(model.SessionEvent{
 		SessionID: sessionID,
+		RunID:     runID,
 		Type:      eventType,
 		Payload:   raw,
 		CreatedAt: at,
@@ -886,6 +985,7 @@ func (s *Server) persistCodexNotification(hostID string, method string, params j
 		return
 	}
 	s.publishSessionEvent(persisted)
+	s.updateCodexSessionRunStateFromNotification(sessionID, method, runID)
 	if strings.EqualFold(strings.TrimSpace(method), "serverRequest/resolved") {
 		requestID := extractCodexResolvedRequestID(params)
 		if requestID != "" {
@@ -1028,6 +1128,62 @@ func extractCodexNotificationSessionID(method string, params json.RawMessage) st
 	return ""
 }
 
+func extractCodexNotificationRunID(method string, params json.RawMessage) string {
+	_ = method
+	if len(params) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(params, &payload); err != nil {
+		return ""
+	}
+	if runID := extractCodexRunIDMap(payload); runID != "" {
+		return runID
+	}
+	if itemObj, ok := payload["item"].(map[string]any); ok {
+		if runID := extractCodexRunIDMap(itemObj); runID != "" {
+			return runID
+		}
+	}
+	return ""
+}
+
+func codexSessionStatusFromMethod(method string) string {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "turn/started":
+		return "running"
+	case "turn/completed":
+		return "succeeded"
+	case "turn/failed":
+		return "failed"
+	case "turn/canceled", "turn/interrupted":
+		return "canceled"
+	default:
+		return ""
+	}
+}
+
+func (s *Server) updateCodexSessionRunStateFromNotification(sessionID string, method string, runID string) {
+	nextStatus := codexSessionStatusFromMethod(method)
+	if nextStatus == "" {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	session, ok := s.store.GetSession(sessionID)
+	if !ok {
+		return
+	}
+	if runID = strings.TrimSpace(runID); runID != "" {
+		session.LastRunID = runID
+	}
+	session.LastStatus = nextStatus
+	session.UpdatedAt = time.Now().UTC()
+	_, _ = s.store.UpsertSession(session)
+}
+
 func asString(v any) string {
 	switch value := v.(type) {
 	case string:
@@ -1035,4 +1191,25 @@ func asString(v any) string {
 	default:
 		return ""
 	}
+}
+
+func extractCodexRunIDMap(payload map[string]any) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	for _, key := range []string{"turn_id", "turnId", "run_id", "runId", "id"} {
+		if value := strings.TrimSpace(asString(payload[key])); value != "" {
+			return value
+		}
+	}
+	turnValue, ok := payload["turn"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"id", "turn_id", "turnId", "run_id", "runId"} {
+		if value := strings.TrimSpace(asString(turnValue[key])); value != "" {
+			return value
+		}
+	}
+	return ""
 }
