@@ -1,10 +1,12 @@
 package executor
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/runtime"
@@ -150,5 +152,71 @@ func TestRunSSHPreflightLocalModeSkipsSSH(t *testing.T) {
 	}
 	if !foundMode {
 		t.Fatalf("connection_mode check missing: %+v", report.Checks)
+	}
+}
+
+func TestStartInteractiveViaSSHLocalSurvivesCallerContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	proc, err := StartInteractiveViaSSH(
+		ctx,
+		model.Host{ConnectionMode: HostConnectionModeLocal},
+		runtime.CommandSpec{Program: "cat"},
+		"",
+	)
+	if err != nil {
+		t.Fatalf("StartInteractiveViaSSH err=%v", err)
+	}
+	defer func() {
+		_ = proc.Close()
+	}()
+
+	// Simulate ensureConnected's startup timeout context being canceled after spawn.
+	cancel()
+
+	if _, err := proc.StdinPipe().Write([]byte("ping\n")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+
+	lineCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(proc.StdoutPipe())
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			errCh <- readErr
+			return
+		}
+		lineCh <- line
+	}()
+
+	select {
+	case readErr := <-errCh:
+		t.Fatalf("read stdout: %v", readErr)
+	case line := <-lineCh:
+		if line != "ping\n" {
+			t.Fatalf("stdout line=%q want=ping\\n", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for cat echo after context cancel")
+	}
+}
+
+func TestStartInteractiveViaSSHCanceledContextFailsFast(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	proc, err := StartInteractiveViaSSH(
+		ctx,
+		model.Host{ConnectionMode: HostConnectionModeLocal},
+		runtime.CommandSpec{Program: "cat"},
+		"",
+	)
+	if err == nil {
+		if proc != nil {
+			_ = proc.Close()
+		}
+		t.Fatalf("expected context cancellation error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v want=%v", err, context.Canceled)
 	}
 }
