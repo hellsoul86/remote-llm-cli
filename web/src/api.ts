@@ -1018,19 +1018,11 @@ type StreamSessionEventsOptions = {
 };
 
 export async function streamSessionEvents(token: string, sessionID: string, options: StreamSessionEventsOptions): Promise<void> {
-  const normalizedSessionID = sessionID.trim();
   const params = new URLSearchParams();
   if (typeof options.after === "number" && options.after > 0) {
     params.set("after", String(options.after));
   }
   const query = params.toString();
-  const fallbackURL = query
-    ? `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream?${query}`
-    : `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream`;
-  if (/^session_cli_/i.test(normalizedSessionID)) {
-    await streamSessionEventsViaSSE(fallbackURL, token, options);
-    return;
-  }
   const wsError = await streamSessionEventsViaWS(token, sessionID, options);
   if (!wsError) {
     return;
@@ -1038,12 +1030,7 @@ export async function streamSessionEvents(token: string, sessionID: string, opti
   const v2URL = query
     ? `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/stream?${query}`
     : `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/stream`;
-  try {
-    await streamSessionEventsViaSSE(v2URL, token, options);
-  } catch (err) {
-    void err;
-    await streamSessionEventsViaSSE(fallbackURL, token, options);
-  }
+  await streamSessionEventsViaSSE(v2URL, token, options);
 }
 
 async function streamSessionEventsViaWS(

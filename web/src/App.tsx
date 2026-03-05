@@ -17,10 +17,8 @@ import {
   codexPlatformMCP,
   discoverCodexSessions,
   discoverCodexModels,
-  archiveSession,
   deleteProject,
   deleteHost,
-  enqueueRunJob,
   forkCodexV2Session,
   getMetrics,
   getRunJob,
@@ -35,7 +33,6 @@ import {
   listRuntimes,
   listSessions,
   probeHost,
-  runFanout,
   startCodexV2Session,
   startCodexV2Turn,
   streamSessionEvents,
@@ -49,8 +46,6 @@ import {
   type SessionStreamFrame,
   type RunJobEvent,
   type RunJobRecord,
-  type RunRequest,
-  type RunResponse,
   type CodexPlatformResult,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
@@ -318,22 +313,6 @@ function isJobActive(job: RunJobRecord | null | undefined): boolean {
   return job.status === "pending" || job.status === "running";
 }
 
-function summarizeRunResponse(response: RunResponse): string {
-  const lines = [
-    `runtime=${response.runtime}`,
-    `total=${response.summary.total} succeeded=${response.summary.succeeded} failed=${response.summary.failed}`,
-    `fanout=${response.summary.fanout} duration=${response.summary.duration_ms}ms`,
-  ];
-  for (const target of response.targets) {
-    const status = target.ok ? "ok" : "failed";
-    const exit = target.result.exit_code ?? "n/a";
-    const hint = target.error_hint ? ` hint=${target.error_hint}` : "";
-    const err = target.error ? ` error=${target.error}` : "";
-    lines.push(`${target.host.name}: ${status} exit=${exit}${hint}${err}`);
-  }
-  return lines.join("\n");
-}
-
 function sessionEventHostLabel(payload: Record<string, unknown>): string {
   const hostName =
     typeof payload.host_name === "string" ? payload.host_name.trim() : "";
@@ -409,10 +388,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function isLocalDraftSessionID(sessionID: string): boolean {
   return /^session_\d+_\d+$/.test(sessionID.trim());
-}
-
-function isLegacyJobBackedSessionID(sessionID: string): boolean {
-  return /^session_cli_/i.test(sessionID.trim());
 }
 
 function extractThreadIDFromCodexSessionResponse(
@@ -491,15 +466,6 @@ function extractRunIDFromCodexRPC(
       : "";
   if (direct) return direct;
   return extractTurnIDFromPayload(params);
-}
-
-function shouldFallbackToLegacyJobs(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const message = error.message.toLowerCase();
-  if (message.includes(" 404 ")) return true;
-  if (message.includes(" not found")) return true;
-  if (message.includes("/v2/codex/")) return true;
-  return false;
 }
 
 function gatherMessageText(value: unknown, depth = 0): string[] {
@@ -1280,8 +1246,6 @@ export function App() {
     setRunSandbox,
     runAsyncMode,
     setRunAsyncMode,
-    fanoutValue,
-    maxOutputKB,
     isRefreshing,
     setIsRefreshing,
     activeJobID,
@@ -4811,17 +4775,9 @@ export function App() {
 
     setDeletingThreadID(targetSessionID);
     try {
-      const runtimeName = activeRuntime?.name ?? selectedRuntime;
-      if (
-        runtimeName === "codex" &&
-        !isLegacyJobBackedSessionID(targetSessionID)
-      ) {
-        await archiveCodexV2Session(token, targetSessionID, {
-          host_id: activeWorkspace?.hostID?.trim() || undefined,
-        });
-      } else {
-        await archiveSession(token, targetSessionID);
-      }
+      await archiveCodexV2Session(token, targetSessionID, {
+        host_id: activeWorkspace?.hostID?.trim() || undefined,
+      });
       stopSessionStream(targetSessionID);
       deleteSessionEventCursor(targetSessionID);
       sessionRunStateRef.current.delete(targetSessionID);
@@ -4935,8 +4891,6 @@ export function App() {
       );
     }
 
-    const fanout = Math.max(1, Number.parseInt(fanoutValue, 10) || 1);
-    const outputCap = Math.max(32, Number.parseInt(maxOutputKB, 10) || 256);
     const effectiveModel =
       activeThread.model.trim() ||
       sessionModelDefault.trim() ||
@@ -4946,52 +4900,10 @@ export function App() {
       activeThread.sandbox || runSandbox || "workspace-write";
     const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
 
-    const codexRequest: RunRequest["codex"] =
-      (activeRuntime?.name ?? selectedRuntime) === "codex"
-        ? {
-            mode: "exec",
-            model: effectiveModel,
-            ask_for_approval: activeThread.approvalPolicy || undefined,
-            search: activeThread.webSearch ? true : undefined,
-            profile: activeThread.profile.trim() || undefined,
-            config:
-              activeThread.configFlags.length > 0
-                ? activeThread.configFlags
-                : undefined,
-            enable:
-              activeThread.enableFlags.length > 0
-                ? activeThread.enableFlags
-                : undefined,
-            disable:
-              activeThread.disableFlags.length > 0
-                ? activeThread.disableFlags
-                : undefined,
-            json_output: activeThread.jsonOutput,
-            skip_git_repo_check: activeThread.skipGitRepoCheck,
-            ephemeral: activeThread.ephemeral,
-            sandbox: effectiveSandbox,
-            add_dirs:
-              activeThread.addDirs.length > 0 ? activeThread.addDirs : undefined,
-            images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
-          }
-        : undefined;
-
     const runtimeName = activeRuntime?.name ?? selectedRuntime;
-    const useCodexV2Session =
-      runtimeName === "codex" &&
-      !isLegacyJobBackedSessionID(activeThread.id);
-
-    const request: RunRequest = {
-      runtime: runtimeName,
-      prompt,
-      session_id: activeThread.id,
-      all_hosts: false,
-      host_ids: targetHostIDs,
-      workdir: effectiveWorkdir,
-      fanout,
-      max_output_kb: outputCap,
-      codex: codexRequest,
-    };
+    if (runtimeName !== "codex") {
+      throw new Error("Session mode only supports codex runtime.");
+    }
 
     addTimelineEntry(
       {
@@ -5008,125 +4920,72 @@ export function App() {
 
     setSubmittingThreadID(activeThread.id);
     try {
-      if (useCodexV2Session) {
-        try {
-          const targetHostID = targetHostIDs[0]?.trim() ?? "";
-          if (!targetHostID) {
-            throw new Error("host_id is required for codex v2 session");
-          }
+      const targetHostID = targetHostIDs[0]?.trim() ?? "";
+      if (!targetHostID) {
+        throw new Error("host_id is required for codex v2 session");
+      }
 
-          let sessionID = activeThread.id.trim();
-          if (isLocalDraftSessionID(sessionID)) {
-            const sessionResp = await startCodexV2Session(token, {
-              host_id: targetHostID,
-              path: effectiveWorkdir,
-              title: activeThread.title,
-              model: effectiveModel,
-              approval_policy: activeThread.approvalPolicy || undefined,
-              sandbox: effectiveSandbox,
-            });
-            const resolvedSessionID =
-              extractThreadIDFromCodexSessionResponse(sessionResp) ||
-              sessionResp.session.id.trim();
-            if (!resolvedSessionID) {
-              throw new Error("thread/start returned empty session id");
-            }
-            const previousSessionID = sessionID;
-            sessionID = bindThreadID(previousSessionID, resolvedSessionID, {
-              title: sessionResp.session.title,
-            });
-            targetThreadID = sessionID;
-            if (previousSessionID !== sessionID) {
-              stopSessionStream(previousSessionID, { preserveRunState: false, preserveHealth: false });
-              deleteSessionEventCursor(previousSessionID);
-              sessionRunStateRef.current.delete(previousSessionID);
-            }
-          }
-
-          const turnInput: Array<Record<string, unknown>> = [
-            { type: "text", text: prompt },
-          ];
-          for (const imagePath of safeImagePaths) {
-            const trimmedPath = imagePath.trim();
-            if (!trimmedPath) continue;
-            turnInput.push({
-              type: "input_image",
-              image_url: trimmedPath,
-            });
-          }
-
-          const turnResp = await startCodexV2Turn(token, sessionID, {
-            host_id: targetHostID,
-            input: turnInput,
-            model: effectiveModel,
-            cwd: effectiveWorkdir,
-            approval_policy: activeThread.approvalPolicy || undefined,
-            sandbox: effectiveSandbox,
-          });
-          const turnID = extractTurnIDFromPayload(turnResp);
-          const runID = turnID || `run_${Date.now()}`;
-          ensureSessionRunState(sessionID, runID);
-          setThreadJobState(sessionID, runID, "running");
-          setActiveJobThreadID(sessionID);
-          if (sessionID === activeThreadIDRef.current) {
-            setActiveJobID(runID);
-          }
-          if (!sessionStreamStateRef.current.has(sessionID)) {
-            startSessionStream(sessionID, token);
-          }
-          setSubmittingThreadID("");
-          return;
-        } catch (error) {
-          if (!shouldFallbackToLegacyJobs(error)) {
-            throw error;
-          }
+      let sessionID = activeThread.id.trim();
+      if (isLocalDraftSessionID(sessionID)) {
+        const sessionResp = await startCodexV2Session(token, {
+          host_id: targetHostID,
+          path: effectiveWorkdir,
+          title: activeThread.title,
+          model: effectiveModel,
+          approval_policy: activeThread.approvalPolicy || undefined,
+          sandbox: effectiveSandbox,
+        });
+        const resolvedSessionID =
+          extractThreadIDFromCodexSessionResponse(sessionResp) ||
+          sessionResp.session.id.trim();
+        if (!resolvedSessionID) {
+          throw new Error("thread/start returned empty session id");
+        }
+        const previousSessionID = sessionID;
+        sessionID = bindThreadID(previousSessionID, resolvedSessionID, {
+          title: sessionResp.session.title,
+        });
+        targetThreadID = sessionID;
+        if (previousSessionID !== sessionID) {
+          stopSessionStream(previousSessionID, { preserveRunState: false, preserveHealth: false });
+          deleteSessionEventCursor(previousSessionID);
+          sessionRunStateRef.current.delete(previousSessionID);
         }
       }
 
-      request.session_id = targetThreadID;
-      if (runAsyncMode) {
-        const { body } = await enqueueRunJob(token, request);
-        jobEventCursorRef.current.set(body.job.id, 0);
-        jobStreamSeenRef.current.set(body.job.id, false);
-        ensureSessionRunState(activeThread.id, body.job.id);
-        setActiveJobID(body.job.id);
-        setActiveJobThreadID(activeThread.id);
-        setActiveJob(body.job);
-        setThreadJobState(activeThread.id, body.job.id, "running");
-        setJobs((prev) => [
-          body.job,
-          ...prev.filter((job) => job.id !== body.job.id),
-        ]);
-        setSubmittingThreadID("");
-      } else {
-        const { status, body } = await runFanout(token, request);
-        addTimelineEntry(
-          {
-            kind: "assistant",
-            state: status >= 400 ? "error" : "success",
-            title: `Response Finished (HTTP ${status})`,
-            body: summarizeRunResponse(body),
-          },
-          activeThread.id,
-        );
-
-        const [nextRuns, nextJobs, nextAudit, nextMetrics] = await Promise.all([
-          listRuns(token, 20),
-          listRunJobs(token, 20),
-          listAudit(token, 80),
-          getMetrics(token),
-        ]);
-        setRuns(nextRuns);
-        setJobs(nextJobs);
-        setAuditEvents(nextAudit);
-        setMetrics(nextMetrics);
-        setThreadJobState(
-          activeThread.id,
-          "",
-          status >= 400 ? "failed" : "succeeded",
-        );
-        setSubmittingThreadID("");
+      const turnInput: Array<Record<string, unknown>> = [
+        { type: "text", text: prompt },
+      ];
+      for (const imagePath of safeImagePaths) {
+        const trimmedPath = imagePath.trim();
+        if (!trimmedPath) continue;
+        turnInput.push({
+          type: "input_image",
+          image_url: trimmedPath,
+        });
       }
+
+      const turnResp = await startCodexV2Turn(token, sessionID, {
+        host_id: targetHostID,
+        input: turnInput,
+        model: effectiveModel,
+        cwd: effectiveWorkdir,
+        approval_policy: activeThread.approvalPolicy || undefined,
+        sandbox: effectiveSandbox,
+      });
+      const turnID = extractTurnIDFromPayload(turnResp);
+      const runID = turnID || `run_${Date.now()}`;
+      ensureSessionRunState(sessionID, runID);
+      setThreadJobState(sessionID, runID, "running");
+      setActiveJobThreadID(sessionID);
+      if (sessionID === activeThreadIDRef.current) {
+        setActiveJobID(runID);
+      }
+      if (!sessionStreamStateRef.current.has(sessionID)) {
+        startSessionStream(sessionID, token);
+      }
+      setSubmittingThreadID("");
+      return;
     } catch (error) {
       finalizeAssistantStreamEntry(targetThreadID, "error");
       addTimelineEntry(
@@ -5159,10 +5018,7 @@ export function App() {
     setCancelingThreadID(activeThread.id);
     try {
       const runtimeName = activeRuntime?.name ?? selectedRuntime;
-      const preferCodexV2 =
-        runtimeName === "codex" &&
-        !isLegacyJobBackedSessionID(activeThread.id);
-      if (preferCodexV2) {
+      if (runtimeName === "codex") {
         await interruptCodexV2Turn(token, activeThread.id, runID, {
           host_id: activeWorkspace?.hostID?.trim() || undefined,
         });
@@ -5179,16 +5035,6 @@ export function App() {
         activeThread.id,
       );
     } catch (error) {
-      if (
-        (activeRuntime?.name ?? selectedRuntime) === "codex" &&
-        !isLegacyJobBackedSessionID(activeThread.id)
-      ) {
-        try {
-          await cancelRunJob(token, runID);
-        } catch {
-          // no-op: keep primary interrupt error below
-        }
-      }
       addTimelineEntry(
         {
           kind: "system",
@@ -5230,8 +5076,7 @@ export function App() {
     const runtimeName = activeRuntime?.name ?? selectedRuntime;
     if (
       runtimeName !== "codex" ||
-      isLocalDraftSessionID(activeThread.id) ||
-      isLegacyJobBackedSessionID(activeThread.id)
+      isLocalDraftSessionID(activeThread.id)
     ) {
       forkThread(activeThread.id);
       return;
