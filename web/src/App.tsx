@@ -9,8 +9,6 @@ import {
 import {
   API_BASE,
   discoverCodexSessions,
-  discoverCodexModels,
-  getRunJob,
   listHosts,
   listProjects,
   listSessions,
@@ -43,6 +41,7 @@ import { useSessionAlerts } from "./features/session/use-session-alerts";
 import { useSessionEventCursor } from "./features/session/use-session-event-cursor";
 import { useOpsPolling } from "./features/session/use-ops-polling";
 import { useSessionJobPolling } from "./features/session/use-session-job-polling";
+import { useSessionRuntimeEffects } from "./features/session/use-session-runtime-effects";
 import { useSessionStreamHealth } from "./features/session/use-session-stream-health";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import {
@@ -1280,114 +1279,30 @@ export function App() {
     void unlockWorkspace(cached);
   }, []);
 
-  useEffect(() => {
-    const ready = authPhase === "ready" && token.trim() !== "";
-    if (!ready) {
-      streamAuthTokenRef.current = "";
-      stopAllSessionStreams();
-      return;
-    }
-    if (streamAuthTokenRef.current !== token) {
-      stopAllSessionStreams();
-      streamAuthTokenRef.current = token;
-    }
-
-    const expected = new Set(sessionStreamTargetIDs);
-    for (const sessionID of expected) {
-      if (!sessionStreamStateRef.current.has(sessionID)) {
-        startSessionStream(sessionID, token);
-      }
-    }
-    for (const sessionID of Array.from(sessionStreamStateRef.current.keys())) {
-      if (expected.has(sessionID)) continue;
-      stopSessionStream(sessionID);
-    }
-  }, [authPhase, token, sessionStreamTargetIDs]);
-
-  useEffect(() => {
-    return () => {
-      stopAllSessionStreams();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (!activeSessionHostID) return;
-    if (!runtimes.some((runtime) => runtime.name === "codex")) return;
-    let canceled = false;
-    void discoverCodexModels(token, { host_id: activeSessionHostID })
-      .then((catalog) => {
-        if (canceled) return;
-        const nextDefault = catalog.default_model?.trim() || "";
-        const nextModels = Array.isArray(catalog.models)
-          ? catalog.models.filter((name) => name.trim() !== "")
-          : [];
-        setSessionModelDefault(nextDefault);
-        setSessionModelOptions(nextModels);
-      })
-      .catch(() => {
-        if (canceled) return;
-        setSessionModelDefault("");
-        setSessionModelOptions([]);
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [authPhase, token, activeSessionHostID, runtimes]);
-
-  useEffect(() => {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (appMode !== "session") return;
-    if (!runtimes.some((runtime) => runtime.name === "codex")) return;
-    if (hosts.length === 0) return;
-    if (runningThreadJobs.length > 0 || submittingThreadID !== "") return;
-
-    let canceled = false;
-    const refresh = async () => {
-      try {
-        await refreshProjectsFromSource(token, hosts, true, true);
-      } catch {
-        // no-op: best-effort title/session sync
-      }
-    };
-
-    const timer = window.setInterval(() => {
-      if (canceled) return;
-      void refresh();
-    }, 25000);
-
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, [
+  useSessionRuntimeEffects({
     authPhase,
     token,
     appMode,
-    hosts,
+    sessionStreamTargetIDs,
+    sessionStreamStateRef,
+    streamAuthTokenRef,
+    stopAllSessionStreams,
+    startSessionStream,
+    stopSessionStream,
+    activeSessionHostID,
     runtimes,
-    runningThreadJobs.length,
+    setSessionModelDefault,
+    setSessionModelOptions,
+    hosts,
+    runningThreadJobsLength: runningThreadJobs.length,
     submittingThreadID,
-  ]);
-
-  useEffect(() => {
-    if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
-    const activeRunID = activeThread?.activeJobID?.trim() ?? "";
-    if (!activeRunID || !knownJobIDSet.has(activeRunID)) {
-      setActiveJobID("");
-      setActiveJob(null);
-      return;
-    }
-    void getRunJob(token, activeRunID)
-      .then((job) => {
-        setActiveJobID(job.id);
-        setActiveJob(job);
-      })
-      .catch(() => {
-        setActiveJobID("");
-        setActiveJob(null);
-      });
-  }, [appMode, authPhase, token, activeThread?.id, activeThread?.activeJobID, knownJobIDSet]);
+    refreshProjectsFromSource,
+    activeThreadID,
+    activeThreadActiveJobID: activeThread?.activeJobID?.trim() ?? "",
+    knownJobIDSet,
+    setActiveJobID,
+    setActiveJob,
+  });
 
   useSessionJobPolling({
     authPhase,
