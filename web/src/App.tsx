@@ -17,7 +17,6 @@ import {
   codexPlatformMCP,
   discoverCodexSessions,
   discoverCodexModels,
-  deleteProject,
   deleteHost,
   forkCodexV2Session,
   getMetrics,
@@ -37,7 +36,6 @@ import {
   startCodexV2Turn,
   uploadImage,
   upsertHost,
-  upsertProject,
   type Host,
   type SessionRecord,
   type RunJobEvent,
@@ -73,6 +71,7 @@ import {
   buildDiscoveredProjects,
   buildProjectsFromRecords,
 } from "./features/session/project-sync";
+import { createProjectActions } from "./features/session/project-actions";
 import {
   buildSessionCommandPaletteActions,
   normalizeSearchText,
@@ -102,7 +101,6 @@ import {
   type SessionAlert,
   type SessionLastStatus,
   type SessionTreeHost,
-  type SessionTreeProject,
 } from "./features/session/types";
 import {
   collectVisibleTreeSessionIDs,
@@ -154,7 +152,6 @@ import {
   clipStreamText,
   deriveSessionTitleFromPrompt,
   isGenericSessionTitle,
-  resolveProjectTitle,
 } from "./features/session/utils";
 type AuthPhase = "checking" | "locked" | "ready";
 
@@ -1931,216 +1928,24 @@ export function App() {
     await loadWorkspace(token);
   }
 
-  async function onCreateProject(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (authPhase !== "ready" || !token.trim()) return;
-    const hostID = projectFormHostID.trim();
-    const path = projectFormPath.trim();
-    const title = projectFormTitle.trim();
-    if (!hostID || !path) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Project Validation",
-        body: "Server and project path are required.",
-      });
-      return;
-    }
-
-    setUpsertingProjectID("__create__");
-    try {
-      const saved = await upsertProject(token, {
-        host_id: hostID,
-        path,
-        title: title || undefined,
-        runtime: "codex",
-      });
-      await refreshProjectsFromSource(token, hosts, false, true);
-      if (saved.id.trim()) {
-        setActiveWorkspaceID(saved.id.trim());
-      }
-      closeProjectComposer();
-      addTimelineEntry({
-        kind: "system",
-        state: "success",
-        title: "Project Created",
-        body: `${resolveProjectTitle(path, title)} · ${path}`,
-      });
-    } catch (error) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Create Project Failed",
-        body: String(error),
-      });
-    } finally {
-      setUpsertingProjectID("");
-    }
-  }
-
-  async function onRenameProject(project: SessionTreeProject) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const currentTitle = resolveProjectTitle(project.path, project.title);
-    const next = window.prompt("Project name", currentTitle);
-    if (next === null) return;
-    const trimmed = next.trim();
-    if (!trimmed) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Rename Project Failed",
-        body: "Project name is required.",
-      });
-      return;
-    }
-    if (trimmed === currentTitle) return;
-
-    setUpsertingProjectID(project.id);
-    try {
-      const saved = await upsertProject(token, {
-        id: project.id,
-        host_id: project.hostID,
-        path: project.path,
-        title: trimmed,
-        runtime: "codex",
-      });
-      await refreshProjectsFromSource(token, hosts, false, true);
-      if (saved.id.trim()) {
-        setActiveWorkspaceID(saved.id.trim());
-      }
-      addTimelineEntry({
-        kind: "system",
-        state: "success",
-        title: "Project Renamed",
-        body: `${currentTitle} -> ${trimmed}`,
-      });
-    } catch (error) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Rename Project Failed",
-        body: String(error),
-      });
-    } finally {
-      setUpsertingProjectID("");
-    }
-  }
-
-  async function onArchiveProject(
-    projectID: string,
-    projectHostID: string,
-    projectPath: string,
-    sessionCount: number,
-  ) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const sourceProjectID = projectID.trim();
-    const sourceHostID = projectHostID.trim();
-    const sourcePath = projectPath.trim();
-    const loadingKey = sourceProjectID;
-
-    const confirmed = window.confirm(
-      `Archive empty project "${sourcePath}"?`,
-    );
-    if (!confirmed) return;
-
-    setDeletingProjectID(loadingKey);
-
-    let targetProjectID = sourceProjectID;
-    let remoteProjectResolved = sourceProjectIDSet.has(targetProjectID);
-    try {
-      if (!remoteProjectResolved) {
-        try {
-          const remoteProjects = await listProjects(token, 600, {
-            runtime: "codex",
-          });
-          setSourceProjectIDs(
-            remoteProjects
-              .map((project) => project.id.trim())
-              .filter((id) => id !== ""),
-          );
-          const matched =
-            remoteProjects.find(
-              (project) => project.id.trim() === sourceProjectID,
-            ) ??
-            remoteProjects.find(
-              (project) =>
-                project.host_id.trim() === sourceHostID &&
-                project.path.trim() === sourcePath,
-            );
-          if (matched?.id?.trim()) {
-            targetProjectID = matched.id.trim();
-            remoteProjectResolved = true;
-          }
-        } catch {
-          // no-op: keep fallback to local-only message below
-        }
-      }
-
-      if (!remoteProjectResolved || !targetProjectID) {
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Archive Unavailable",
-            body: "Project is local-only and cannot be archived remotely.",
-          },
-          activeThreadID,
-        );
-        return;
-      }
-
-      let resolvedSessionCount = sessionCount;
-      try {
-        const remoteSessions = await listSessions(token, 200, {
-          project_id: targetProjectID,
-          runtime: "codex",
-        });
-        resolvedSessionCount = remoteSessions.length;
-      } catch {
-        // fallback to current UI count
-      }
-
-      if (resolvedSessionCount > 0) {
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Archive Blocked",
-            body:
-              resolvedSessionCount === 1
-                ? "Project still has 1 session. Archive it first."
-                : `Project still has ${resolvedSessionCount} sessions. Archive them first.`,
-          },
-          activeThreadID,
-        );
-        return;
-      }
-
-      await deleteProject(token, targetProjectID);
-      await refreshProjectsFromSource(token, hosts, false, true);
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "success",
-          title: "Project Archived",
-          body: projectPath,
-        },
-        activeThreadID,
-      );
-    } catch (error) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Project Archive Failed",
-          body: String(error),
-        },
-        activeThreadID,
-      );
-    } finally {
-      setDeletingProjectID("");
-    }
-  }
+  const { onCreateProject, onRenameProject, onArchiveProject } =
+    createProjectActions({
+      authPhase,
+      token,
+      projectFormHostID,
+      projectFormPath,
+      projectFormTitle,
+      hosts,
+      sourceProjectIDSet,
+      activeThreadID,
+      addTimelineEntry,
+      setUpsertingProjectID,
+      setDeletingProjectID,
+      setSourceProjectIDs,
+      setActiveWorkspaceID,
+      closeProjectComposer,
+      refreshProjectsFromSource,
+    });
 
   async function onArchiveActiveSession() {
     if (authPhase !== "ready" || !token.trim() || !activeThread) return;
