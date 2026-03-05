@@ -36,14 +36,13 @@ async function mockSessionApi(
   marker: string,
   options?: MockOptions,
 ): Promise<MockHarness> {
-  let jobPollCount = 0;
-  let eventPollCount = 0;
   let runReqCount = 0;
   let imageUploadCount = 0;
   let lastRunRequest: Record<string, unknown> | null = null;
   let lastPlatformLoginRequest: Record<string, unknown> | null = null;
   let lastPlatformMCPRequest: Record<string, unknown> | null = null;
   let lastPlatformCloudRequest: Record<string, unknown> | null = null;
+
   const streamPattern = options?.streamPattern ?? "ready-only";
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
@@ -56,11 +55,22 @@ async function mockSessionApi(
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
+
   let sessionOneStreamAttempts = 0;
+  let firstTurnDelayApplied = false;
+  let backgroundCompletionEmitted = false;
+  let sessionStartCounter = 0;
+  let forkCounter = 0;
   const sessionOneStreamAfterValues: number[] = [];
-  let canceled = false;
+
   const nowISO = new Date().toISOString();
-  const sessions = [
+  const sessions: Array<{
+    id: string;
+    project_id: string;
+    title: string;
+    updated_at: string;
+    created_at: string;
+  }> = [
     {
       id: "session_cli_1",
       project_id: "project_local_1__srv_work",
@@ -80,6 +90,7 @@ async function mockSessionApi(
         ]
       : []),
   ];
+
   const projectRecords: Array<{
     id: string;
     host_id: string;
@@ -102,12 +113,251 @@ async function mockSessionApi(
     },
   ];
 
+  type TurnState = {
+    runID: string;
+    phase: "pending" | "started" | "completed" | "canceled";
+    remainingPolls: number;
+  };
+
+  const turnStates: TurnState[] = [];
+  const sessionOneEvents: Array<Record<string, unknown>> = [];
+  const sessionTwoEvents: Array<Record<string, unknown>> = [];
+  let sessionOneSeq = 0;
+  let sessionTwoSeq = 0;
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
+
+  const nextSessionOneSeq = (): number => {
+    sessionOneSeq += 1;
+    return sessionOneSeq;
+  };
+
+  const nextSessionTwoSeq = (): number => {
+    sessionTwoSeq += 1;
+    return sessionTwoSeq;
+  };
+
+  const pushSessionOneEvent = (
+    runID: string,
+    type: string,
+    payload: Record<string, unknown>,
+    createdAt: string,
+  ) => {
+    sessionOneEvents.push({
+      seq: nextSessionOneSeq(),
+      session_id: "session_cli_1",
+      run_id: runID,
+      type,
+      payload,
+      created_at: createdAt,
+    });
+  };
+
+  const pushSessionTwoEvent = (
+    runID: string,
+    type: string,
+    payload: Record<string, unknown>,
+    createdAt: string,
+  ) => {
+    sessionTwoEvents.push({
+      seq: nextSessionTwoSeq(),
+      session_id: "session_cli_2",
+      run_id: runID,
+      type,
+      payload,
+      created_at: createdAt,
+    });
+  };
+
+  const chunkFromText = (text: string, includePrelude: boolean): string => {
+    const chunkLines: string[] = [];
+    if (includePrelude) {
+      chunkLines.push('{"type":"thread.started","thread_id":"t_ux"}');
+      chunkLines.push('{"type":"turn.started"}');
+      if (runtimeCommandEvents) {
+        chunkLines.push(
+          JSON.stringify({
+            type: "item.started",
+            item: {
+              id: "item_cmd_1",
+              type: "command_execution",
+              command: "ls -la",
+              aggregated_output: "",
+              exit_code: null,
+              status: "in_progress",
+            },
+          }),
+        );
+        chunkLines.push(
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "item_cmd_1",
+              type: "command_execution",
+              command: "ls -la",
+              aggregated_output: "README.md",
+              exit_code: 0,
+              status: "completed",
+            },
+          }),
+        );
+      }
+    }
+    chunkLines.push(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text },
+      }),
+    );
+    return `${chunkLines.join("\n")}\n`;
+  };
+
+  const appendTurnStartEvents = (turnState: TurnState) => {
+    const startedAt = new Date().toISOString();
+    pushSessionOneEvent(turnState.runID, "run.started", { turn_id: turnState.runID }, startedAt);
+    pushSessionOneEvent(
+      turnState.runID,
+      "target.started",
+      { host_name: "local-default", attempt: 1 },
+      startedAt,
+    );
+
+    const replyLines = assistantReply.split("\n");
+    for (let index = 0; index < assistantDeltaEvents; index += 1) {
+      const ratio = (index + 1) / assistantDeltaEvents;
+      const lineCount = Math.max(
+        1,
+        Math.min(replyLines.length, Math.round(replyLines.length * ratio)),
+      );
+      const text = replyLines.slice(0, lineCount).join("\n");
+      pushSessionOneEvent(
+        turnState.runID,
+        "assistant.delta",
+        { chunk: chunkFromText(text, index === 0) },
+        startedAt,
+      );
+    }
+  };
+
+  const appendTurnTerminalEvents = (turnState: TurnState) => {
+    const finishedAt = new Date().toISOString();
+    pushSessionOneEvent(
+      turnState.runID,
+      "target.done",
+      {
+        host_name: "local-default",
+        status: "ok",
+        exit_code: 0,
+      },
+      finishedAt,
+    );
+    pushSessionOneEvent(
+      turnState.runID,
+      "assistant.completed",
+      { turn_id: turnState.runID },
+      finishedAt,
+    );
+    if (titleUpdate) {
+      pushSessionOneEvent(
+        turnState.runID,
+        "session.title.updated",
+        { title: titleUpdate },
+        finishedAt,
+      );
+    }
+    pushSessionOneEvent(
+      turnState.runID,
+      "run.completed",
+      { turn_id: turnState.runID },
+      finishedAt,
+    );
+  };
+
+  const materializeSessionOneEventsForStream = async () => {
+    if (streamPattern !== "completion-once" && streamPattern !== "ready-only") {
+      return;
+    }
+    const current = turnStates.find(
+      (state) => state.phase === "pending" || state.phase === "started",
+    );
+    if (!current) return;
+
+    if (current.phase === "pending") {
+      if (!firstTurnDelayApplied && jobEventFirstPollDelayMS > 0) {
+        firstTurnDelayApplied = true;
+        await sleep(jobEventFirstPollDelayMS);
+      }
+      appendTurnStartEvents(current);
+      current.phase = "started";
+    }
+
+    if (current.phase === "started") {
+      if (current.remainingPolls > 1) {
+        current.remainingPolls -= 1;
+        return;
+      }
+      appendTurnTerminalEvents(current);
+      current.phase = "completed";
+      current.remainingPolls = 0;
+    }
+  };
+
+  const ensureSessionTwoBackgroundCompletion = () => {
+    if (!includeSecondSession || !backgroundCompletion || backgroundCompletionEmitted) {
+      return;
+    }
+    backgroundCompletionEmitted = true;
+    const runID = "turn_bg_1";
+    const startedAt = new Date(Date.now() - 1400).toISOString();
+    const finishedAt = new Date().toISOString();
+    const streamChunk =
+      '{"type":"thread.started","thread_id":"t_bg"}\n' +
+      '{"type":"turn.started"}\n' +
+      `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: `background reply ${marker}` } })}\n`;
+
+    pushSessionTwoEvent(runID, "run.started", { turn_id: runID }, startedAt);
+    pushSessionTwoEvent(runID, "assistant.delta", { chunk: streamChunk }, startedAt);
+    pushSessionTwoEvent(runID, "assistant.completed", { turn_id: runID }, finishedAt);
+    pushSessionTwoEvent(runID, "run.completed", { turn_id: runID }, finishedAt);
+  };
+
+  const buildSSEBody = (
+    sessionID: string,
+    cursor: number,
+    allEvents: Array<Record<string, unknown>>,
+  ): string => {
+    const replay = allEvents.filter((event) => {
+      const seq = typeof event.seq === "number" ? event.seq : 0;
+      return seq > cursor;
+    });
+    const lines: string[] = [
+      "event: session.ready",
+      `data: ${JSON.stringify({ session_id: sessionID, cursor })}`,
+      "",
+    ];
+    for (const event of replay) {
+      const seq = typeof event.seq === "number" ? String(event.seq) : "";
+      if (seq) {
+        lines.push(`id: ${seq}`);
+      }
+      lines.push("event: session.event");
+      lines.push(`data: ${JSON.stringify(event)}`);
+      lines.push("");
+    }
+    lines.push("");
+    return lines.join("\n");
+  };
+
   await page.route("**/v1/healthz", async (route) => {
     await route.fulfill({
       status: 200,
       json: { ok: true, timestamp: "2026-03-03T00:00:00Z" },
     });
   });
+
   await page.route("**/v1/hosts", async (route, request) => {
     if (request.method() !== "GET") {
       await route.fallback();
@@ -130,6 +380,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/runtimes", async (route) => {
     await route.fulfill({
       status: 200,
@@ -149,12 +400,15 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/runs**", async (route) => {
     await route.fulfill({ status: 200, json: { runs: [] } });
   });
+
   await page.route("**/v1/audit**", async (route) => {
     await route.fulfill({ status: 200, json: { events: [] } });
   });
+
   await page.route("**/v1/metrics", async (route) => {
     await route.fulfill({
       status: 200,
@@ -178,6 +432,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/admin/retention", async (route, request) => {
     if (request.method() !== "GET" && request.method() !== "POST") {
       await route.fallback();
@@ -194,6 +449,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/codex/models**", async (route) => {
     await route.fulfill({
       status: 200,
@@ -204,6 +460,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/codex/platform/login", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -252,6 +509,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/codex/platform/mcp", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -296,6 +554,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/codex/platform/cloud", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -343,6 +602,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/files/images", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -359,6 +619,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/projects**", async (route, request) => {
     const method = request.method();
     if (method === "GET") {
@@ -456,6 +717,7 @@ async function mockSessionApi(
     }
     await route.fallback();
   });
+
   await page.route("**/v1/sessions?**", async (route, request) => {
     const url = new URL(request.url());
     const projectIDFilter = (url.searchParams.get("project_id") ?? "").trim();
@@ -479,206 +741,7 @@ async function mockSessionApi(
       },
     });
   });
-  await page.route("**/v1/sessions/session_cli_1/stream**", async (route) => {
-    const url = new URL(route.request().url());
-    const streamAfterRaw = url.searchParams.get("after") ?? "0";
-    const streamAfter = Number.parseInt(streamAfterRaw, 10);
-    const safeStreamAfter = Number.isFinite(streamAfter) && streamAfter > 0
-      ? streamAfter
-      : 0;
-    sessionOneStreamAfterValues.push(safeStreamAfter);
-    if (sessionOneStreamAttempts < streamFailAttempts) {
-      sessionOneStreamAttempts += 1;
-      await route.fulfill({
-        status: 503,
-        body: "stream temporarily unavailable",
-      });
-      return;
-    }
-    if (streamPattern === "completion-once") {
-      const chunkFromText = (text: string, includePrelude: boolean): string => {
-        const chunkLines: string[] = [];
-        if (includePrelude) {
-          chunkLines.push(`{"type":"thread.started","thread_id":"t_ux"}`);
-          chunkLines.push(`{"type":"turn.started"}`);
-          if (runtimeCommandEvents) {
-            chunkLines.push(
-              JSON.stringify({
-                type: "item.started",
-                item: {
-                  id: "item_cmd_1",
-                  type: "command_execution",
-                  command: "ls -la",
-                  aggregated_output: "",
-                  exit_code: null,
-                  status: "in_progress",
-                },
-              }),
-            );
-            chunkLines.push(
-              JSON.stringify({
-                type: "item.completed",
-                item: {
-                  id: "item_cmd_1",
-                  type: "command_execution",
-                  command: "ls -la",
-                  aggregated_output: "README.md",
-                  exit_code: 0,
-                  status: "completed",
-                },
-              }),
-            );
-          }
-        }
-        chunkLines.push(
-          JSON.stringify({
-            type: "item.completed",
-            item: { type: "agent_message", text },
-          }),
-        );
-        return `${chunkLines.join("\n")}\n`;
-      };
-      const replyLines = assistantReply.split("\n");
-      const deltaChunks: string[] = [];
-      for (let index = 0; index < assistantDeltaEvents; index += 1) {
-        const ratio = (index + 1) / assistantDeltaEvents;
-        const lineCount = Math.max(
-          1,
-          Math.min(replyLines.length, Math.round(replyLines.length * ratio)),
-        );
-        const text = replyLines.slice(0, lineCount).join("\n");
-        deltaChunks.push(chunkFromText(text, index === 0));
-      }
-      const events = [
-        {
-          seq: 1,
-          type: "run.started",
-          payload: { job_id: "job_ux_1" },
-          createdAt: "2026-03-03T00:00:00Z",
-        },
-        {
-          seq: 2,
-          type: "target.started",
-          payload: { job_id: "job_ux_1", host_name: "local-default", attempt: 1 },
-          createdAt: "2026-03-03T00:00:00Z",
-        },
-        {
-          seq: 3 + deltaChunks.length,
-          type: "target.done",
-          payload: { job_id: "job_ux_1", host_name: "local-default", status: "ok", exit_code: 0 },
-          createdAt: "2026-03-03T00:00:01Z",
-        },
-        {
-          seq: 4 + deltaChunks.length,
-          type: "assistant.completed",
-          payload: { job_id: "job_ux_1", run_id: "job_ux_1" },
-          createdAt: "2026-03-03T00:00:01Z",
-        },
-      ];
-      for (let index = 0; index < deltaChunks.length; index += 1) {
-        events.splice(2 + index, 0, {
-          seq: 3 + index,
-          type: "assistant.delta",
-          payload: { job_id: "job_ux_1", chunk: deltaChunks[index] },
-          createdAt: "2026-03-03T00:00:00Z",
-        });
-      }
-      if (titleUpdate) {
-        events.push({
-          seq: events.length + 1,
-          type: "session.title.updated",
-          payload: { title: titleUpdate },
-          createdAt: "2026-03-03T00:00:01Z",
-        });
-      }
-      events.push({
-        seq: events.length + 1,
-        type: "run.completed",
-        payload: { job_id: "job_ux_1" },
-        createdAt: "2026-03-03T00:00:01Z",
-      });
-      const replayEvents = events.filter((event) => event.seq > safeStreamAfter);
-      const streamLines: string[] = [
-        `event: session.ready`,
-        `data: {"session_id":"session_cli_1","cursor":${safeStreamAfter}}`,
-        ``,
-      ];
-      for (const event of replayEvents) {
-        streamLines.push(`event: session.event`);
-        streamLines.push(
-          `data: ${JSON.stringify({
-            seq: event.seq,
-            session_id: "session_cli_1",
-            run_id: "job_ux_1",
-            type: event.type,
-            payload: event.payload,
-            created_at: event.createdAt,
-          })}`,
-        );
-        streamLines.push(``);
-      }
-      streamLines.push(``);
-      const streamBody = streamLines.join("\n");
-      await route.fulfill({
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-        body: streamBody,
-      });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      headers: { "content-type": "text/event-stream" },
-      body: `event: session.ready\ndata: {"session_id":"session_cli_1","cursor":0}\n\n`,
-    });
-  });
-  await page.route("**/v1/sessions/session_cli_2/stream**", async (route) => {
-    if (!includeSecondSession) {
-      await route.fulfill({
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-        body: `event: session.ready\ndata: {"session_id":"session_cli_2","cursor":0}\n\n`,
-      });
-      return;
-    }
-    if (!backgroundCompletion) {
-      await route.fulfill({
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-        body: `event: session.ready\ndata: {"session_id":"session_cli_2","cursor":0}\n\n`,
-      });
-      return;
-    }
-    const streamChunk =
-      `{"type":"thread.started","thread_id":"t_bg"}\n` +
-      `{"type":"turn.started"}\n` +
-      `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: `background reply ${marker}` } })}\n`;
-    const startedAt = new Date(Date.now() - 1400).toISOString();
-    const finishedAt = new Date().toISOString();
-    const streamBody = [
-      `event: session.ready`,
-      `data: {"session_id":"session_cli_2","cursor":0}`,
-      ``,
-      `event: session.event`,
-      `data: {"seq":1,"session_id":"session_cli_2","run_id":"job_bg_1","type":"run.started","payload":{"job_id":"job_bg_1"},"created_at":"${startedAt}"}`,
-      ``,
-      `event: session.event`,
-      `data: {"seq":2,"session_id":"session_cli_2","run_id":"job_bg_1","type":"assistant.delta","payload":{"job_id":"job_bg_1","chunk":${JSON.stringify(streamChunk)}},"created_at":"${startedAt}"}`,
-      ``,
-      `event: session.event`,
-      `data: {"seq":3,"session_id":"session_cli_2","run_id":"job_bg_1","type":"assistant.completed","payload":{"job_id":"job_bg_1","run_id":"job_bg_1"},"created_at":"${finishedAt}"}`,
-      ``,
-      `event: session.event`,
-      `data: {"seq":4,"session_id":"session_cli_2","run_id":"job_bg_1","type":"run.completed","payload":{"job_id":"job_bg_1"},"created_at":"${finishedAt}"}`,
-      ``,
-      ``,
-    ].join("\n");
-    await route.fulfill({
-      status: 200,
-      headers: { "content-type": "text/event-stream" },
-      body: streamBody,
-    });
-  });
+
   await page.route("**/v1/codex/sessions/discover", async (route) => {
     await route.fulfill({
       status: 200,
@@ -721,246 +784,6 @@ async function mockSessionApi(
     });
   });
 
-  await page.route("**/v1/jobs/run", async (route, request) => {
-    runReqCount += 1;
-    try {
-      const bodyRaw = request.postData() ?? "{}";
-      const parsed = JSON.parse(bodyRaw) as Record<string, unknown>;
-      lastRunRequest = parsed;
-    } catch {
-      lastRunRequest = null;
-    }
-    await route.fulfill({
-      status: 202,
-      json: {
-        job: {
-          id: "job_ux_1",
-          type: "run",
-          status: "pending",
-          runtime: "codex",
-          prompt_preview: `prompt-${marker}`,
-          queued_at: "2026-03-03T00:00:00Z",
-          total_hosts: 1,
-          fanout: 1,
-        },
-      },
-    });
-  });
-  await page.route("**/v1/jobs/job_ux_1", async (route) => {
-    if (canceled) {
-      await route.fulfill({
-        status: 200,
-        json: {
-          job: {
-            id: "job_ux_1",
-            type: "run",
-            status: "canceled",
-            runtime: "codex",
-            prompt_preview: "prompt",
-            queued_at: "2026-03-03T00:00:00Z",
-            started_at: "2026-03-03T00:00:01Z",
-            finished_at: "2026-03-03T00:00:02Z",
-            result_status: 499,
-            total_hosts: 1,
-            succeeded_hosts: 0,
-            failed_hosts: 0,
-            fanout: 1,
-            duration_ms: 1000,
-            error: "canceled while running",
-            response: {
-              runtime: "codex",
-              summary: {
-                total: 1,
-                succeeded: 0,
-                failed: 0,
-                fanout: 1,
-                retry_count: 0,
-                retry_backoff_ms: 1000,
-                duration_ms: 1000,
-                started_at: "2026-03-03T00:00:01Z",
-                finished_at: "2026-03-03T00:00:02Z",
-              },
-              targets: [],
-            },
-          },
-        },
-      });
-      return;
-    }
-    jobPollCount += 1;
-    if (jobPollCount <= jobRunningPolls) {
-      await route.fulfill({
-        status: 200,
-        json: {
-          job: {
-            id: "job_ux_1",
-            type: "run",
-            status: "running",
-            runtime: "codex",
-            prompt_preview: "prompt",
-            queued_at: "2026-03-03T00:00:00Z",
-            started_at: "2026-03-03T00:00:01Z",
-          },
-        },
-      });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      json: {
-        job: {
-          id: "job_ux_1",
-          type: "run",
-          status: "succeeded",
-          runtime: "codex",
-          prompt_preview: "prompt",
-          queued_at: "2026-03-03T00:00:00Z",
-          started_at: "2026-03-03T00:00:01Z",
-          finished_at: "2026-03-03T00:00:02Z",
-          result_status: 200,
-          total_hosts: 1,
-          succeeded_hosts: 1,
-          failed_hosts: 0,
-          fanout: 1,
-          duration_ms: 1000,
-          response: {
-            runtime: "codex",
-            summary: {
-              total: 1,
-              succeeded: 1,
-              failed: 0,
-              fanout: 1,
-              retry_count: 0,
-              retry_backoff_ms: 1000,
-              duration_ms: 1000,
-              started_at: "2026-03-03T00:00:01Z",
-              finished_at: "2026-03-03T00:00:02Z",
-            },
-            targets: [],
-          },
-        },
-      },
-    });
-  });
-  await page.route("**/v1/jobs/job_ux_1/events**", async (route) => {
-    if (eventPollCount === 0 && jobEventFirstPollDelayMS > 0) {
-      await new Promise((resolve) => {
-        setTimeout(resolve, jobEventFirstPollDelayMS);
-      });
-    }
-    if (canceled) {
-      await route.fulfill({
-        status: 200,
-        json: {
-          job_id: "job_ux_1",
-          after: eventPollCount,
-          next_after: Math.max(eventPollCount, 3),
-          events: [
-            {
-              seq: 2,
-              job_id: "job_ux_1",
-              type: "job.cancel_requested",
-              created_at: "2026-03-03T00:00:01Z",
-            },
-            {
-              seq: 3,
-              job_id: "job_ux_1",
-              type: "job.canceled",
-              created_at: "2026-03-03T00:00:02Z",
-            },
-          ],
-        },
-      });
-      return;
-    }
-    if (streamPattern === "completion-once") {
-      await route.fulfill({
-        status: 200,
-        json: {
-          job_id: "job_ux_1",
-          after: eventPollCount,
-          next_after: eventPollCount,
-          events: [],
-        },
-      });
-      return;
-    }
-    eventPollCount += 1;
-    if (eventPollCount > 1) {
-      await route.fulfill({
-        status: 200,
-        json: { job_id: "job_ux_1", after: 4, next_after: 4, events: [] },
-      });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      json: {
-        job_id: "job_ux_1",
-        after: 0,
-        next_after: 4,
-        events: [
-          {
-            seq: 1,
-            job_id: "job_ux_1",
-            type: "job.running",
-            created_at: "2026-03-03T00:00:00Z",
-          },
-          {
-            seq: 2,
-            job_id: "job_ux_1",
-            type: "target.stdout",
-            host_name: "local-default",
-            chunk: [
-              `{"type":"thread.started","thread_id":"t_ux"}`,
-              `{"type":"turn.started"}`,
-              ...(titleUpdate
-                ? [JSON.stringify({ type: "session.title.updated", title: titleUpdate })]
-                : []),
-              JSON.stringify({
-                type: "item.completed",
-                item: { type: "agent_message", text: assistantReply },
-              }),
-            ].join("\n") + "\n",
-            created_at: "2026-03-03T00:00:00Z",
-          },
-          {
-            seq: 3,
-            job_id: "job_ux_1",
-            type: "target.done",
-            host_name: "local-default",
-            status: "ok",
-            exit_code: 0,
-            created_at: "2026-03-03T00:00:00Z",
-          },
-          {
-            seq: 4,
-            job_id: "job_ux_1",
-            type: "job.succeeded",
-            created_at: "2026-03-03T00:00:01Z",
-          },
-        ],
-      },
-    });
-  });
-  await page.route("**/v1/jobs/job_ux_1/cancel", async (route) => {
-    canceled = true;
-    await route.fulfill({
-      status: 200,
-      json: {
-        state: "cancel_requested",
-        job: {
-          id: "job_ux_1",
-          type: "run",
-          status: "running",
-          runtime: "codex",
-          prompt_preview: "prompt",
-          queued_at: "2026-03-03T00:00:00Z",
-          started_at: "2026-03-03T00:00:01Z",
-        },
-      },
-    });
-  });
   await page.route("**/v1/jobs**", async (route) => {
     if (route.request().method() !== "GET") {
       await route.fallback();
@@ -971,31 +794,299 @@ async function mockSessionApi(
       await route.fallback();
       return;
     }
-    const status = canceled
-      ? "canceled"
-      : jobPollCount <= jobRunningPolls
-        ? "running"
-        : "succeeded";
+    const activeTurn = turnStates.find(
+      (state) => state.phase === "pending" || state.phase === "started",
+    );
+    const latestTurn = turnStates.length > 0 ? turnStates[turnStates.length - 1] : null;
+    const status = activeTurn
+      ? "running"
+      : latestTurn?.phase === "canceled"
+        ? "canceled"
+        : latestTurn
+          ? "succeeded"
+          : "succeeded";
+
     await route.fulfill({
       status: 200,
       json: {
-        jobs: [
-          {
-            id: "job_ux_1",
-            type: "run",
-            status,
-            runtime: "codex",
-            prompt_preview: "prompt",
-            queued_at: "2026-03-03T00:00:00Z",
-            result_status: status === "succeeded" ? 200 : undefined,
-            total_hosts: 1,
-            succeeded_hosts: status === "succeeded" ? 1 : 0,
-            failed_hosts: 0,
-            fanout: 1,
-            duration_ms: status === "succeeded" ? 1000 : 0,
-          },
-        ],
+        jobs: latestTurn
+          ? [
+              {
+                id: latestTurn.runID,
+                type: "run",
+                status,
+                runtime: "codex",
+                prompt_preview: "prompt",
+                queued_at: "2026-03-03T00:00:00Z",
+                result_status: status === "succeeded" ? 200 : undefined,
+                total_hosts: 1,
+                succeeded_hosts: status === "succeeded" ? 1 : 0,
+                failed_hosts: 0,
+                fanout: 1,
+                duration_ms: status === "succeeded" ? 1000 : 0,
+              },
+            ]
+          : [],
       },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/start", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const bodyRaw = request.postData() ?? "{}";
+    const body = JSON.parse(bodyRaw) as {
+      path?: string;
+      title?: string;
+    };
+    const path = (body.path ?? "").trim() || "/srv/work";
+    const title = (body.title ?? "").trim() || `Session ${sessions.length + 1}`;
+
+    let project = projectRecords.find((item) => item.path === path);
+    if (!project) {
+      project = {
+        id: `project_local_1__${encodeURIComponent(path)}`,
+        host_id: "local_1",
+        host_name: "local-default",
+        path,
+        title: path.split("/").filter(Boolean).at(-1) || "project",
+        runtime: "codex",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      projectRecords.push(project);
+    }
+
+    sessionStartCounter += 1;
+    const sessionID = `session_cli_new_${sessionStartCounter}`;
+    sessions.push({
+      id: sessionID,
+      project_id: project.id,
+      title,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    await route.fulfill({
+      status: 200,
+      json: {
+        session: {
+          id: sessionID,
+          project_id: project.id,
+          host_id: "local_1",
+          path: project.path,
+          runtime: "codex",
+          title,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        project,
+        thread: {
+          id: sessionID,
+          preview: title,
+        },
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/fork", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sourceID = decodeURIComponent(parts[4] ?? "").trim();
+    const source = sessions.find((item) => item.id === sourceID);
+    const bodyRaw = request.postData() ?? "{}";
+    const body = JSON.parse(bodyRaw) as { title?: string };
+
+    forkCounter += 1;
+    const sessionID = `session_cli_fork_${forkCounter}`;
+    const title =
+      (body.title ?? "").trim() ||
+      (source ? `Fork · ${source.title}` : `Fork · Session ${forkCounter}`);
+    const projectID = source?.project_id ?? "project_local_1__srv_work";
+    sessions.push({
+      id: sessionID,
+      project_id: projectID,
+      title,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const project =
+      projectRecords.find((item) => item.id === projectID) ?? projectRecords[0];
+    await route.fulfill({
+      status: 200,
+      json: {
+        session: {
+          id: sessionID,
+          project_id: project.id,
+          host_id: "local_1",
+          path: project.path,
+          runtime: "codex",
+          title,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        project,
+        thread: {
+          id: sessionID,
+          preview: title,
+        },
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/archive", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+    const index = sessions.findIndex((item) => item.id === sessionID);
+    const deleted = index >= 0 ? sessions.splice(index, 1)[0] : null;
+    await route.fulfill({
+      status: 200,
+      json: {
+        archived: true,
+        deleted: Boolean(deleted),
+        session: deleted
+          ? {
+              id: deleted.id,
+              project_id: deleted.project_id,
+              host_id: "local_1",
+              path: "/srv/work",
+              runtime: "codex",
+              title: deleted.title,
+              created_at: deleted.created_at,
+              updated_at: deleted.updated_at,
+            }
+          : undefined,
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/turns/start", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    runReqCount += 1;
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+
+    try {
+      const bodyRaw = request.postData() ?? "{}";
+      const parsed = JSON.parse(bodyRaw) as Record<string, unknown>;
+      lastRunRequest = parsed;
+    } catch {
+      lastRunRequest = null;
+    }
+
+    if (!sessions.some((item) => item.id === sessionID)) {
+      sessions.push({
+        id: sessionID,
+        project_id: "project_local_1__srv_work",
+        title: `Session ${sessions.length + 1}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    const runID = `turn_${runReqCount}`;
+    turnStates.push({
+      runID,
+      phase: "pending",
+      remainingPolls: jobRunningPolls,
+    });
+
+    await route.fulfill({
+      status: 200,
+      json: {
+        turn_id: runID,
+        turn: { id: runID },
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/turns/*/interrupt", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const runID = decodeURIComponent(parts[6] ?? "").trim();
+    const state = turnStates.find((item) => item.runID === runID);
+    if (state && state.phase !== "completed" && state.phase !== "canceled") {
+      state.phase = "canceled";
+      state.remainingPolls = 0;
+      pushSessionOneEvent(
+        runID,
+        "run.canceled",
+        { turn_id: runID },
+        new Date().toISOString(),
+      );
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        turn_id: runID,
+        interrupted: true,
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/stream**", async (route) => {
+    const url = new URL(route.request().url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+    const streamAfterRaw = url.searchParams.get("after") ?? "0";
+    const streamAfter = Number.parseInt(streamAfterRaw, 10);
+    const safeStreamAfter = Number.isFinite(streamAfter) && streamAfter > 0
+      ? streamAfter
+      : 0;
+
+    if (sessionID === "session_cli_1") {
+      sessionOneStreamAfterValues.push(safeStreamAfter);
+      if (sessionOneStreamAttempts < streamFailAttempts) {
+        sessionOneStreamAttempts += 1;
+        await route.fulfill({
+          status: 503,
+          body: "stream temporarily unavailable",
+        });
+        return;
+      }
+      await materializeSessionOneEventsForStream();
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: buildSSEBody(sessionID, safeStreamAfter, sessionOneEvents),
+      });
+      return;
+    }
+
+    if (sessionID === "session_cli_2") {
+      ensureSessionTwoBackgroundCompletion();
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: buildSSEBody(sessionID, safeStreamAfter, sessionTwoEvents),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: buildSSEBody(sessionID, safeStreamAfter, []),
     });
   });
 
@@ -1009,7 +1100,6 @@ async function mockSessionApi(
     lastPlatformCloudRequest: () => lastPlatformCloudRequest,
   };
 }
-
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
@@ -1343,48 +1433,27 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await expect.poll(() => harness.runRequests()).toBe(1);
 
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.ask_for_approval ?? "");
+    const req = harness.lastRunRequest() as { approval_policy?: string } | null;
+    return String(req?.approval_policy ?? "");
   }).toBe("never");
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.search);
-  }).toBe(true);
+    const req = harness.lastRunRequest() as { sandbox?: string } | null;
+    return String(req?.sandbox ?? "");
+  }).toBe("workspace-write");
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.profile ?? "");
-  }).toBe("default");
+    const req = harness.lastRunRequest() as { cwd?: string } | null;
+    return String(req?.cwd ?? "");
+  }).toBe("/srv/work");
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    const config = req?.codex?.config;
-    return Array.isArray(config) && config.includes("sandbox_workspace_write=true");
-  }).toBe(true);
+    const req = harness.lastRunRequest() as {
+      input?: Array<{ type?: string; text?: string }>;
+    } | null;
+    const first = Array.isArray(req?.input) ? req.input[0] : undefined;
+    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}`;
+  }).toBe(`text:advanced settings ${marker}`);
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    const enable = req?.codex?.enable;
-    return Array.isArray(enable) && enable.includes("web_search");
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    const disable = req?.codex?.disable;
-    return Array.isArray(disable) && disable.includes("legacy_preview");
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    const dirs = req?.codex?.add_dirs;
-    return Array.isArray(dirs) && dirs.includes("/srv/extra");
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.ephemeral);
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.skip_git_repo_check);
-  }).toBe(false);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.json_output);
+    const req = harness.lastRunRequest() as { model?: string } | null;
+    return String(req?.model ?? "").trim().length > 0;
   }).toBe(true);
 });
 
@@ -1402,9 +1471,13 @@ test("composer submits codex exec payload", async ({ page }) => {
   await expect.poll(() => harness.runRequests()).toBe(1);
 
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.mode ?? "");
-  }).toBe("exec");
+    const req = harness.lastRunRequest() as {
+      input?: Array<{ type?: string; text?: string }>;
+      cwd?: string;
+    } | null;
+    const first = Array.isArray(req?.input) ? req.input[0] : undefined;
+    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}|${String(req?.cwd ?? "")}`;
+  }).toBe(`text:exec payload ${marker}|/srv/work`);
 });
 
 test("fork session creates a branch session in project list", async ({ page }) => {
@@ -1417,7 +1490,11 @@ test("fork session creates a branch session in project list", async ({ page }) =
   const initialCount = await sessionChips.count();
   await page.getByTestId("fork-session-btn").click();
   await expect.poll(async () => sessionChips.count()).toBe(initialCount + 1);
-  await expect(page.getByRole("heading", { name: /Fork · Session 1/ })).toBeVisible();
+  await expect(
+    page.locator(".project-session-list .session-chip-tree", {
+      hasText: /Fork · Session 1/,
+    }),
+  ).toHaveCount(1);
 });
 
 test("session stream completion keeps a single assistant reply", async ({
@@ -1495,10 +1572,11 @@ test("stop and regenerate controls work in session composer", async ({
   await expect(
     page.getByRole("heading", { name: "Stopping" }),
   ).toBeVisible();
-
-  const regenerateButton = page.getByRole("button", { name: "Regenerate" });
-  await expect(regenerateButton).toBeVisible({ timeout: 12000 });
-  await regenerateButton.click();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    timeout: 12000,
+  });
+  await composer.fill(`regen after stop ${marker}`);
+  await composer.press("Enter");
   await expect.poll(() => harness.runRequests()).toBe(2);
 });
 
@@ -1891,10 +1969,20 @@ test("stream status recovers after transient failures", async ({ page }) => {
   }
   expect(sawRetryState).toBeTruthy();
   await expect(streamStatus).toContainText("stream live", { timeout: 15000 });
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`recover ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
   await expect(
     page.locator(".message.message-assistant pre", { hasText: `recover ${marker}` }),
   ).toHaveCount(1, { timeout: 15000 });
-  expect(harness.sessionOneStreamAfterValues()).toEqual([0, 0, 0]);
+  await expect.poll(() => harness.sessionOneStreamAfterValues().length >= 3).toBe(
+    true,
+  );
+  expect(harness.sessionOneStreamAfterValues().slice(0, 3)).toEqual([0, 0, 0]);
 
   await page.getByRole("button", { name: "Reconnect" }).click();
   await expect(streamStatus).toContainText("stream live", { timeout: 10000 });

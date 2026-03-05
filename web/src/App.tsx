@@ -2916,12 +2916,6 @@ export function App() {
     });
   }
 
-  function waitFor(ms: number): Promise<void> {
-    return new Promise((resolve) => {
-      window.setTimeout(resolve, ms);
-    });
-  }
-
   function trimCompletedRunsStore() {
     while (completedJobsRef.current.size > MAX_PERSISTED_COMPLETED_RUNS) {
       const oldest = completedJobsRef.current.values().next().value;
@@ -3094,47 +3088,6 @@ export function App() {
       : "";
     let failureSummary = state?.failureHints.join("\n") ?? "";
     let failed = failureSummary.trim() !== "";
-
-    const authToken = tokenRef.current.trim();
-    if (authToken && runID) {
-      const retryDelaysMS = assistantText ? [0] : [0, 200, 350, 550, 900, 1300];
-      for (let attempt = 0; attempt < retryDelaysMS.length; attempt += 1) {
-        const delay = retryDelaysMS[attempt] ?? 0;
-        if (delay > 0) {
-          await waitFor(delay);
-        }
-        try {
-          const job = await getRunJob(authToken, runID);
-          if (!assistantText) {
-            assistantText = extractAssistantTextFromJob(job);
-          }
-          if (jobHasTargetFailures(job)) {
-            failed = true;
-            if (!failureSummary) {
-              failureSummary =
-                summarizeTargetFailures(job) ||
-                (job.error ? String(job.error) : "");
-            }
-          }
-          const hasResponseTargets = Boolean(
-            job.response &&
-            "targets" in job.response &&
-            Array.isArray(job.response.targets),
-          );
-          const terminal =
-            job.status === "succeeded" ||
-            job.status === "failed" ||
-            job.status === "canceled";
-          if (assistantText || failed || (terminal && hasResponseTargets)) {
-            break;
-          }
-        } catch {
-          if (attempt === retryDelaysMS.length - 1) {
-            break;
-          }
-        }
-      }
-    }
 
     if (failed) {
       if (state?.streamSeen) {
