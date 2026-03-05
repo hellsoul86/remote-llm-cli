@@ -2575,6 +2575,7 @@ export function App() {
     const grouped = new Map<
       string,
       {
+        projectID: string;
         hostID: string;
         hostName: string;
         path: string;
@@ -2589,15 +2590,18 @@ export function App() {
       hostNameRaw: string,
       pathRaw: string,
       titleRaw?: string,
+      projectIDRaw?: string,
     ) => {
       const hostID = hostIDRaw.trim();
       const path = pathRaw.trim();
       if (!hostID || !path) return "";
       const key = `${hostID}::${path}`;
       const resolvedTitle = resolveProjectTitle(path, titleRaw);
+      const projectID = projectIDRaw?.trim() ?? "";
       if (!grouped.has(key)) {
         const host = hostMap.get(hostID);
         grouped.set(key, {
+          projectID,
           hostID,
           hostName: hostNameRaw.trim() || host?.name || hostID,
           path,
@@ -2608,6 +2612,14 @@ export function App() {
         const current = grouped.get(key);
         if (current && current.title.trim() !== titleRaw.trim()) {
           current.title = resolvedTitle;
+        }
+        if (current && !current.projectID && projectID) {
+          current.projectID = projectID;
+        }
+      } else {
+        const current = grouped.get(key);
+        if (current && !current.projectID && projectID) {
+          current.projectID = projectID;
         }
       }
       if (!sessionSeenByProjectKey.has(key)) {
@@ -2622,6 +2634,7 @@ export function App() {
         project.host_name ?? "",
         project.path,
         project.title,
+        project.id,
       );
       if (!key) continue;
       projectKeyByID.set(project.id, key);
@@ -2671,10 +2684,18 @@ export function App() {
         host.name,
         host.workspace?.trim() || DEFAULT_WORKSPACE_PATH,
         "",
+        "",
       );
     }
 
-    return Array.from(grouped.values());
+    return Array.from(grouped.values()).map((project) => ({
+      id: project.projectID || undefined,
+      hostID: project.hostID,
+      hostName: project.hostName,
+      path: project.path,
+      title: project.title,
+      sessions: project.sessions,
+    }));
   }
 
   async function refreshProjectsFromDiscovery(
@@ -2756,8 +2777,8 @@ export function App() {
 
     try {
       const [projects, sessions] = await Promise.all([
-        listProjects(authToken, 600),
-        listSessions(authToken, 1200),
+        listProjects(authToken, 600, { runtime: "codex" }),
+        listSessions(authToken, 1200, { runtime: "codex" }),
       ]);
       setSourceProjectIDs(
         projects

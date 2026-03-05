@@ -214,6 +214,19 @@ function projectWorkspaceID(hostID: string, path: string): string {
   return `project_${hostID.trim()}::${path.trim()}`;
 }
 
+function isLegacyConnectionNoiseEntry(entry: TimelineEntry): boolean {
+  if (entry.kind !== "system") return false;
+  const title = entry.title.trim().toLowerCase();
+  const body = entry.body.trim();
+  if (title === "connected" && body.startsWith("Connected. hosts=")) {
+    return true;
+  }
+  if (title === "connection failed") {
+    return true;
+  }
+  return false;
+}
+
 function normalizeSession(raw: unknown, index: number): ConversationThread {
   const fallback = createSession(index);
   if (!raw || typeof raw !== "object") return fallback;
@@ -230,6 +243,7 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
           ...entry,
           createdAt: typeof entry.createdAt === "string" ? entry.createdAt : now
         }))
+        .filter((entry) => !isLegacyConnectionNoiseEntry(entry))
     : [];
   const sandbox = candidate.sandbox;
   const safeSandbox =
@@ -1027,9 +1041,14 @@ export function useSessionDomain() {
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
+    const currentByHostPath = new Map<string, WorkspaceDirectory>();
     const incomingHostIDs = new Set<string>();
     for (const workspace of workspaces) {
       currentByWorkspaceID.set(workspace.id, workspace);
+      currentByHostPath.set(
+        projectWorkspaceID(workspace.hostID, workspace.path),
+        workspace,
+      );
       for (const thread of workspace.sessions) {
         currentByThreadID.set(thread.id, thread);
       }
@@ -1042,8 +1061,12 @@ export function useSessionDomain() {
       if (!hostID || !path) continue;
       incomingHostIDs.add(hostID);
 
-      const id = project.id?.trim() || projectWorkspaceID(hostID, path);
-      const existing = currentByWorkspaceID.get(id);
+      const stableHostPathID = projectWorkspaceID(hostID, path);
+      const projectID = project.id?.trim() ?? "";
+      const existing =
+        (projectID ? currentByWorkspaceID.get(projectID) : undefined) ??
+        currentByHostPath.get(stableHostPathID);
+      const id = projectID || existing?.id || stableHostPathID;
       const seen = new Set<string>();
       const sessions: ConversationThread[] = [];
       const projectTitle =
@@ -1142,7 +1165,22 @@ export function useSessionDomain() {
 
     const nextActiveWorkspaceID = nextWorkspaces.some((workspace) => workspace.id === activeWorkspaceID)
       ? activeWorkspaceID
-      : nextWorkspaces[0].id;
+      : (() => {
+          const previousActive = workspaces.find(
+            (workspace) => workspace.id === activeWorkspaceID,
+          );
+          if (previousActive) {
+            const matched = nextWorkspaces.find(
+              (workspace) =>
+                workspace.hostID.trim() === previousActive.hostID.trim() &&
+                workspace.path.trim() === previousActive.path.trim(),
+            );
+            if (matched) {
+              return matched.id;
+            }
+          }
+          return nextWorkspaces[0].id;
+        })();
     setWorkspaces(nextWorkspaces);
     setActiveWorkspaceID(nextActiveWorkspaceID);
     const activeProject = nextWorkspaces.find((workspace) => workspace.id === nextActiveWorkspaceID) ?? nextWorkspaces[0];
