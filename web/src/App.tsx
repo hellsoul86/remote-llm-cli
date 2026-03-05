@@ -69,6 +69,7 @@ import { TokenGate } from "./features/session/components/TokenGate";
 import { useComposerAutoResize } from "./features/session/use-composer-autosize";
 import { useCommandPaletteController } from "./features/session/use-command-palette";
 import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
+import { useSessionAlerts } from "./features/session/use-session-alerts";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import {
   buildDiscoveredProjects,
@@ -926,12 +927,17 @@ export function App() {
     resetSessionDomain,
   } = session;
 
-  const [notificationPermission, setNotificationPermission] =
-    useState<NotificationPermission>(
-      typeof Notification === "undefined" ? "denied" : Notification.permission,
-    );
-  const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
-  const [sessionAlertsExpanded, setSessionAlertsExpanded] = useState(true);
+  const {
+    notificationPermission,
+    sessionAlerts,
+    sessionAlertsExpanded,
+    setSessionAlertsExpanded,
+    pushSessionAlert,
+    dismissSessionAlert,
+    clearSessionAlerts,
+    onEnableNotifications,
+    notifySessionDone,
+  } = useSessionAlerts();
   const [sessionStreamHealthByID, setSessionStreamHealthByID] = useState<
     Record<string, SessionStreamHealth>
   >({});
@@ -996,7 +1002,6 @@ export function App() {
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
   const runningSessionIDsRef = useRef<Set<string>>(new Set());
-  const previousAlertCountRef = useRef(0);
   const tokenRef = useRef(token);
 
   const activeRuntime = useMemo(
@@ -1438,13 +1443,6 @@ export function App() {
   }, [workspaces]);
 
   useEffect(() => {
-    if (sessionAlerts.length > previousAlertCountRef.current) {
-      setSessionAlertsExpanded(true);
-    }
-    previousAlertCountRef.current = sessionAlerts.length;
-  }, [sessionAlerts.length]);
-
-  useEffect(() => {
     if (typeof document === "undefined") return;
     const title = activeThread?.title.trim() || "Session";
     document.title = `${title} · Codex Control App`;
@@ -1773,54 +1771,12 @@ export function App() {
     );
   }
 
-  function notifySessionDone(title: string, body: string) {
-    if (typeof Notification === "undefined") return;
-    if (notificationPermission !== "granted") return;
-    if (
-      typeof document !== "undefined" &&
-      document.visibilityState === "visible"
-    ) {
-      return;
-    }
-    try {
-      const note = new Notification(title, { body, silent: false });
-      window.setTimeout(() => note.close(), 6000);
-    } catch {
-      // Notification failures are non-fatal for session completion flow.
-    }
-  }
-
   function shouldSurfaceCompletion(createdAt?: string): boolean {
     const ts = createdAt?.trim();
     if (!ts) return false;
     const parsed = Date.parse(ts);
     if (!Number.isFinite(parsed)) return false;
     return parsed >= completionAlertCutoffMSRef.current;
-  }
-
-  function pushSessionAlert(alert: Omit<SessionAlert, "id">) {
-    const id = `alert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const next: SessionAlert = { id, ...alert };
-    setSessionAlerts((prev) => {
-      const duplicate = prev.some(
-        (item) =>
-          item.threadID === next.threadID &&
-          item.title === next.title &&
-          item.body === next.body,
-      );
-      if (duplicate) return prev;
-      const withNext = [...prev, next];
-      if (withNext.length <= 24) return withNext;
-      return withNext.slice(withNext.length - 24);
-    });
-  }
-
-  function dismissSessionAlert(alertID: string) {
-    setSessionAlerts((prev) => prev.filter((item) => item.id !== alertID));
-  }
-
-  function clearSessionAlerts() {
-    setSessionAlerts([]);
   }
 
   function updateSessionStreamHealth(
@@ -1891,15 +1847,6 @@ export function App() {
       focusComposerSoon();
     }
     dismissSessionAlert(alert.id);
-  }
-
-  async function onEnableNotifications() {
-    if (typeof Notification === "undefined") {
-      setNotificationPermission("denied");
-      return;
-    }
-    const result = await Notification.requestPermission();
-    setNotificationPermission(result);
   }
 
   async function ensureLocalCodexHost(
@@ -3408,7 +3355,7 @@ export function App() {
     completedJobsRef.current.clear();
     setSubmittingThreadID("");
     setCancelingThreadID("");
-    setSessionAlerts([]);
+    clearSessionAlerts();
     setSessionModelDefault("");
     setSessionModelOptions([]);
     setSourceProjectIDs([]);
