@@ -1,13 +1,8 @@
 import { type TimelineState } from "../../domains/session";
 import { isCodexProtocolNoiseLine } from "../../domains/timeline-noise";
+import type { CodexRuntimeCard } from "./stream-types";
 import { clipStreamText, normalizeSessionTitle } from "./utils";
-
-export type CodexRuntimeCard = {
-  key: string;
-  title: string;
-  body: string;
-  state: TimelineState;
-};
+export type { CodexRuntimeCard } from "./stream-types";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") return null;

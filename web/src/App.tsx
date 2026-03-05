@@ -112,6 +112,11 @@ import {
   sessionEventRunID,
   sessionPayloadRecord,
 } from "./features/session/session-events";
+import type {
+  SessionRunStreamState,
+  SessionStreamHealth,
+  SessionStreamHealthState,
+} from "./features/session/stream-types";
 import {
   extractAssistantTextFromJob,
   formatClock,
@@ -144,31 +149,6 @@ const DEFAULT_WORKSPACE_PATH = "/";
 
 type AuthPhase = "checking" | "locked" | "ready";
 type AppMode = "session" | "ops";
-
-type SessionRunStreamState = {
-  runID: string;
-  stdout: string;
-  streamSeen: boolean;
-  assistantFinalized: boolean;
-  failureHints: string[];
-  eventParseOffset: number;
-  surfacedEventKeys: Set<string>;
-};
-
-type SessionStreamHealthState =
-  | "offline"
-  | "connecting"
-  | "live"
-  | "reconnecting"
-  | "error";
-
-type SessionStreamHealth = {
-  state: SessionStreamHealthState;
-  retries: number;
-  lastEventAt: number;
-  updatedAt: number;
-  lastError: string;
-};
 
 type SessionEventHandleOptions = {
   surfaceCompletions?: boolean;

@@ -1,4 +1,5 @@
 import type { CodexPlatformResult } from "../../api";
+import type { SessionStreamHealthState } from "./stream-types";
 
 const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
 
@@ -84,7 +85,7 @@ export function statusTone(status: string): "ok" | "warn" | "err" {
 }
 
 export function streamHealthTone(
-  state: "offline" | "connecting" | "live" | "reconnecting" | "error",
+  state: SessionStreamHealthState,
 ): "ok" | "warn" | "error" {
   if (state === "live") return "ok";
   if (state === "error") return "error";
@@ -93,7 +94,7 @@ export function streamHealthTone(
 }
 
 export function streamHealthCopy(
-  state: "offline" | "connecting" | "live" | "reconnecting" | "error",
+  state: SessionStreamHealthState,
   retries: number,
 ): string {
   if (state === "live") return "live";
