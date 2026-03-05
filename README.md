@@ -34,7 +34,8 @@ cd server
 go run ./cmd/remote-llm-server \
   --addr :8080 \
   --data ./data/state.json \
-  --runtime-config ../examples/runtimes.example.json
+  --runtime-config ../examples/runtimes.example.json \
+  --cors-allow-origins https://webcli.staging.royding.ai
 ```
 
 3. Start web console:
@@ -56,6 +57,7 @@ Default API URL is `http://localhost:8080`.
 ## Current capabilities
 
 - Access-key auth (`Bearer`)
+- Configurable CORS allowlist (`--cors-allow-origins`)
 - Runtime registry abstraction
 - Runtime adapter contract v2 metadata (`version`, `prompt_required`, `supports_workdir`, `supports_extra_args`)
 - `codex` runtime adapter:

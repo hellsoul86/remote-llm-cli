@@ -50,18 +50,23 @@ import {
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
 import {
+  clearStoredToken,
+  loadStoredToken,
+  storeToken,
+} from "./domains/auth-token";
+import { summarizeJobEventLine } from "./domains/job-events";
+import {
   type CodexApprovalPolicy,
   type TimelineEntry,
   type TimelineState,
   useSessionDomain,
 } from "./domains/session";
-
-const TOKEN_KEY = "remote_llm_access_key";
 const SESSION_TREE_PREFS_KEY = "remote_llm_session_tree_prefs_v1";
 const SESSION_EVENT_CURSOR_KEY = "remote_llm_session_event_cursor_v1";
 const COMPLETED_RUNS_KEY = "remote_llm_completed_runs_v1";
 const MAX_PERSISTED_SESSION_CURSORS = 1200;
 const MAX_PERSISTED_COMPLETED_RUNS = 2400;
+const DEFAULT_WORKSPACE_PATH = "/";
 
 type AuthPhase = "checking" | "locked" | "ready";
 type AppMode = "session" | "ops";
@@ -144,7 +149,7 @@ type CommandPaletteAction = {
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
 const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
-const MAX_SESSION_STREAMS = 4;
+const MAX_SESSION_STREAMS = 0;
 const COMPOSER_MIN_HEIGHT = 52;
 const COMPOSER_MAX_HEIGHT = 260;
 const TIMELINE_STICK_GAP_PX = 72;
@@ -322,36 +327,6 @@ function summarizeRunResponse(response: RunResponse): string {
     lines.push(`${target.host.name}: ${status} exit=${exit}${hint}${err}`);
   }
   return lines.join("\n");
-}
-
-function summarizeJobEventLine(event: RunJobEvent): string {
-  const host = event.host_name || event.host_id || "target";
-  switch (event.type) {
-    case "target.started":
-      return `${host} started.`;
-    case "target.done":
-      if ((event.status ?? "").toLowerCase() === "ok") {
-        return `${host} completed.`;
-      }
-      return [
-        host,
-        "failed",
-        typeof event.exit_code === "number" ? `exit ${event.exit_code}` : "",
-        event.error || "",
-      ]
-        .filter((part) => part.trim() !== "")
-        .join(" · ");
-    case "job.cancel_requested":
-      return "Cancel requested.";
-    case "job.canceled":
-      return "Session canceled.";
-    case "job.failed":
-      return event.error ? `Session failed: ${event.error}` : "Session failed.";
-    case "job.succeeded":
-      return "Session completed.";
-    default:
-      return "";
-  }
 }
 
 function sessionEventHostLabel(payload: Record<string, unknown>): string {
@@ -1138,7 +1113,7 @@ export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
   const [tokenInput, setTokenInput] = useState<string>(
-    () => localStorage.getItem(TOKEN_KEY) ?? "",
+    () => loadStoredToken(),
   );
   const [authError, setAuthError] = useState("");
   const [appMode, setAppMode] = useState<AppMode>(() =>
@@ -1446,6 +1421,10 @@ export function App() {
       }
       return left.id.localeCompare(right.id);
     });
+
+    if (MAX_SESSION_STREAMS <= 0) {
+      return ordered.map((item) => item.id);
+    }
 
     const pinned = ordered.filter((item) => item.priority <= 3);
     if (pinned.length >= MAX_SESSION_STREAMS) {
@@ -2022,7 +2001,7 @@ export function App() {
       setProjectFormHostID(fallbackHostID);
     }
     if (!projectFormPath.trim()) {
-      setProjectFormPath(activeWorkspace?.path?.trim() || "/home/ecs-user");
+      setProjectFormPath(activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH);
     }
   }, [
     projectComposerOpen,
@@ -2164,7 +2143,7 @@ export function App() {
 
   function openProjectComposer() {
     const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
-    const fallbackPath = activeWorkspace?.path?.trim() || "/home/ecs-user";
+    const fallbackPath = activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH;
     setProjectComposerOpen(true);
     setProjectFormHostID(fallbackHostID);
     setProjectFormPath(fallbackPath);
@@ -2489,7 +2468,7 @@ export function App() {
       name: "local-default",
       connection_mode: "local",
       host: "localhost",
-      workspace: activeWorkspace?.path?.trim() || "/home/ecs-user",
+      workspace: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
     });
     return listHosts(authToken);
   }
@@ -2525,7 +2504,7 @@ export function App() {
           sessionItem.cwd?.trim() ||
           target.host.workspace?.trim() ||
           hostMap.get(hostID)?.workspace?.trim() ||
-          "/home/ecs-user";
+          DEFAULT_WORKSPACE_PATH;
         if (!pathMap.has(projectPath)) pathMap.set(projectPath, []);
         pathMap.get(projectPath)!.push({
           id: sessionItem.session_id,
@@ -2576,8 +2555,8 @@ export function App() {
     return sourceHosts.map((host) => ({
       hostID: host.id,
       hostName: host.name,
-      path: host.workspace?.trim() || "/home/ecs-user",
-      title: resolveProjectTitle(host.workspace?.trim() || "/home/ecs-user"),
+      path: host.workspace?.trim() || DEFAULT_WORKSPACE_PATH,
+      title: resolveProjectTitle(host.workspace?.trim() || DEFAULT_WORKSPACE_PATH),
       sessions: [],
     }));
   }
@@ -2690,7 +2669,7 @@ export function App() {
       ensureProjectBucket(
         host.id,
         host.name,
-        host.workspace?.trim() || "/home/ecs-user",
+        host.workspace?.trim() || DEFAULT_WORKSPACE_PATH,
         "",
       );
     }
@@ -3581,7 +3560,6 @@ export function App() {
           jobStreamSeenRef.current.set(job.id, false);
         }
       }
-
       if (emitConnectedNote) {
         addTimelineEntry(
           {
@@ -3627,13 +3605,13 @@ export function App() {
 
     try {
       await Promise.all([listRuntimes(trimmed), listHosts(trimmed)]);
-      localStorage.setItem(TOKEN_KEY, trimmed);
+      storeToken(trimmed);
       setToken(trimmed);
       setTokenInput(trimmed);
       await loadWorkspace(trimmed, true);
       setAuthPhase("ready");
     } catch (error) {
-      localStorage.removeItem(TOKEN_KEY);
+      clearStoredToken();
       setToken("");
       setAuthPhase("locked");
       setAuthError(`token validation failed: ${String(error)}`);
@@ -3641,7 +3619,7 @@ export function App() {
   }
 
   useEffect(() => {
-    const cached = localStorage.getItem(TOKEN_KEY) ?? "";
+    const cached = loadStoredToken();
     if (!cached.trim()) {
       setAuthPhase("locked");
       return;
@@ -4161,8 +4139,12 @@ export function App() {
           if (!preferSessionStream && pollRunState?.runID === item.jobID) {
             sessionRunStateRef.current.delete(item.threadID);
           }
-          const sawStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
+          const sawSessionStream =
+            streamRunState?.runID === item.jobID &&
+            (streamRunState.streamSeen || streamRunState.assistantFinalized);
+          const sawJobStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
           jobStreamSeenRef.current.delete(item.jobID);
+          const sawAnyStream = Boolean(sawSessionStream || sawJobStream);
           if (shouldSurfaceJobCompletion && item.threadID !== activeThreadID) {
             setThreadUnread(item.threadID, true);
           }
@@ -4170,14 +4152,14 @@ export function App() {
           if (completedJobsRef.current.has(job.id)) {
             if (job.status === "succeeded") {
               if (assistantText) {
-                if (sawStream) {
+                if (sawAnyStream) {
                   finalizeAssistantStreamEntry(
                     item.threadID,
                     "success",
                     assistantText,
                   );
                 }
-              } else if (sawStream) {
+              } else if (sawAnyStream) {
                 finalizeAssistantStreamEntry(
                   item.threadID,
                   "success",
@@ -4196,7 +4178,7 @@ export function App() {
               job.status === "canceled" ||
               responseFailed
             ) {
-              if (sawStream) {
+              if (sawAnyStream) {
                 finalizeAssistantStreamEntry(item.threadID, "error");
               }
               addTimelineEntry(
@@ -4215,7 +4197,7 @@ export function App() {
                 item.threadID,
               );
             } else if (assistantText) {
-              if (sawStream) {
+              if (sawAnyStream) {
                 finalizeAssistantStreamEntry(
                   item.threadID,
                   "success",
@@ -4232,7 +4214,7 @@ export function App() {
                   item.threadID,
                 );
               }
-            } else if (sawStream) {
+            } else if (sawAnyStream) {
               finalizeAssistantStreamEntry(
                 item.threadID,
                 "success",
@@ -4359,7 +4341,7 @@ export function App() {
   }
 
   function onLogout() {
-    localStorage.removeItem(TOKEN_KEY);
+    clearStoredToken();
     localStorage.removeItem(SESSION_EVENT_CURSOR_KEY);
     localStorage.removeItem(COMPLETED_RUNS_KEY);
     stopAllSessionStreams();
@@ -5400,7 +5382,7 @@ export function App() {
                   <label className="project-create-field">
                     <span>Path</span>
                     <input
-                      placeholder="/home/ecs-user/project"
+                      placeholder="/path/to/project"
                       value={projectFormPath}
                       onChange={(event) => setProjectFormPath(event.target.value)}
                       disabled={
@@ -5711,7 +5693,7 @@ export function App() {
                 <p className="chat-context">
                   {(activeWorkspace?.hostName?.trim() || "local-default") +
                     " · " +
-                    (activeWorkspace?.path?.trim() || "/home/ecs-user")}
+                    (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH)}
                 </p>
               </div>
               <div className="chat-head-side">

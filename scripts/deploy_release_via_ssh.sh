@@ -32,6 +32,7 @@ deploy_keep_releases="${DEPLOY_KEEP_RELEASES:-5}"
 deploy_healthcheck_url="${DEPLOY_HEALTHCHECK_URL:-http://127.0.0.1:8080/v1/healthz}"
 deploy_data_path="${DEPLOY_DATA_PATH:-${deploy_path}/shared/state.json}"
 deploy_runtime_config_path="${DEPLOY_RUNTIME_CONFIG_PATH:-}"
+deploy_cors_allow_origins="${DEPLOY_CORS_ALLOW_ORIGINS:-}"
 deploy_addr="${DEPLOY_ADDR:-:8080}"
 
 remote="${DEPLOY_USER}@${DEPLOY_HOST}"
@@ -67,6 +68,7 @@ ssh "${ssh_opts[@]}" "${remote}" "bash -s -- \
   \"${remote_tmp_tgz}\" \
   \"${deploy_data_path}\" \
   \"${deploy_runtime_config_path}\" \
+  \"${deploy_cors_allow_origins}\" \
   \"${deploy_addr}\" \
   \"${deploy_keep_releases}\" \
   \"${deploy_healthcheck_url}\"" <<'REMOTE_SCRIPT'
@@ -78,9 +80,10 @@ release_id="$3"
 tmp_tgz="$4"
 data_path="$5"
 runtime_config_path="$6"
-listen_addr="$7"
-keep_releases="$8"
-healthcheck_url="$9"
+cors_allow_origins="$7"
+listen_addr="$8"
+keep_releases="$9"
+healthcheck_url="${10}"
 
 run_user="$(id -un)"
 run_group="$(id -gn)"
@@ -123,6 +126,7 @@ ${SUDO} tee "${env_file}" >/dev/null <<ENV_FILE
 REMOTE_LLM_ADDR=${listen_addr}
 REMOTE_LLM_DATA_PATH=${data_path}
 REMOTE_LLM_RUNTIME_CONFIG=${runtime_config_path}
+REMOTE_LLM_CORS_ALLOW_ORIGINS=${cors_allow_origins}
 ENV_FILE
 
 ${SUDO} chmod +x "${current_link}/bin/remote-llm-server" "${current_link}/bin/run-remote-llm-server.sh"

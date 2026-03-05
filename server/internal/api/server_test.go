@@ -369,7 +369,9 @@ func TestCORSPreflightReturnsNoContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	s := New(st, runtime.NewRegistry(runtime.NewCodexAdapter()))
+	s := NewWithOptions(st, runtime.NewRegistry(runtime.NewCodexAdapter()), ServerOptions{
+		CORSAllowedOrigins: []string{"https://example.com"},
+	})
 	h := s.Handler()
 
 	req := httptest.NewRequest(http.MethodOptions, "/v1/runtimes", nil)
@@ -383,11 +385,34 @@ func TestCORSPreflightReturnsNoContent(t *testing.T) {
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status=%d want=%d", rr.Code, http.StatusNoContent)
 	}
-	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("allow-origin=%q want=*", got)
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://example.com" {
+		t.Fatalf("allow-origin=%q want=https://example.com", got)
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Headers"); got == "" {
 		t.Fatalf("allow-headers should not be empty")
+	}
+}
+
+func TestCORSPreflightDefaultsToWildcard(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	s := New(st, runtime.NewRegistry(runtime.NewCodexAdapter()))
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/runtimes", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want=%d", rr.Code, http.StatusNoContent)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("allow-origin=%q want=*", got)
 	}
 }
 
@@ -397,7 +422,9 @@ func TestCORSHeadersPresentOnAuthenticatedResponse(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	token := addTestAccessKey(t, st)
-	s := New(st, runtime.NewRegistry(runtime.NewCodexAdapter()))
+	s := NewWithOptions(st, runtime.NewRegistry(runtime.NewCodexAdapter()), ServerOptions{
+		CORSAllowedOrigins: []string{"https://example.com"},
+	})
 	h := s.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/runtimes", nil)
@@ -410,8 +437,29 @@ func TestCORSHeadersPresentOnAuthenticatedResponse(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("allow-origin=%q want=*", got)
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://example.com" {
+		t.Fatalf("allow-origin=%q want=https://example.com", got)
+	}
+}
+
+func TestCORSPreflightRejectsDisallowedOrigin(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	s := NewWithOptions(st, runtime.NewRegistry(runtime.NewCodexAdapter()), ServerOptions{
+		CORSAllowedOrigins: []string{"https://allowed.example"},
+	})
+	h := s.Handler()
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/runtimes", nil)
+	req.Header.Set("Origin", "https://blocked.example")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status=%d want=%d", rr.Code, http.StatusForbidden)
 	}
 }
 

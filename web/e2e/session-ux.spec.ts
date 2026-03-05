@@ -1557,7 +1557,7 @@ test("project create and rename use project name as primary label", async ({
 
   await page.getByRole("button", { name: "New Project" }).click();
   await page
-    .getByPlaceholder("/home/ecs-user/project")
+    .getByPlaceholder("/path/to/project")
     .fill("/srv/demo-app");
   await page.getByPlaceholder("My Project").fill("Demo App");
   await page.getByRole("button", { name: "Create" }).click();
@@ -1589,7 +1589,7 @@ test("active project is prioritized to top of project list", async ({ page }) =>
 
   await page.getByRole("button", { name: "New Project" }).click();
   await page
-    .getByPlaceholder("/home/ecs-user/project")
+    .getByPlaceholder("/path/to/project")
     .fill("/srv/zzz-project");
   await page.getByPlaceholder("My Project").fill("zzz Project");
   await page.getByRole("button", { name: "Create" }).click();
