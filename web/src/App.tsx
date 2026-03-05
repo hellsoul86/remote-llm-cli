@@ -14,11 +14,9 @@ import {
   cancelRunJob,
   discoverCodexSessions,
   discoverCodexModels,
-  forkCodexV2Session,
   getMetrics,
   getRunJob,
   healthz,
-  interruptCodexV2Turn,
   listAudit,
   listHosts,
   listProjects,
@@ -69,6 +67,7 @@ import {
 import { createHostActions } from "./features/session/host-actions";
 import { createPlatformActions } from "./features/session/platform-actions";
 import { createProjectActions } from "./features/session/project-actions";
+import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
 import {
   buildSessionCommandPaletteActions,
   normalizeSearchText,
@@ -2225,131 +2224,31 @@ export function App() {
     }
   }
 
-  async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    const editorValue = promptInputRef.current?.value ?? "";
-    const trimmedPrompt = activeThread.draft.trim() || editorValue.trim();
-    await submitPromptForActiveThread(trimmedPrompt);
-  }
-
-  async function onStopActiveSessionRun() {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    const runID = activeThread.activeJobID.trim();
-    if (!runID) return;
-    if (cancelingThreadID === activeThread.id) return;
-    setCancelingThreadID(activeThread.id);
-    try {
-      const runtimeName = activeRuntime?.name ?? selectedRuntime;
-      if (runtimeName === "codex") {
-        await interruptCodexV2Turn(token, activeThread.id, runID, {
-          host_id: activeWorkspace?.hostID?.trim() || undefined,
-        });
-      } else {
-        await cancelRunJob(token, runID);
-      }
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "running",
-          title: "Stopping",
-          body: "Stopping current response...",
-        },
-        activeThread.id,
-      );
-    } catch (error) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Stop Failed",
-          body: String(error),
-        },
-        activeThread.id,
-      );
-    } finally {
-      setCancelingThreadID("");
-    }
-  }
-
-  async function onRegenerateActiveSession() {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    const prompt = lastUserPromptFromTimeline(activeThread.timeline);
-    if (!prompt) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Regenerate Unavailable",
-          body: "No previous user prompt in this session.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-    await submitPromptForActiveThread(prompt);
-  }
-
-  async function onForkActiveSession() {
-    if (!activeThread) return;
-    if (authPhase !== "ready" || !token.trim()) {
-      forkThread(activeThread.id);
-      return;
-    }
-    const runtimeName = activeRuntime?.name ?? selectedRuntime;
-    if (
-      runtimeName !== "codex" ||
-      isLocalDraftSessionID(activeThread.id)
-    ) {
-      forkThread(activeThread.id);
-      return;
-    }
-    try {
-      const response = await forkCodexV2Session(token, activeThread.id, {
-        host_id: activeWorkspace?.hostID?.trim() || undefined,
-        path: activeWorkspace?.path?.trim() || undefined,
-        title: `Fork · ${activeThread.title}`,
-      });
-      const nextID =
-        extractThreadIDFromCodexSessionResponse(response) ||
-        response.session.id.trim();
-      await refreshProjectsFromSource(token, hosts, true, true);
-      if (nextID) {
-        activateThread(nextID);
-      }
-    } catch (error) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Fork Failed",
-          body: String(error),
-        },
-        activeThread.id,
-      );
-    }
-  }
-
-  async function onEditAndResend(entry: TimelineEntry) {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    if (entry.kind !== "user") return;
-    const edited = window.prompt("Edit prompt before resend", entry.body);
-    if (edited === null) return;
-    const trimmed = edited.trim();
-    if (!trimmed) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Prompt Missing",
-          body: "Prompt is required.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-    await submitPromptForActiveThread(trimmed);
-  }
+  const {
+    onSendPrompt,
+    onStopActiveSessionRun,
+    onRegenerateActiveSession,
+    onForkActiveSession,
+    onEditAndResend,
+  } = createSessionSecondaryActions({
+    authPhase,
+    token,
+    activeThread,
+    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+    activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
+    activeRuntimeName: activeRuntime?.name ?? selectedRuntime,
+    selectedRuntime,
+    hosts,
+    cancelingThreadID,
+    promptInputRef,
+    addTimelineEntry,
+    submitPromptForActiveThread,
+    refreshProjectsFromSource,
+    activateThread,
+    forkThread,
+    isLocalDraftSessionID,
+    setCancelingThreadID,
+  });
 
   const { onRunPlatformLogin, onRunPlatformMCP, onRunPlatformCloud } =
     createPlatformActions({
