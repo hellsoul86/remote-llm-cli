@@ -64,6 +64,7 @@ import { SessionTimeline } from "./features/session/components/SessionTimeline";
 import { TokenGate } from "./features/session/components/TokenGate";
 import { useAppMode } from "./features/session/use-app-mode";
 import { useComposerAutoResize } from "./features/session/use-composer-autosize";
+import { useCompletedRuns } from "./features/session/use-completed-runs";
 import { useCommandPaletteController } from "./features/session/use-command-palette";
 import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
 import { useSessionAlerts } from "./features/session/use-session-alerts";
@@ -96,9 +97,7 @@ import {
 } from "./features/session/config";
 import {
   clearSessionRuntimePersistence,
-  loadPersistedCompletedRuns,
   loadSessionTreePrefs,
-  persistCompletedRuns,
   persistSessionTreePrefs,
 } from "./features/session/persistence";
 import {
@@ -356,6 +355,12 @@ export function App() {
     clearSessionStreamHealth,
     clearAllSessionStreamHealth,
   } = useSessionStreamHealth();
+  const {
+    hydrateCompletedRuns,
+    hasCompletedRun,
+    markRunCompleted,
+    clearCompletedRuns,
+  } = useCompletedRuns(completedJobsRef, MAX_COMPLETED_RUN_CACHE_SIZE);
   const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [cancelingThreadID, setCancelingThreadID] = useState("");
   const [deletingThreadID, setDeletingThreadID] = useState("");
@@ -409,7 +414,6 @@ export function App() {
   );
   const streamAuthTokenRef = useRef("");
   const completionAlertCutoffMSRef = useRef<number>(Date.now());
-  const completedRunsHydratedRef = useRef(false);
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
@@ -746,16 +750,8 @@ export function App() {
   }, [token]);
 
   useEffect(() => {
-    if (completedRunsHydratedRef.current) return;
-    completedRunsHydratedRef.current = true;
-    const persisted = loadPersistedCompletedRuns();
-    if (persisted.size === 0) return;
-    for (const runID of persisted) {
-      completedJobsRef.current.add(runID);
-    }
-    trimCompletedRunsStore();
-    persistCompletedRuns(completedJobsRef.current);
-  }, [completedJobsRef]);
+    hydrateCompletedRuns();
+  }, [hydrateCompletedRuns]);
 
   useEffect(() => {
     activeThreadIDRef.current = activeThreadID;
@@ -1278,24 +1274,6 @@ export function App() {
     );
   }
 
-  function trimCompletedRunsStore() {
-    while (completedJobsRef.current.size > MAX_COMPLETED_RUN_CACHE_SIZE) {
-      const oldest = completedJobsRef.current.values().next().value;
-      if (typeof oldest !== "string" || !oldest.trim()) break;
-      completedJobsRef.current.delete(oldest);
-    }
-  }
-
-  function markRunCompleted(runID: string): boolean {
-    const normalized = runID.trim();
-    if (!normalized) return false;
-    if (completedJobsRef.current.has(normalized)) return false;
-    completedJobsRef.current.add(normalized);
-    trimCompletedRunsStore();
-    persistCompletedRuns(completedJobsRef.current);
-    return true;
-  }
-
   function sessionActiveRunID(sessionID: string): string {
     const normalizedSessionID = sessionID.trim();
     if (!normalizedSessionID) return "";
@@ -1406,7 +1384,7 @@ export function App() {
     completedAt?: string,
     options?: { surfaceCompletions?: boolean },
   ) {
-    if (runID && completedJobsRef.current.has(runID)) {
+    if (runID && hasCompletedRun(runID)) {
       return;
     }
     const state = sessionRunStateRef.current.get(sessionID);
@@ -2092,7 +2070,7 @@ export function App() {
             continue;
           }
           jobEventCursorRef.current.set(item.jobID, nextAfter);
-          const alreadyCompleted = completedJobsRef.current.has(item.jobID);
+          const alreadyCompleted = hasCompletedRun(item.jobID);
           const streamRunState = sessionRunStateRef.current.get(item.threadID);
           const preferSessionStream =
             streamRunState?.runID === item.jobID &&
@@ -2220,7 +2198,7 @@ export function App() {
             setThreadUnread(item.threadID, true);
           }
 
-          if (completedJobsRef.current.has(job.id)) {
+          if (hasCompletedRun(job.id)) {
             if (job.status === "succeeded") {
               if (assistantText) {
                 if (sawAnyStream) {
@@ -2413,7 +2391,7 @@ export function App() {
     jobNoTextFinalizeRetriesRef.current.clear();
     sessionEventCursorRef.current.clear();
     sessionRunStateRef.current.clear();
-    completedJobsRef.current.clear();
+    clearCompletedRuns();
     setSubmittingThreadID("");
     setCancelingThreadID("");
     clearSessionAlerts();
