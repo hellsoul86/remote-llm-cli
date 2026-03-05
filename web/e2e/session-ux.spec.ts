@@ -1113,15 +1113,21 @@ async function mockSessionApi(
 
 async function installMockSessionWebSocket(
   page: Page,
-  opts: { sessionID: string; marker: string },
+  opts: { sessionID: string; marker: string; mode?: "replay-once" | "reset-reconnect" },
 ): Promise<void> {
-  await page.addInitScript((config: { sessionID: string; marker: string }) => {
+  await page.addInitScript((config: { sessionID: string; marker: string; mode?: "replay-once" | "reset-reconnect" }) => {
     const globalAny = window as unknown as {
       __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+      __mockWsControl?: { triggerResetReconnect?: () => void };
       WebSocket: typeof WebSocket;
     };
+    const mode = config.mode ?? "replay-once";
     const emitted = new Set<string>();
     const nowISO = () => new Date().toISOString();
+    const activeSockets = new Set<SessionMockWebSocket>();
+    const resetState: { phase: "idle" | "await_reconnect" | "done" } = {
+      phase: "idle",
+    };
 
     class SessionMockWebSocket {
       static CONNECTING = 0;
@@ -1139,6 +1145,8 @@ async function installMockSessionWebSocket(
       onclose: ((ev: CloseEvent) => void) | null = null;
       onerror: ((ev: Event) => void) | null = null;
       onmessage: ((ev: MessageEvent) => void) | null = null;
+      sessionID = "";
+      after = 0;
 
       constructor(url: string | URL) {
         this.url = typeof url === "string" ? url : String(url);
@@ -1151,21 +1159,87 @@ async function installMockSessionWebSocket(
         const rawAfter = parsed.searchParams.get("after") ?? "0";
         const after = Number.parseInt(rawAfter, 10);
         const safeAfter = Number.isFinite(after) && after > 0 ? after : 0;
+        this.sessionID = sessionID;
+        this.after = safeAfter;
         globalAny.__mockWsState.calls.push({ sessionID, after: safeAfter });
 
         window.setTimeout(() => {
           if (this.readyState !== SessionMockWebSocket.CONNECTING) return;
           this.readyState = SessionMockWebSocket.OPEN;
+          activeSockets.add(this);
           this.onopen?.(new Event("open"));
 
-          const send = (frame: Record<string, unknown>) => {
-            if (this.readyState !== SessionMockWebSocket.OPEN) return;
-            this.onmessage?.(
-              new MessageEvent("message", { data: JSON.stringify(frame) }),
-            );
-          };
-
           const readyCursor = safeAfter;
+          if (mode === "reset-reconnect") {
+            if (
+              sessionID === config.sessionID &&
+              resetState.phase === "await_reconnect" &&
+              safeAfter > 0
+            ) {
+              const runID = "turn_1";
+              const chunk =
+                '{"type":"thread.started","thread_id":"ws_reset"}\n' +
+                '{"type":"turn.started"}\n' +
+                JSON.stringify({
+                  type: "item.completed",
+                  item: { type: "agent_message", text: `ws reset replay ${config.marker}` },
+                }) +
+                "\n";
+              const frames: Array<Record<string, unknown>> = [
+                {
+                  type: "session.event",
+                  id: "3",
+                  event: {
+                    seq: 3,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "assistant.delta",
+                    payload: { chunk },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.event",
+                  id: "4",
+                  event: {
+                    seq: 4,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "assistant.completed",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.event",
+                  id: "5",
+                  event: {
+                    seq: 5,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "run.completed",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.ready",
+                  session_id: config.sessionID,
+                  cursor: 5,
+                },
+              ];
+              resetState.phase = "done";
+              this.pump(frames);
+              return;
+            }
+            this.emit({
+              type: "session.ready",
+              session_id: sessionID,
+              cursor: readyCursor,
+            });
+            return;
+          }
+
           const shouldReplay =
             sessionID === config.sessionID &&
             safeAfter <= 0 &&
@@ -1236,27 +1310,36 @@ async function installMockSessionWebSocket(
                 cursor: 4,
               },
             ];
-            let index = 0;
-            const pump = () => {
-              if (index >= frames.length) {
-                return;
-              }
-              send(frames[index] ?? {});
-              index += 1;
-              if (index < frames.length) {
-                window.setTimeout(pump, 8);
-              }
-            };
-            window.setTimeout(pump, 8);
+            this.pump(frames);
             return;
           }
 
-          send({
+          this.emit({
             type: "session.ready",
             session_id: sessionID,
             cursor: readyCursor,
           });
         }, 0);
+      }
+
+      emit(frame: Record<string, unknown>): void {
+        if (this.readyState !== SessionMockWebSocket.OPEN) return;
+        this.onmessage?.(
+          new MessageEvent("message", { data: JSON.stringify(frame) }),
+        );
+      }
+
+      pump(frames: Array<Record<string, unknown>>): void {
+        let index = 0;
+        const tick = () => {
+          if (index >= frames.length) return;
+          this.emit(frames[index] ?? {});
+          index += 1;
+          if (index < frames.length) {
+            window.setTimeout(tick, 8);
+          }
+        };
+        window.setTimeout(tick, 8);
       }
 
       send(_data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
@@ -1265,6 +1348,7 @@ async function installMockSessionWebSocket(
 
       close(code?: number, reason?: string): void {
         if (this.readyState === SessionMockWebSocket.CLOSED) return;
+        activeSockets.delete(this);
         this.readyState = SessionMockWebSocket.CLOSED;
         this.onclose?.(
           new CloseEvent("close", {
@@ -1287,6 +1371,57 @@ async function installMockSessionWebSocket(
         return true;
       }
     }
+
+    globalAny.__mockWsControl = {
+      triggerResetReconnect: () => {
+        if (mode !== "reset-reconnect") return;
+        if (resetState.phase !== "idle") return;
+        resetState.phase = "await_reconnect";
+        const runID = "turn_1";
+        const chunk =
+          '{"type":"thread.started","thread_id":"ws_reset"}\n' +
+          '{"type":"turn.started"}\n' +
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: `ws reset ${config.marker}` },
+          }) +
+          "\n";
+        for (const socket of Array.from(activeSockets)) {
+          if (socket.sessionID !== config.sessionID) continue;
+          socket.emit({
+            type: "session.event",
+            id: "1",
+            event: {
+              seq: 1,
+              session_id: config.sessionID,
+              run_id: runID,
+              type: "run.started",
+              payload: { turn_id: runID },
+              created_at: nowISO(),
+            },
+          });
+          socket.emit({
+            type: "session.event",
+            id: "2",
+            event: {
+              seq: 2,
+              session_id: config.sessionID,
+              run_id: runID,
+              type: "assistant.delta",
+              payload: { chunk },
+              created_at: nowISO(),
+            },
+          });
+          socket.emit({
+            type: "session.reset",
+            session_id: config.sessionID,
+            reason: "backpressure",
+            next_after: 2,
+          });
+          window.setTimeout(() => socket.close(1012, "mock-reset"), 0);
+        }
+      },
+    };
 
     // Use mocked WebSocket transport for deterministic stream tests.
     globalAny.WebSocket =
@@ -1949,6 +2084,59 @@ test("websocket stream replay renders once without SSE fallback", async ({
   await page.reload();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(assistantEntry).toHaveCount(1);
+  await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as unknown as {
+            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+          }
+        ).__mockWsState;
+        return Array.isArray(state?.calls)
+          ? state.calls.some((item) => item.sessionID === "session_cli_1" && item.after > 0)
+          : false;
+      }),
+    )
+    .toBe(true);
+});
+
+test("websocket reset reconnect completes once without SSE fallback", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `WS_RESET_${Date.now()}`;
+  await installMockSessionWebSocket(page, {
+    sessionID: "session_cli_1",
+    marker,
+    mode: "reset-reconnect",
+  });
+  const harness = await mockSessionApi(page, `ws reset ${marker}`, marker, {
+    streamPattern: "ready-only",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`trigger ws reset ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockWsControl?: { triggerResetReconnect?: () => void };
+      }
+    ).__mockWsControl?.triggerResetReconnect?.();
+  });
+
+  const assistantEntry = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
+  await expect(assistantEntry).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    timeout: 12000,
+  });
   await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
   await expect
     .poll(() =>
