@@ -8,13 +8,6 @@ import {
 } from "react";
 import {
   API_BASE,
-  discoverCodexSessions,
-  listHosts,
-  listProjects,
-  listSessions,
-  upsertHost,
-  type Host,
-  type SessionRecord,
   type CodexPlatformResult,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
@@ -44,10 +37,7 @@ import { useSessionJobPolling } from "./features/session/use-session-job-polling
 import { useSessionRuntimeEffects } from "./features/session/use-session-runtime-effects";
 import { useSessionStreamHealth } from "./features/session/use-session-stream-health";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
-import {
-  buildDiscoveredProjects,
-  buildProjectsFromRecords,
-} from "./features/session/project-sync";
+import { createProjectSourceActions } from "./features/session/project-source-actions";
 import { createHostActions } from "./features/session/host-actions";
 import { createOpsJobActions } from "./features/session/ops-job-actions";
 import { createPlatformActions } from "./features/session/platform-actions";
@@ -83,7 +73,6 @@ import {
 } from "./features/session/persistence";
 import {
   type SessionAlert,
-  type SessionLastStatus,
   type SessionTreeHost,
 } from "./features/session/types";
 import {
@@ -1067,149 +1056,15 @@ export function App() {
     dismissSessionAlert(alert.id);
   }
 
-  async function ensureLocalCodexHost(
-    authToken: string,
-    currentHosts: Host[],
-  ): Promise<Host[]> {
-    if (currentHosts.some((host) => host.connection_mode === "local")) {
-      return currentHosts;
-    }
-    await upsertHost(authToken, {
-      name: "local-default",
-      connection_mode: "local",
-      host: "localhost",
-      workspace: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+  const { ensureLocalCodexHost, refreshProjectsFromSource } =
+    createProjectSourceActions({
+      activeWorkspacePath: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+      workspaces,
+      setSourceProjectIDs,
+      syncProjectsFromDiscovery,
+      syncProjectsFromServer,
+      setThreadJobState,
     });
-    return listHosts(authToken);
-  }
-
-  async function refreshProjectsFromDiscovery(
-    authToken: string,
-    sourceHosts: Host[],
-    discoverEnabled: boolean,
-    preserveOnError = true,
-  ) {
-    if (!discoverEnabled) {
-      setSourceProjectIDs([]);
-      syncProjectsFromDiscovery(
-        buildDiscoveredProjects(sourceHosts, [], DEFAULT_WORKSPACE_PATH),
-        {
-        source: "discovery",
-        },
-      );
-      return;
-    }
-    try {
-      const discovered = await discoverCodexSessions(authToken, {
-        all_hosts: true,
-        fanout: Math.max(1, Math.min(8, sourceHosts.length || 1)),
-        limit_per_host: 120,
-      });
-      setSourceProjectIDs([]);
-      syncProjectsFromDiscovery(
-        buildDiscoveredProjects(
-          sourceHosts,
-          discovered.body.targets ?? [],
-          DEFAULT_WORKSPACE_PATH,
-        ),
-        { source: "discovery" },
-      );
-    } catch {
-      setSourceProjectIDs([]);
-      if (!preserveOnError) {
-        syncProjectsFromDiscovery(
-          buildDiscoveredProjects(sourceHosts, [], DEFAULT_WORKSPACE_PATH),
-          {
-            source: "discovery",
-          },
-        );
-      }
-    }
-  }
-
-  async function refreshProjectsFromSource(
-    authToken: string,
-    sourceHosts: Host[],
-    discoverEnabled: boolean,
-    preserveOnError = true,
-  ) {
-    const normalizeLastStatus = (raw: string | undefined): SessionLastStatus => {
-      const value = (raw ?? "").trim().toLowerCase();
-      if (value === "running" || value === "pending") return "running";
-      if (value === "succeeded") return "succeeded";
-      if (value === "failed") return "failed";
-      if (value === "canceled") return "canceled";
-      return "idle";
-    };
-    const reconcileFromSessionRecords = (records: SessionRecord[]) => {
-      const currentByID = new Map<
-        string,
-        { activeJobID: string; lastJobStatus: SessionLastStatus }
-      >();
-      for (const workspace of workspaces) {
-        for (const thread of workspace.sessions) {
-          currentByID.set(thread.id, {
-            activeJobID: thread.activeJobID.trim(),
-            lastJobStatus: thread.lastJobStatus,
-          });
-        }
-      }
-
-      for (const record of records) {
-        const sessionID = record.id.trim();
-        if (!sessionID) continue;
-        const current = currentByID.get(sessionID);
-        if (!current) continue;
-        const nextStatus = normalizeLastStatus(record.last_status);
-        const nextJobID =
-          nextStatus === "running"
-            ? record.last_run_id?.trim() || current.activeJobID
-            : "";
-        if (
-          current.activeJobID === nextJobID &&
-          current.lastJobStatus === nextStatus
-        ) {
-          continue;
-        }
-        setThreadJobState(sessionID, nextJobID, nextStatus);
-      }
-    };
-
-    try {
-      const [projects, sessions] = await Promise.all([
-        listProjects(authToken, 600, { runtime: "codex" }),
-        listSessions(authToken, 1200, { runtime: "codex" }),
-      ]);
-      setSourceProjectIDs(
-        projects
-          .map((project) => project.id.trim())
-          .filter((id) => id !== ""),
-      );
-      const built = buildProjectsFromRecords(
-        sourceHosts,
-        projects,
-        sessions,
-        DEFAULT_WORKSPACE_PATH,
-      );
-      const hasSessionItems = built.some((project) => project.sessions.length > 0);
-      if (!hasSessionItems && discoverEnabled) {
-        throw new Error("empty session snapshot");
-      }
-      // Server snapshot is authoritative for project/session membership.
-      syncProjectsFromServer(built);
-      reconcileFromSessionRecords(sessions);
-      return;
-    } catch {
-      setSourceProjectIDs([]);
-      // fall through to discovery fallback
-    }
-    await refreshProjectsFromDiscovery(
-      authToken,
-      sourceHosts,
-      discoverEnabled,
-      preserveOnError,
-    );
-  }
 
   const { handleSessionEventRecord } = createSessionRunEventHandlers({
     workspaces,
