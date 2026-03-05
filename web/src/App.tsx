@@ -1259,6 +1259,7 @@ export function App() {
     setThreadPinned,
     runningThreadJobs,
     syncProjectsFromDiscovery,
+    syncProjectsFromServer,
     resetSessionDomain,
   } = session;
 
@@ -2706,7 +2707,9 @@ export function App() {
   ) {
     if (!discoverEnabled) {
       setSourceProjectIDs([]);
-      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
+      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []), {
+        source: "discovery",
+      });
       return;
     }
     try {
@@ -2718,11 +2721,14 @@ export function App() {
       setSourceProjectIDs([]);
       syncProjectsFromDiscovery(
         buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []),
+        { source: "discovery" },
       );
     } catch {
       setSourceProjectIDs([]);
       if (!preserveOnError) {
-        syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []));
+        syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []), {
+          source: "discovery",
+        });
       }
     }
   }
@@ -2786,14 +2792,10 @@ export function App() {
           .filter((id) => id !== ""),
       );
       const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
-      if (built.length > 0) {
-        syncProjectsFromDiscovery(built, {
-          preserveMissingSessions: false,
-          preserveMissingProjects: false,
-        });
-        reconcileFromSessionRecords(sessions);
-        return;
-      }
+      // Server snapshot is authoritative for project/session membership.
+      syncProjectsFromServer(built);
+      reconcileFromSessionRecords(sessions);
+      return;
     } catch {
       setSourceProjectIDs([]);
       // fall through to discovery fallback

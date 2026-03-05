@@ -82,8 +82,10 @@ export type DiscoveredProject = {
 };
 
 type SyncProjectsOptions = {
+  source?: "discovery" | "server";
   preserveMissingSessions?: boolean;
   preserveMissingProjects?: boolean;
+  preserveOnEmptyResult?: boolean;
 };
 
 type PersistedSessionState = {
@@ -1038,8 +1040,16 @@ export function useSessionDomain() {
     projects: DiscoveredProject[],
     options?: SyncProjectsOptions,
   ) {
-    const preserveMissingSessions = options?.preserveMissingSessions !== false;
-    const preserveMissingProjects = options?.preserveMissingProjects !== false;
+    const source = options?.source ?? "discovery";
+    const preserveMissingSessions =
+      options?.preserveMissingSessions ??
+      (source === "discovery");
+    const preserveMissingProjects =
+      options?.preserveMissingProjects ??
+      (source === "discovery");
+    const preserveOnEmptyResult =
+      options?.preserveOnEmptyResult ??
+      (source === "discovery");
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
@@ -1156,7 +1166,7 @@ export function useSessionDomain() {
     }
 
     if (nextWorkspaces.length === 0) {
-      if (workspaces.length > 0) {
+      if (preserveOnEmptyResult && workspaces.length > 0) {
         return;
       }
       const fallback = createWorkspace(1, DEFAULT_PROJECT_PATH);
@@ -1188,6 +1198,12 @@ export function useSessionDomain() {
     setActiveWorkspaceID(nextActiveWorkspaceID);
     const activeProject = nextWorkspaces.find((workspace) => workspace.id === nextActiveWorkspaceID) ?? nextWorkspaces[0];
     setActiveJobThreadID(activeProject?.activeSessionID ?? "");
+  }
+
+  function syncProjectsFromServer(projects: DiscoveredProject[]) {
+    syncProjectsFromDiscovery(projects, {
+      source: "server",
+    });
   }
 
   function resetSessionDomain() {
@@ -1269,6 +1285,7 @@ export function useSessionDomain() {
     setThreadTitle,
     setThreadPinned,
     syncProjectsFromDiscovery,
+    syncProjectsFromServer,
     resetSessionDomain
   };
 }
