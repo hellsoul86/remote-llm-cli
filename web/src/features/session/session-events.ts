@@ -1,5 +1,9 @@
 import type { SessionEventRecord } from "../../api";
-import { extractRunIDFromCodexRPC } from "./codex-parsing";
+import {
+  codexRPCMethodAndParams,
+  extractRunIDFromCodexRPC,
+  extractTurnIDFromPayload,
+} from "./codex-parsing";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") return null;
@@ -48,5 +52,78 @@ export function decodeSessionEventRecord(
     type: eventType,
     payload: payload.payload,
     created_at: createdAt,
+  };
+}
+
+export type NormalizedSessionEvent = {
+  eventType: string;
+  payload: Record<string, unknown>;
+  runID: string;
+};
+
+export function normalizeSessionEvent(
+  event: SessionEventRecord,
+): NormalizedSessionEvent | null {
+  let eventType = event.type;
+  let payload = sessionPayloadRecord(event);
+  let runID = sessionEventRunID(event);
+
+  if (eventType.startsWith("codexrpc.")) {
+    const rpc = codexRPCMethodAndParams(eventType, payload);
+    const method = rpc.method;
+    payload = rpc.params;
+    if (!runID) {
+      runID = extractTurnIDFromPayload(payload);
+    }
+    if (
+      method === "thread/updated" ||
+      method === "thread/started" ||
+      method === "thread/named"
+    ) {
+      const thread = asRecord(payload.thread);
+      const title =
+        typeof payload.title === "string"
+          ? payload.title.trim()
+          : typeof thread?.title === "string"
+            ? thread.title.trim()
+            : typeof thread?.preview === "string"
+              ? thread.preview.trim()
+              : "";
+      if (!title) return null;
+      eventType = "session.title.updated";
+      payload = { title };
+    } else if (method === "turn/started") {
+      eventType = "run.started";
+    } else if (method === "turn/completed") {
+      eventType = "run.completed";
+    } else if (method === "turn/failed") {
+      eventType = "run.failed";
+    } else if (method === "turn/canceled" || method === "turn/interrupted") {
+      eventType = "run.canceled";
+    } else if (
+      method === "item/started" ||
+      method === "item/updated" ||
+      method === "item/completed"
+    ) {
+      const itemEvent = {
+        type: method.replace("/", "."),
+        ...payload,
+      };
+      payload = {
+        ...payload,
+        chunk: `${JSON.stringify(itemEvent)}\n`,
+      };
+      eventType = "assistant.delta";
+    } else if (method === "error") {
+      eventType = "run.failed";
+    } else {
+      return null;
+    }
+  }
+
+  return {
+    eventType,
+    payload,
+    runID,
   };
 }

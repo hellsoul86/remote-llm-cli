@@ -102,7 +102,6 @@ import { runSessionStreamLoop } from "./features/session/stream-loop";
 import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
 import {
   buildCodexRuntimeCardFromEvent,
-  codexRPCMethodAndParams,
   extractThreadIDFromCodexSessionResponse,
   extractTurnIDFromPayload,
   parseCodexEventsIncremental,
@@ -111,8 +110,7 @@ import {
 } from "./features/session/codex-parsing";
 import {
   decodeSessionEventRecord,
-  sessionEventRunID,
-  sessionPayloadRecord,
+  normalizeSessionEvent,
 } from "./features/session/session-events";
 import type {
   SessionRunStreamState,
@@ -1560,64 +1558,9 @@ export function App() {
     event: SessionEventRecord,
     options?: SessionEventHandleOptions,
   ) {
-    let eventType = event.type;
-    let payload = sessionPayloadRecord(event);
-    let runID = sessionEventRunID(event);
-    if (eventType.startsWith("codexrpc.")) {
-      const rpc = codexRPCMethodAndParams(eventType, payload);
-      const method = rpc.method;
-      payload = rpc.params;
-      if (!runID) {
-        runID = extractTurnIDFromPayload(payload);
-      }
-      if (
-        method === "thread/updated" ||
-        method === "thread/started" ||
-        method === "thread/named"
-      ) {
-        const thread = asRecord(payload.thread);
-        const title =
-          typeof payload.title === "string"
-            ? payload.title.trim()
-            : typeof thread?.title === "string"
-              ? thread.title.trim()
-              : typeof thread?.preview === "string"
-                ? thread.preview.trim()
-                : "";
-        if (title) {
-          eventType = "session.title.updated";
-          payload = { title };
-        } else {
-          return;
-        }
-      } else if (method === "turn/started") {
-        eventType = "run.started";
-      } else if (method === "turn/completed") {
-        eventType = "run.completed";
-      } else if (method === "turn/failed") {
-        eventType = "run.failed";
-      } else if (method === "turn/canceled" || method === "turn/interrupted") {
-        eventType = "run.canceled";
-      } else if (
-        method === "item/started" ||
-        method === "item/updated" ||
-        method === "item/completed"
-      ) {
-        const itemEvent = {
-          type: method.replace("/", "."),
-          ...payload,
-        };
-        payload = {
-          ...payload,
-          chunk: `${JSON.stringify(itemEvent)}\n`,
-        };
-        eventType = "assistant.delta";
-      } else if (method === "error") {
-        eventType = "run.failed";
-      } else {
-        return;
-      }
-    }
+    const normalized = normalizeSessionEvent(event);
+    if (!normalized) return;
+    let { eventType, payload, runID } = normalized;
     if (!runID) {
       runID = sessionActiveRunID(sessionID);
     }
