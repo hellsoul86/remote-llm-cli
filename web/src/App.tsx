@@ -459,10 +459,30 @@ function isProtocolNoiseLine(line: string): boolean {
   const normalized = line.trim();
   if (!normalized) return true;
   if (/^done\.?$/i.test(normalized)) return true;
+  if (/^connected\.\s*hosts=\d+/i.test(normalized)) return true;
+  if (/^[a-z0-9_.-]+\s+done status=[a-z0-9_.-]+/i.test(normalized)) return true;
+  if (/^[a-z0-9_.-]+\s+completed exit=-?\d+/i.test(normalized)) return true;
   if (normalized.includes(`"type":"thread.started"`)) return true;
   if (normalized.includes(`"type":"turn.started"`)) return true;
   if (normalized.includes(`"type":"turn.completed"`)) return true;
   if (normalized.includes(`"type":"response.started"`)) return true;
+  return false;
+}
+
+function isHiddenSystemTimelineEntry(entry: TimelineEntry): boolean {
+  if (entry.kind !== "system") return false;
+  const title = entry.title.trim().toLowerCase();
+  const body = entry.body.trim().toLowerCase();
+  if (title === "connected" && body.startsWith("connected. hosts=")) {
+    return true;
+  }
+  if (title === "server completed") return true;
+  if (title === "failed" && /\b(done status=|completed exit=)/.test(body)) {
+    return true;
+  }
+  if (title === "system" && /\b(hosts=\d+|queue_depth=|done status=|completed exit=)/.test(body)) {
+    return true;
+  }
   return false;
 }
 
@@ -1466,27 +1486,24 @@ export function App() {
         projects: [],
       };
 
+      const indexedSessions = workspace.sessions.map((sessionItem, index) => ({
+        sessionItem,
+        index,
+      }));
       const project: SessionTreeProject = {
         id: workspace.id,
         hostID,
         title: resolveProjectTitle(workspace.path, workspace.title),
         path: workspace.path,
         updatedAt: workspace.updatedAt,
-        sessions: [...workspace.sessions]
+        sessions: indexedSessions
           .sort((a, b) => {
-            if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-            if (a.unreadDone !== b.unreadDone) return a.unreadDone ? -1 : 1;
-            const aRunning = a.activeJobID.trim() !== "";
-            const bRunning = b.activeJobID.trim() !== "";
-            if (aRunning !== bRunning) return aRunning ? -1 : 1;
-            const aTS = Date.parse(a.updatedAt);
-            const bTS = Date.parse(b.updatedAt);
-            const safeA = Number.isFinite(aTS) ? aTS : 0;
-            const safeB = Number.isFinite(bTS) ? bTS : 0;
-            if (safeA !== safeB) return safeB - safeA;
-            return a.title.localeCompare(b.title);
+            if (a.sessionItem.pinned !== b.sessionItem.pinned) {
+              return a.sessionItem.pinned ? -1 : 1;
+            }
+            return a.index - b.index;
           })
-          .map((sessionItem) => ({
+          .map(({ sessionItem }) => ({
             id: sessionItem.id,
             title: sessionItem.title,
             pinned: Boolean(sessionItem.pinned),
@@ -1501,40 +1518,27 @@ export function App() {
       groups.set(hostID, group);
     }
 
-    return Array.from(groups.values()).map((group) => ({
-      ...group,
-      projects: group.projects.sort((a, b) => {
-        const projectPriority = (project: SessionTreeProject): number => {
-          if (project.id === activeWorkspaceID) return 0;
-          if (project.sessions.some((sessionItem) => sessionItem.activeJobID.trim() !== "")) return 1;
-          if (project.sessions.some((sessionItem) => sessionItem.unreadDone)) return 2;
-          return 3;
-        };
-        const aPriority = projectPriority(a);
-        const bPriority = projectPriority(b);
-        if (aPriority !== bPriority) return aPriority - bPriority;
-
-        const projectUpdatedAtMS = (project: SessionTreeProject): number => {
-          const parsedProjectTS = Date.parse(project.updatedAt);
-          let latest = Number.isFinite(parsedProjectTS) ? parsedProjectTS : 0;
-          for (const sessionItem of project.sessions) {
-            const parsedSessionTS = Date.parse(sessionItem.updatedAt);
-            if (Number.isFinite(parsedSessionTS)) {
-              latest = Math.max(latest, parsedSessionTS);
-            }
-          }
-          return latest;
-        };
-        const aUpdatedAtMS = projectUpdatedAtMS(a);
-        const bUpdatedAtMS = projectUpdatedAtMS(b);
-        if (aUpdatedAtMS !== bUpdatedAtMS) return bUpdatedAtMS - aUpdatedAtMS;
-
-        const titleDiff = a.title.localeCompare(b.title);
-        if (titleDiff !== 0) return titleDiff;
-        return a.path.localeCompare(b.path);
-      }),
-    }));
-  }, [hosts, workspaces, activeWorkspaceID]);
+    return Array.from(groups.values())
+      .sort((a, b) => {
+        const aActive = a.hostID === activeSessionHostID;
+        const bActive = b.hostID === activeSessionHostID;
+        if (aActive !== bActive) return aActive ? -1 : 1;
+        const nameDiff = a.hostName.localeCompare(b.hostName);
+        if (nameDiff !== 0) return nameDiff;
+        return a.hostID.localeCompare(b.hostID);
+      })
+      .map((group) => ({
+        ...group,
+        projects: group.projects.sort((a, b) => {
+          const aActive = a.id === activeWorkspaceID;
+          const bActive = b.id === activeWorkspaceID;
+          if (aActive !== bActive) return aActive ? -1 : 1;
+          const titleDiff = a.title.localeCompare(b.title);
+          if (titleDiff !== 0) return titleDiff;
+          return a.path.localeCompare(b.path);
+        }),
+      }));
+  }, [hosts, workspaces, activeWorkspaceID, activeSessionHostID]);
   const sourceProjectIDSet = useMemo(
     () =>
       new Set(
@@ -1803,7 +1807,12 @@ export function App() {
       .filter((action) => action.searchText.includes(query))
       .slice(0, 48);
   }, [commandPaletteActions, commandPaletteQuery]);
-  const activeTimelineTail = activeTimeline[activeTimeline.length - 1];
+  const visibleActiveTimeline = useMemo(
+    () => activeTimeline.filter((entry) => !isHiddenSystemTimelineEntry(entry)),
+    [activeTimeline],
+  );
+  const activeTimelineTail =
+    visibleActiveTimeline[visibleActiveTimeline.length - 1];
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -2675,10 +2684,9 @@ export function App() {
 
     for (const bucket of grouped.values()) {
       bucket.sessions.sort((a, b) => {
-        const left = a.updatedAt ?? "";
-        const right = b.updatedAt ?? "";
-        if (left === right) return a.title.localeCompare(b.title);
-        return left > right ? -1 : 1;
+        const titleDiff = a.title.localeCompare(b.title);
+        if (titleDiff !== 0) return titleDiff;
+        return a.id.localeCompare(b.id);
       });
     }
 
@@ -2697,7 +2705,15 @@ export function App() {
       );
     }
 
-    return Array.from(grouped.values()).map((project) => ({
+    return Array.from(grouped.values())
+      .sort((a, b) => {
+        const hostDiff = a.hostName.localeCompare(b.hostName);
+        if (hostDiff !== 0) return hostDiff;
+        const titleDiff = a.title.localeCompare(b.title);
+        if (titleDiff !== 0) return titleDiff;
+        return a.path.localeCompare(b.path);
+      })
+      .map((project) => ({
       id: project.projectID || undefined,
       hostID: project.hostID,
       hostName: project.hostName,
@@ -3751,7 +3767,7 @@ export function App() {
     const threadChanged = lastTimelineThreadIDRef.current !== activeThreadID;
     const nextSignature = [
       activeThreadID,
-      String(activeTimeline.length),
+      String(visibleActiveTimeline.length),
       activeTimelineTail?.id ?? "",
       activeTimelineTail?.state ?? "",
       String(activeTimelineTail?.body?.length ?? 0),
@@ -3762,14 +3778,14 @@ export function App() {
     const previousTailState = timelineLastTailStateRef.current;
     const nextTailID = activeTimelineTail?.id ?? "";
     const nextTailState = activeTimelineTail?.state ?? "";
-    timelineLastCountRef.current = activeTimeline.length;
+    timelineLastCountRef.current = visibleActiveTimeline.length;
     timelineLastTailIDRef.current = nextTailID;
     timelineLastTailStateRef.current = nextTailState;
     if (threadChanged) {
       lastTimelineThreadIDRef.current = activeThreadID;
       timelineForceStickRef.current = true;
       timelineLastSignatureRef.current = nextSignature;
-      timelineLastCountRef.current = activeTimeline.length;
+      timelineLastCountRef.current = visibleActiveTimeline.length;
       timelineLastTailIDRef.current = nextTailID;
       timelineLastTailStateRef.current = nextTailState;
       setTimelineUnreadCount(0);
@@ -3782,7 +3798,7 @@ export function App() {
       !threadChanged && previousSignature !== nextSignature;
     if (!shouldStick && timelineChanged) {
       const structuralChange =
-        previousCount !== activeTimeline.length ||
+        previousCount !== visibleActiveTimeline.length ||
         previousTailID !== nextTailID ||
         previousTailState !== nextTailState;
       timelineLastSignatureRef.current = nextSignature;
@@ -3809,7 +3825,7 @@ export function App() {
     };
   }, [
     activeThreadID,
-    activeTimeline.length,
+    visibleActiveTimeline.length,
     activeTimelineTail?.body,
     activeTimelineTail?.state,
   ]);
@@ -5767,7 +5783,7 @@ export function App() {
                 ref={timelineViewportRef}
                 onScroll={onTimelineScroll}
               >
-                {activeTimeline.length === 0 ? (
+                {visibleActiveTimeline.length === 0 ? (
                   <article className="message message-system">
                     <div className="message-title-row">
                       <h4>{isRefreshing ? "Loading" : "Start"}</h4>
@@ -5779,7 +5795,7 @@ export function App() {
                     </pre>
                   </article>
                 ) : (
-                  activeTimeline.map((entry) => (
+                  visibleActiveTimeline.map((entry) => (
                     <article
                       key={entry.id}
                       className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}
