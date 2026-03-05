@@ -133,6 +133,29 @@ func TestCodexV2WSReconnectAfterLatestCursorDoesNotReplay(t *testing.T) {
 	}
 }
 
+func TestCodexV2WSStreamEmitsResetWhenSubscriptionCloses(t *testing.T) {
+	srv, httpSrv, token, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_ws_reset"
+	upsertCodexTestSession(t, srv, sessionID)
+
+	conn := dialCodexSessionWS(t, httpSrv.URL, token, sessionID, 0)
+	defer conn.Close()
+
+	readyFrame := readWSFrameType(t, conn, "session.ready", 2*time.Second)
+	if cursor := asInt64(readyFrame["cursor"]); cursor != 0 {
+		t.Fatalf("ready cursor=%d want=0", cursor)
+	}
+
+	forceCloseSessionSubscriptions(srv, sessionID)
+
+	resetFrame := readWSFrameType(t, conn, "session.reset", 2*time.Second)
+	if reason := strings.TrimSpace(asString(resetFrame["reason"])); reason != "backpressure" {
+		t.Fatalf("reset reason=%q want=backpressure", reason)
+	}
+}
+
 func appendSessionEventForTest(
 	t *testing.T,
 	srv *Server,
@@ -256,5 +279,28 @@ func asInt64(v any) int64 {
 		return out
 	default:
 		return 0
+	}
+}
+
+func forceCloseSessionSubscriptions(s *Server, sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	bySession := s.streamSubs[sessionID]
+	if len(bySession) == 0 {
+		s.mu.Unlock()
+		return
+	}
+	channels := make([]chan model.SessionEvent, 0, len(bySession))
+	for _, ch := range bySession {
+		channels = append(channels, ch)
+	}
+	delete(s.streamSubs, sessionID)
+	s.mu.Unlock()
+
+	for _, ch := range channels {
+		close(ch)
 	}
 }
