@@ -82,6 +82,18 @@ import {
   type SessionTreeHost,
   type SessionTreeProject,
 } from "./features/session/types";
+import {
+  collectVisibleTreeSessionIDs,
+  filterSessionTreeHosts,
+  buildSessionTreeHosts,
+} from "./features/session/tree";
+import {
+  clipStreamText,
+  deriveSessionTitleFromPrompt,
+  isGenericSessionTitle,
+  normalizeSessionTitle,
+  resolveProjectTitle,
+} from "./features/session/utils";
 const DEFAULT_WORKSPACE_PATH = "/";
 
 type AuthPhase = "checking" | "locked" | "ready";
@@ -227,36 +239,6 @@ function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): {
     default:
       return { suffix: "updated", body: "Session status changed." };
   }
-}
-
-function normalizeSessionTitle(raw: string): string {
-  const collapsed = raw.replace(/\s+/g, " ").trim();
-  if (!collapsed) return "";
-  if (/^session(\s+\d+)?$/i.test(collapsed)) return "";
-  if (collapsed.length <= 72) return collapsed;
-  return `${collapsed.slice(0, 69).trimEnd()}...`;
-}
-
-function isGenericSessionTitle(title: string): boolean {
-  return /^session(\s+\d+)?$/i.test(title.trim());
-}
-
-function deriveSessionTitleFromPrompt(prompt: string): string {
-  const normalized = prompt
-    .replace(/[`*_#>\[\]\(\){}]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) return "";
-  const sentenceMatch = normalized.match(/^(.{1,88}?)([.!?。！？]|$)/);
-  const sentence = (sentenceMatch?.[1] ?? normalized).trim();
-  const words = sentence.split(" ").filter((word) => word.trim() !== "");
-  const compact = words.slice(0, 10).join(" ");
-  return normalizeSessionTitle(compact);
-}
-
-function clipStreamText(raw: string, maxChars = 3600): string {
-  if (raw.length <= maxChars) return raw;
-  return `${raw.slice(raw.length - maxChars)}\n...[stream truncated for UI]...`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -878,20 +860,6 @@ function formatDateTime(ts: string | undefined): string {
   return d.toLocaleString();
 }
 
-function projectTitleFromPath(path: string): string {
-  const trimmed = path.trim();
-  if (!trimmed) return "Untitled Project";
-  const segments = trimmed.split("/").filter((part) => part.trim() !== "");
-  const tail = segments[segments.length - 1];
-  return tail?.trim() || trimmed;
-}
-
-function resolveProjectTitle(path: string, title?: string): string {
-  const explicit = title?.trim() ?? "";
-  if (explicit) return explicit;
-  return projectTitleFromPath(path);
-}
-
 function firstImageFile(
   source: FileList | File[] | null | undefined,
 ): File | null {
@@ -1391,94 +1359,10 @@ export function App() {
     return chosen.map((item) => item.id);
   }, [workspaces, activeThreadID]);
   const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
-  const sessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
-    const hostLookup = new Map<string, Host>();
-    for (const host of hosts) {
-      hostLookup.set(host.id, host);
-    }
-
-    const groups = new Map<string, SessionTreeHost>();
-    for (const workspace of workspaces) {
-      const hostID = workspace.hostID?.trim() || "unknown";
-      const host = hostLookup.get(hostID);
-      const group = groups.get(hostID) ?? {
-        hostID,
-        hostName: workspace.hostName || host?.name || hostID,
-        hostAddress: host
-          ? `${host.user ? `${host.user}@` : ""}${host.host}:${host.port}`
-          : "",
-        projects: [],
-      };
-
-      const project: SessionTreeProject = {
-        id: workspace.id,
-        hostID,
-        title: resolveProjectTitle(workspace.path, workspace.title),
-        path: workspace.path,
-        updatedAt: workspace.updatedAt,
-        sessions: [...workspace.sessions]
-          .sort((a, b) => {
-            if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-            if (a.unreadDone !== b.unreadDone) return a.unreadDone ? -1 : 1;
-            const aRunning = a.activeJobID.trim() !== "";
-            const bRunning = b.activeJobID.trim() !== "";
-            if (aRunning !== bRunning) return aRunning ? -1 : 1;
-            const aTS = Date.parse(a.updatedAt);
-            const bTS = Date.parse(b.updatedAt);
-            const safeA = Number.isFinite(aTS) ? aTS : 0;
-            const safeB = Number.isFinite(bTS) ? bTS : 0;
-            if (safeA !== safeB) return safeB - safeA;
-            return a.title.localeCompare(b.title);
-          })
-          .map((sessionItem) => ({
-            id: sessionItem.id,
-            title: sessionItem.title,
-            pinned: Boolean(sessionItem.pinned),
-            activeJobID: sessionItem.activeJobID,
-            unreadDone: sessionItem.unreadDone,
-            lastJobStatus: sessionItem.lastJobStatus,
-            updatedAt: sessionItem.updatedAt,
-          })),
-      };
-
-      group.projects.push(project);
-      groups.set(hostID, group);
-    }
-
-    return Array.from(groups.values()).map((group) => ({
-      ...group,
-      projects: group.projects.sort((a, b) => {
-        const projectPriority = (project: SessionTreeProject): number => {
-          if (project.id === activeWorkspaceID) return 0;
-          if (project.sessions.some((sessionItem) => sessionItem.activeJobID.trim() !== "")) return 1;
-          if (project.sessions.some((sessionItem) => sessionItem.unreadDone)) return 2;
-          return 3;
-        };
-        const aPriority = projectPriority(a);
-        const bPriority = projectPriority(b);
-        if (aPriority !== bPriority) return aPriority - bPriority;
-
-        const projectUpdatedAtMS = (project: SessionTreeProject): number => {
-          const parsedProjectTS = Date.parse(project.updatedAt);
-          let latest = Number.isFinite(parsedProjectTS) ? parsedProjectTS : 0;
-          for (const sessionItem of project.sessions) {
-            const parsedSessionTS = Date.parse(sessionItem.updatedAt);
-            if (Number.isFinite(parsedSessionTS)) {
-              latest = Math.max(latest, parsedSessionTS);
-            }
-          }
-          return latest;
-        };
-        const aUpdatedAtMS = projectUpdatedAtMS(a);
-        const bUpdatedAtMS = projectUpdatedAtMS(b);
-        if (aUpdatedAtMS !== bUpdatedAtMS) return bUpdatedAtMS - aUpdatedAtMS;
-
-        const titleDiff = a.title.localeCompare(b.title);
-        if (titleDiff !== 0) return titleDiff;
-        return a.path.localeCompare(b.path);
-      }),
-    }));
-  }, [hosts, workspaces, activeWorkspaceID]);
+  const sessionTreeHosts = useMemo<SessionTreeHost[]>(
+    () => buildSessionTreeHosts(hosts, workspaces, activeWorkspaceID),
+    [hosts, workspaces, activeWorkspaceID],
+  );
   const sourceProjectIDSet = useMemo(
     () =>
       new Set(
@@ -1488,53 +1372,14 @@ export function App() {
       ),
     [sourceProjectIDs],
   );
-  const filteredSessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
-    const query = projectFilter.trim().toLowerCase();
-    if (!query) return sessionTreeHosts;
-    const nextHosts: SessionTreeHost[] = [];
-    for (const host of sessionTreeHosts) {
-      const hostText = `${host.hostName} ${host.hostAddress}`.toLowerCase();
-      if (hostText.includes(query)) {
-        nextHosts.push(host);
-        continue;
-      }
-      const projects: SessionTreeProject[] = [];
-      for (const project of host.projects) {
-        const projectText = `${project.title} ${project.path}`.toLowerCase();
-        if (projectText.includes(query)) {
-          projects.push(project);
-          continue;
-        }
-        const sessions = project.sessions.filter((sessionItem) => {
-          const text = `${sessionItem.title} ${sessionItem.id}`.toLowerCase();
-          return text.includes(query);
-        });
-        if (sessions.length === 0) continue;
-        projects.push({
-          ...project,
-          sessions,
-        });
-      }
-      if (projects.length === 0) continue;
-      nextHosts.push({
-        ...host,
-        projects,
-      });
-    }
-    return nextHosts;
-  }, [projectFilter, sessionTreeHosts]);
-  const visibleTreeSessionIDs = useMemo(() => {
-    const out: string[] = [];
-    for (const hostNode of filteredSessionTreeHosts) {
-      if (collapsedHostIDs.includes(hostNode.hostID)) continue;
-      for (const projectNode of hostNode.projects) {
-        for (const sessionNode of projectNode.sessions) {
-          out.push(sessionNode.id);
-        }
-      }
-    }
-    return out;
-  }, [collapsedHostIDs, filteredSessionTreeHosts]);
+  const filteredSessionTreeHosts = useMemo<SessionTreeHost[]>(
+    () => filterSessionTreeHosts(sessionTreeHosts, projectFilter),
+    [projectFilter, sessionTreeHosts],
+  );
+  const visibleTreeSessionIDs = useMemo(
+    () => collectVisibleTreeSessionIDs(filteredSessionTreeHosts, collapsedHostIDs),
+    [collapsedHostIDs, filteredSessionTreeHosts],
+  );
   const activeThreadBusy =
     Boolean(activeThread?.activeJobID) ||
     (activeThread ? submittingThreadID === activeThread.id : false) ||
