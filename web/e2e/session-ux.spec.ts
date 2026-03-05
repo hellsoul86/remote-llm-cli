@@ -1850,7 +1850,8 @@ test("running state locks session controls then unlocks on completion", async ({
 test("stream status recovers after transient failures", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `STREAM_RECOVER_${Date.now()}`;
-  await mockSessionApi(page, `recover ${marker}`, marker, {
+  const harness = await mockSessionApi(page, `recover ${marker}`, marker, {
+    streamPattern: "completion-once",
     streamFailAttempts: 2,
   });
   await unlock(page);
@@ -1867,6 +1868,10 @@ test("stream status recovers after transient failures", async ({ page }) => {
   }
   expect(sawRetryState).toBeTruthy();
   await expect(streamStatus).toContainText("stream live", { timeout: 15000 });
+  await expect(
+    page.locator(".message.message-assistant pre", { hasText: `recover ${marker}` }),
+  ).toHaveCount(1, { timeout: 15000 });
+  expect(harness.sessionOneStreamAfterValues()).toEqual([0, 0, 0]);
 
   await page.getByRole("button", { name: "Reconnect" }).click();
   await expect(streamStatus).toContainText("stream live", { timeout: 10000 });
