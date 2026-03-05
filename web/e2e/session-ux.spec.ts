@@ -1689,6 +1689,54 @@ test("active project is prioritized to top of project list", async ({ page }) =>
   await expect(projectTitles.first()).toHaveText("work");
 });
 
+test("server snapshot prunes stale local project cache on unlock", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SERVER_TRUTH_${Date.now()}`;
+  await mockSessionApi(page, `server truth ${marker}`, marker);
+  await page.addInitScript(() => {
+    const now = new Date().toISOString();
+    const staleState = {
+      workspaces: [
+        {
+          id: "project_local_1::/tmp/stale-cache-project",
+          hostID: "local_1",
+          hostName: "local-default",
+          path: "/tmp/stale-cache-project",
+          title: "Stale Cache Project",
+          sessions: [
+            {
+              id: "session_stale_cache_1",
+              title: "Stale Cache Session",
+              draft: "",
+              timeline: [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+          activeSessionID: "session_stale_cache_1",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      activeWorkspaceID: "project_local_1::/tmp/stale-cache-project",
+    };
+    window.localStorage.setItem(
+      "remote_llm_session_state_v1",
+      JSON.stringify(staleState),
+    );
+  });
+  await unlock(page);
+
+  await expect(
+    page.locator(".project-chip-main strong", { hasText: "work" }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".project-chip-main strong", { hasText: "Stale Cache Project" }),
+  ).toHaveCount(0);
+});
+
 test("background completion shows one alert and unread badge", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `BG_${Date.now()}`;
