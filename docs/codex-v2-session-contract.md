@@ -105,12 +105,38 @@ Supported fields include:
 - Safety/format: `skip_git_repo_check`, `ephemeral`, `json_output`
 - Metadata: `metadata`
 
+Example:
+
+```json
+{
+  "host_id": "host_local",
+  "prompt": "Summarize the latest test failures and propose fixes",
+  "mode": "exec",
+  "model": "gpt-5-codex",
+  "cwd": "/home/ecs-user/repos/remote-llm-cli",
+  "approval_policy": "onRequest",
+  "sandbox": "workspaceWrite",
+  "search": true,
+  "skip_git_repo_check": true
+}
+```
+
 ## Pending Request Lifecycle
 
 - Pending requests are stored per session and exposed via `GET .../requests/pending`.
 - `serverRequest/resolved` removes pending entry by request id.
 - Terminal turn events (`completed|failed|canceled|interrupted`) clear pending entries for that session.
 - Pending entries are TTL-pruned (`45m`).
+
+Resolve request example:
+
+```json
+{
+  "decision": {
+    "type": "approve"
+  }
+}
+```
 
 ## Reliability Guarantees
 
@@ -122,3 +148,5 @@ Supported fields include:
 
 - Session-mode interaction must not depend on `/v1/jobs/*`.
 - `/v1/jobs/*` remains available for non-session operational workflows only.
+- Contract freeze date: 2026-03-06.
+- v1 job endpoints are legacy for session UX and are excluded from parity acceptance.

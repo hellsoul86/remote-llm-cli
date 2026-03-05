@@ -147,3 +147,123 @@ func TestCodexV2SessionStreamResumesFromLastEventID(t *testing.T) {
 		t.Fatalf("event id=%q want=%d", frame.ID, second.Seq)
 	}
 }
+
+func TestCodexV2EventsRequireBearerToken(t *testing.T) {
+	srv, httpSrv, _, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_contract_auth_v2"
+	upsertCodexTestSession(t, srv, sessionID)
+
+	var resp struct {
+		Error string `json:"error"`
+	}
+	status := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v2/codex/sessions/%s/events", httpSrv.URL, sessionID),
+		"",
+		nil,
+		&resp,
+	)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("status=%d want=401", status)
+	}
+	if resp.Error != "missing bearer token" {
+		t.Fatalf("error=%q want=missing bearer token", resp.Error)
+	}
+}
+
+func TestCodexV2EventsRejectInvalidAfterCursor(t *testing.T) {
+	srv, httpSrv, token, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_contract_invalid_after_v2"
+	upsertCodexTestSession(t, srv, sessionID)
+
+	var resp struct {
+		Error string `json:"error"`
+	}
+	status := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodGet,
+		fmt.Sprintf("%s/v2/codex/sessions/%s/events?after=-1", httpSrv.URL, sessionID),
+		token,
+		nil,
+		&resp,
+	)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d want=400", status)
+	}
+	if resp.Error != "invalid after" {
+		t.Fatalf("error=%q want=invalid after", resp.Error)
+	}
+}
+
+func TestCodexV2TurnStartRequiresPromptOrInput(t *testing.T) {
+	srv, httpSrv, token, host := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_contract_turn_validation_v2"
+	_, err := srv.store.UpsertSession(model.SessionRecord{
+		ID:        sessionID,
+		HostID:    host.ID,
+		Path:      "/tmp",
+		Runtime:   "codex",
+		ProjectID: "project_test",
+		Title:     "turn validation",
+	})
+	if err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+
+	var resp struct {
+		Error string `json:"error"`
+	}
+	status := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodPost,
+		fmt.Sprintf("%s/v2/codex/sessions/%s/turns/start", httpSrv.URL, sessionID),
+		token,
+		map[string]any{
+			"host_id": host.ID,
+		},
+		&resp,
+	)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d want=400", status)
+	}
+	if resp.Error != "prompt or input is required" {
+		t.Fatalf("error=%q want=prompt or input is required", resp.Error)
+	}
+}
+
+func TestCodexV2ResolveRequestMissingRecord(t *testing.T) {
+	srv, httpSrv, token, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_contract_missing_pending_v2"
+	upsertCodexTestSession(t, srv, sessionID)
+
+	var resp struct {
+		Error string `json:"error"`
+	}
+	status := doJSON(
+		t,
+		httpSrv.Client(),
+		http.MethodPost,
+		fmt.Sprintf("%s/v2/codex/sessions/%s/requests/req_missing/resolve", httpSrv.URL, sessionID),
+		token,
+		map[string]any{},
+		&resp,
+	)
+	if status != http.StatusNotFound {
+		t.Fatalf("status=%d want=404", status)
+	}
+	if resp.Error != "pending request not found" {
+		t.Fatalf("error=%q want=pending request not found", resp.Error)
+	}
+}

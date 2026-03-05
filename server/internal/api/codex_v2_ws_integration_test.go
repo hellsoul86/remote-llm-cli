@@ -156,6 +156,122 @@ func TestCodexV2WSStreamEmitsResetWhenSubscriptionCloses(t *testing.T) {
 	}
 }
 
+func TestCodexV2WSReplayAndLiveInterleavingKeepsOrderedUniqueEvents(t *testing.T) {
+	srv, httpSrv, token, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const (
+		sessionID    = "session_ws_interleaved_ordering"
+		replayEvents = 320
+		liveEvents   = 40
+	)
+	upsertCodexTestSession(t, srv, sessionID)
+
+	var seededLast int64
+	for i := 0; i < replayEvents; i++ {
+		event := appendSessionEventForTest(t, srv, sessionID, "assistant.delta", "turn_ws_interleave", map[string]any{
+			"chunk": fmt.Sprintf("{\"type\":\"item.updated\",\"seq\":%d}\n", i+1),
+		})
+		seededLast = event.Seq
+	}
+	if seededLast <= 0 {
+		t.Fatalf("expected seeded events")
+	}
+
+	conn := dialCodexSessionWS(t, httpSrv.URL, token, sessionID, 0)
+	defer conn.Close()
+
+	liveFinalCh := make(chan int64, 1)
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		last := int64(0)
+		for i := 0; i < liveEvents; i++ {
+			event := appendSessionEventForTest(t, srv, sessionID, "assistant.delta", "turn_ws_interleave", map[string]any{
+				"chunk": fmt.Sprintf("{\"type\":\"item.updated\",\"live\":%d}\n", i+1),
+			})
+			srv.publishSessionEvent(event)
+			last = event.Seq
+			time.Sleep(2 * time.Millisecond)
+		}
+		liveFinalCh <- last
+	}()
+
+	seen := map[int64]struct{}{}
+	lastSeq := int64(0)
+	liveFinal := int64(0)
+	readySeen := false
+	liveDone := false
+
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		if !liveDone {
+			select {
+			case liveFinal = <-liveFinalCh:
+				liveDone = true
+			default:
+			}
+		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(800 * time.Millisecond))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				if readySeen && liveDone && lastSeq >= liveFinal && liveFinal > 0 {
+					break
+				}
+				continue
+			}
+			t.Fatalf("read ws frame: %v", err)
+		}
+
+		var frame map[string]any
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatalf("decode ws frame: %v raw=%q", err, string(raw))
+		}
+		switch strings.TrimSpace(asString(frame["type"])) {
+		case "session.ready":
+			readySeen = true
+		case "session.event":
+			eventObj, ok := frame["event"].(map[string]any)
+			if !ok {
+				t.Fatalf("event payload missing: %#v", frame)
+			}
+			seq := asInt64(eventObj["seq"])
+			if seq <= 0 {
+				t.Fatalf("invalid seq: %d", seq)
+			}
+			if seq <= lastSeq {
+				t.Fatalf("non-monotonic seq: got=%d last=%d", seq, lastSeq)
+			}
+			if _, exists := seen[seq]; exists {
+				t.Fatalf("duplicate seq received: %d", seq)
+			}
+			seen[seq] = struct{}{}
+			lastSeq = seq
+		}
+
+		if readySeen && liveDone && lastSeq >= liveFinal && liveFinal > 0 {
+			break
+		}
+	}
+
+	if !readySeen {
+		t.Fatalf("session.ready frame not observed")
+	}
+	if !liveDone || liveFinal == 0 {
+		t.Fatalf("live publish did not complete")
+	}
+	if lastSeq < liveFinal {
+		t.Fatalf("last seq=%d want >= live final=%d", lastSeq, liveFinal)
+	}
+	for seq := int64(1); seq <= liveFinal; seq++ {
+		if _, ok := seen[seq]; !ok {
+			t.Fatalf("missing seq=%d in replay/live stream", seq)
+		}
+	}
+}
+
 func appendSessionEventForTest(
 	t *testing.T,
 	srv *Server,
