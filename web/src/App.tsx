@@ -1,6 +1,4 @@
 import {
-  type ClipboardEvent as ReactClipboardEvent,
-  type DragEvent as ReactDragEvent,
   FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
@@ -25,7 +23,6 @@ import {
   listRuns,
   listRuntimes,
   listSessions,
-  uploadImage,
   upsertHost,
   type Host,
   type SessionRecord,
@@ -65,6 +62,7 @@ import {
 import { createHostActions } from "./features/session/host-actions";
 import { createPlatformActions } from "./features/session/platform-actions";
 import { createProjectActions } from "./features/session/project-actions";
+import { createComposerImageActions } from "./features/session/composer-image-actions";
 import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
 import { createSessionSubmitAction } from "./features/session/session-submit-action";
 import {
@@ -131,8 +129,6 @@ import {
   summarizeTargetFailures,
 } from "./features/session/runtime-utils";
 import {
-  dataTransferHasImage,
-  firstImageFile,
   formatCodexPlatformResult,
   parseMessageSegments,
   shouldCollapseMessageBody,
@@ -2128,73 +2124,25 @@ export function App() {
     }
   }
 
-  async function onUploadSessionImage(
-    file: File,
-    threadID = activeThread?.id ?? "",
-  ) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const targetThreadID = threadID.trim();
-    if (!targetThreadID) return;
-    if (!file.type.toLowerCase().startsWith("image/")) {
-      setImageUploadError("Only image files are supported.");
-      return;
-    }
-    setUploadingImage(true);
-    setImageUploadError("");
-    try {
-      const uploaded = await uploadImage(token, file);
-      addThreadImagePath(targetThreadID, uploaded.path);
-    } catch (error) {
-      setImageUploadError(String(error));
-    } finally {
-      setUploadingImage(false);
-    }
-  }
-
-  function onComposerPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
-    if (!activeThread || activeThreadBusy) return;
-    const imageFile = firstImageFile(event.clipboardData?.files);
-    if (!imageFile) return;
-    event.preventDefault();
-    void onUploadSessionImage(imageFile, activeThread.id);
-  }
-
-  function onComposerDragEnter(event: ReactDragEvent<HTMLElement>) {
-    if (!activeThread || activeThreadBusy) return;
-    if (!dataTransferHasImage(event.dataTransfer)) return;
-    event.preventDefault();
-    composerDragDepthRef.current += 1;
-    setComposerDropActive(true);
-  }
-
-  function onComposerDragOver(event: ReactDragEvent<HTMLElement>) {
-    if (!activeThread || activeThreadBusy) return;
-    if (!dataTransferHasImage(event.dataTransfer)) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    if (!composerDropActive) {
-      setComposerDropActive(true);
-    }
-  }
-
-  function onComposerDragLeave(event: ReactDragEvent<HTMLElement>) {
-    if (!composerDropActive) return;
-    event.preventDefault();
-    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1);
-    if (composerDragDepthRef.current > 0) return;
-    setComposerDropActive(false);
-  }
-
-  function onComposerDrop(event: ReactDragEvent<HTMLElement>) {
-    if (!dataTransferHasImage(event.dataTransfer)) return;
-    event.preventDefault();
-    composerDragDepthRef.current = 0;
-    setComposerDropActive(false);
-    if (!activeThread || activeThreadBusy) return;
-    const imageFile = firstImageFile(event.dataTransfer?.files);
-    if (!imageFile) return;
-    void onUploadSessionImage(imageFile, activeThread.id);
-  }
+  const {
+    onUploadSessionImage,
+    onComposerPaste,
+    onComposerDragEnter,
+    onComposerDragOver,
+    onComposerDragLeave,
+    onComposerDrop,
+  } = createComposerImageActions({
+    authPhase,
+    token,
+    activeThreadID: activeThread?.id ?? "",
+    activeThreadBusy,
+    composerDropActive,
+    composerDragDepthRef,
+    setUploadingImage,
+    setImageUploadError,
+    setComposerDropActive,
+    addThreadImagePath,
+  });
 
   if (authPhase !== "ready") {
     return (
