@@ -63,6 +63,7 @@ import { SessionHeader } from "./features/session/components/SessionHeader";
 import { SessionSidebar } from "./features/session/components/SessionSidebar";
 import { SessionTimeline } from "./features/session/components/SessionTimeline";
 import { TokenGate } from "./features/session/components/TokenGate";
+import { useAppMode } from "./features/session/use-app-mode";
 import { useComposerAutoResize } from "./features/session/use-composer-autosize";
 import { useCommandPaletteController } from "./features/session/use-command-palette";
 import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
@@ -146,7 +147,6 @@ import {
 const DEFAULT_WORKSPACE_PATH = "/";
 
 type AuthPhase = "checking" | "locked" | "ready";
-type AppMode = "session" | "ops";
 
 type SessionEventHandleOptions = {
   surfaceCompletions?: boolean;
@@ -224,14 +224,6 @@ function appendCodexStdoutChunk(state: SessionRunStreamState, chunk: string) {
   }
 }
 
-function modeFromHash(hash: string): AppMode {
-  return hash === "#/ops" ? "ops" : "session";
-}
-
-function modeToHash(mode: AppMode): string {
-  return mode === "ops" ? "#/ops" : "#/session";
-}
-
 export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
@@ -239,11 +231,7 @@ export function App() {
     () => loadStoredToken(),
   );
   const [authError, setAuthError] = useState("");
-  const [appMode, setAppMode] = useState<AppMode>(() =>
-    typeof window === "undefined"
-      ? "session"
-      : modeFromHash(window.location.hash),
-  );
+  const { appMode, switchMode } = useAppMode();
   const [platformHostID, setPlatformHostID] = useState("");
   const [platformBusySection, setPlatformBusySection] = useState<
     "" | "login" | "mcp" | "cloud"
@@ -2069,18 +2057,6 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const syncFromHash = () => {
-      setAppMode(modeFromHash(window.location.hash));
-    };
-    syncFromHash();
-    window.addEventListener("hashchange", syncFromHash);
-    return () => {
-      window.removeEventListener("hashchange", syncFromHash);
-    };
-  }, []);
-
-  useEffect(() => {
     if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
     const activeRunID = activeThread?.activeJobID?.trim() ?? "";
     if (!activeRunID || !knownJobIDSet.has(activeRunID)) {
@@ -2463,16 +2439,6 @@ export function App() {
   async function onSubmitToken(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await unlockWorkspace(tokenInput);
-  }
-
-  function switchMode(nextMode: AppMode) {
-    setAppMode(nextMode);
-    if (typeof window !== "undefined") {
-      const nextHash = modeToHash(nextMode);
-      if (window.location.hash !== nextHash) {
-        window.history.replaceState(null, "", nextHash);
-      }
-    }
   }
 
   function onLogout() {
