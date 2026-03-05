@@ -16,7 +16,6 @@ type CreateSessionSecondaryActionsDeps = {
   activeWorkspaceHostID: string;
   activeWorkspacePath: string;
   activeRuntimeName: string;
-  selectedRuntime: string;
   hosts: Host[];
   cancelingThreadID: string;
   promptInputRef: MutableRefObject<HTMLTextAreaElement | null>;

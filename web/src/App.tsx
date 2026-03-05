@@ -8,8 +8,6 @@ import {
 } from "react";
 import {
   API_BASE,
-  archiveCodexV2Session,
-  cancelRunJob,
   discoverCodexSessions,
   discoverCodexModels,
   getMetrics,
@@ -60,9 +58,11 @@ import {
   buildProjectsFromRecords,
 } from "./features/session/project-sync";
 import { createHostActions } from "./features/session/host-actions";
+import { createOpsJobActions } from "./features/session/ops-job-actions";
 import { createPlatformActions } from "./features/session/platform-actions";
 import { createProjectActions } from "./features/session/project-actions";
 import { createComposerImageActions } from "./features/session/composer-image-actions";
+import { createSessionControlActions } from "./features/session/session-control-actions";
 import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
 import { createSessionSubmitAction } from "./features/session/session-submit-action";
 import {
@@ -383,6 +383,9 @@ export function App() {
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
   const runningSessionIDsRef = useRef<Set<string>>(new Set());
   const tokenRef = useRef(token);
+  const archiveSessionActionRef = useRef<() => Promise<void>>(async () => {});
+  const reconnectStreamActionRef = useRef<() => void>(() => {});
+  const forkSessionActionRef = useRef<() => Promise<void>>(async () => {});
 
   const activeRuntime = useMemo(
     () =>
@@ -515,13 +518,15 @@ export function App() {
         switchThreadByOffset(1);
       },
       onForkSession: () => {
-        void onForkActiveSession();
+        void forkSessionActionRef.current();
       },
       onTogglePinSession: setThreadPinned,
       onArchiveSession: () => {
-        void onArchiveActiveSession();
+        void archiveSessionActionRef.current();
       },
-      onReconnectStream: onReconnectActiveStream,
+      onReconnectStream: () => {
+        reconnectStreamActionRef.current();
+      },
       onOpenProject: (workspaceID, preferredSessionID) => {
         if (preferredSessionID) {
           activateThread(preferredSessionID);
@@ -1909,11 +1914,6 @@ export function App() {
     });
   }
 
-  async function onRefreshWorkspace() {
-    if (authPhase !== "ready" || !token.trim()) return;
-    await loadWorkspace(token);
-  }
-
   const { onCreateProject, onRenameProject, onArchiveProject } =
     createProjectActions({
       authPhase,
@@ -1933,67 +1933,30 @@ export function App() {
       refreshProjectsFromSource,
     });
 
-  async function onArchiveActiveSession() {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    const targetSessionID = activeThread.id.trim();
-    if (!targetSessionID) return;
-    if (activeThread.activeJobID || submittingThreadID === targetSessionID) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Archive Blocked",
-          body: "Session is running. Stop it before archiving.",
-        },
-        targetSessionID,
-      );
-      return;
-    }
-    const confirmed = window.confirm(
-      `Archive session "${activeThread.title}" on host "${activeWorkspace?.hostName || "unknown"}"?`,
-    );
-    if (!confirmed) return;
-    if (isLocalDraftSessionID(targetSessionID)) {
-      removeThread(targetSessionID);
-      return;
-    }
-
-    setDeletingThreadID(targetSessionID);
-    try {
-      await archiveCodexV2Session(token, targetSessionID, {
-        host_id: activeWorkspace?.hostID?.trim() || undefined,
-      });
-      stopSessionStream(targetSessionID);
-      deleteSessionEventCursor(targetSessionID);
-      sessionRunStateRef.current.delete(targetSessionID);
-      removeThread(targetSessionID);
-      await refreshProjectsFromSource(token, hosts, false, true);
-    } catch (error) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Archive Failed",
-          body: String(error),
-        },
-        targetSessionID,
-      );
-    } finally {
-      setDeletingThreadID("");
-    }
-  }
-
-  function onReconnectActiveStream() {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const sessionID = activeThreadID.trim();
-    if (!sessionID) return;
-    stopSessionStream(sessionID, { preserveRunState: true, preserveHealth: true });
-    updateSessionStreamHealth(sessionID, "connecting", {
-      throttleMS: 0,
-      lastError: "",
+  const { onRefreshWorkspace, onArchiveActiveSession, onReconnectActiveStream } =
+    createSessionControlActions({
+      authPhase,
+      token,
+      activeThread,
+      activeThreadID,
+      submittingThreadID,
+      activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+      activeWorkspaceHostName: activeWorkspace?.hostName?.trim() ?? "",
+      hosts,
+      sessionRunStateRef,
+      addTimelineEntry,
+      removeThread,
+      stopSessionStream,
+      deleteSessionEventCursor,
+      refreshProjectsFromSource,
+      updateSessionStreamHealth,
+      startSessionStream,
+      loadWorkspace,
+      isLocalDraftSessionID,
+      setDeletingThreadID,
     });
-    startSessionStream(sessionID, token);
-  }
+  archiveSessionActionRef.current = onArchiveActiveSession;
+  reconnectStreamActionRef.current = onReconnectActiveStream;
 
   const { submitPromptForActiveThread } = createSessionSubmitAction({
     authPhase,
@@ -2041,7 +2004,6 @@ export function App() {
     activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
     activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
     activeRuntimeName: activeRuntime?.name ?? selectedRuntime,
-    selectedRuntime,
     hosts,
     cancelingThreadID,
     promptInputRef,
@@ -2053,6 +2015,7 @@ export function App() {
     isLocalDraftSessionID,
     setCancelingThreadID,
   });
+  forkSessionActionRef.current = onForkActiveSession;
 
   const { onRunPlatformLogin, onRunPlatformMCP, onRunPlatformCloud } =
     createPlatformActions({
@@ -2104,25 +2067,14 @@ export function App() {
     loadWorkspace,
   });
 
-  async function onCancelJob(job: RunJobRecord) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (!isJobActive(job)) return;
-    if (typeof window !== "undefined") {
-      const confirmed = window.confirm(`Cancel job '${job.id}'?`);
-      if (!confirmed) return;
-    }
-    try {
-      await cancelRunJob(token, job.id);
-      const related = runningThreadJobs.find((item) => item.jobID === job.id);
-      if (related) {
-        setThreadJobState(related.threadID, "", "canceled");
-      }
-      setOpsNotice(`Cancel requested for ${job.id}.`);
-      await loadWorkspace(token);
-    } catch (error) {
-      setOpsNotice(`Cancel failed for ${job.id}: ${String(error)}`);
-    }
-  }
+  const { onCancelJob } = createOpsJobActions({
+    authPhase,
+    token,
+    runningThreadJobs,
+    setThreadJobState,
+    setOpsNotice,
+    loadWorkspace,
+  });
 
   const {
     onUploadSessionImage,
