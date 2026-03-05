@@ -50,6 +50,22 @@ type codexV2TurnSteerRequest struct {
 	Input  []map[string]any `json:"input,omitempty"`
 }
 
+type codexPendingRequest struct {
+	SessionID  string          `json:"session_id"`
+	RequestID  string          `json:"request_id"`
+	HostID     string          `json:"host_id"`
+	Method     string          `json:"method"`
+	RawID      json.RawMessage `json:"raw_id,omitempty"`
+	Params     json.RawMessage `json:"params,omitempty"`
+	ReceivedAt time.Time       `json:"received_at"`
+}
+
+type codexV2ResolveRequestBody struct {
+	Result   json.RawMessage    `json:"result,omitempty"`
+	Decision json.RawMessage    `json:"decision,omitempty"`
+	Error    *codexrpc.RPCError `json:"error,omitempty"`
+}
+
 type codexV2ThreadResult struct {
 	Thread map[string]any `json:"thread,omitempty"`
 }
@@ -487,6 +503,70 @@ func (s *Server) handleCodexV2TurnSteer(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) handleCodexV2PendingRequests(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	if sessionID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session id"})
+		return
+	}
+	items := s.listCodexPendingRequests(sessionID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session_id": sessionID,
+		"requests":   items,
+	})
+}
+
+func (s *Server) handleCodexV2ResolveRequest(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	requestID := strings.TrimSpace(r.PathValue("request_id"))
+	if sessionID == "" || requestID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session or request id"})
+		return
+	}
+	record, ok := s.getCodexPendingRequest(sessionID, requestID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "pending request not found"})
+		return
+	}
+
+	var req codexV2ResolveRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+	result := req.Result
+	if len(result) == 0 && len(req.Decision) > 0 {
+		result = json.RawMessage(append([]byte(`{"decision":`), append(req.Decision, '}')...))
+	}
+	if len(result) == 0 && req.Error == nil {
+		result = json.RawMessage(`{}`)
+	}
+
+	host, ok := s.store.GetHost(strings.TrimSpace(record.HostID))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error":   "request host not found",
+			"host_id": record.HostID,
+		})
+		return
+	}
+	bridge, err := s.codexBridgeForHost(host)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := bridge.Respond(r.Context(), record.RawID, result, req.Error); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	s.deleteCodexPendingRequest(sessionID, requestID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"resolved":   true,
+		"session_id": sessionID,
+		"request_id": requestID,
+	})
+}
+
 type codexV2SessionParams struct {
 	model          string
 	approvalPolicy string
@@ -775,8 +855,7 @@ func (s *Server) ensureCodexBridgeSubscription(host model.Host, bridge *codexrpc
 	}()
 	go func() {
 		for req := range requests {
-			params := req.Params
-			s.persistCodexNotification(hostID, "serverRequest/"+req.Method, params, req.ReceivedAt)
+			s.persistCodexServerRequest(hostID, req)
 		}
 	}()
 }
@@ -807,6 +886,115 @@ func (s *Server) persistCodexNotification(hostID string, method string, params j
 		return
 	}
 	s.publishSessionEvent(persisted)
+	if strings.EqualFold(strings.TrimSpace(method), "serverRequest/resolved") {
+		requestID := extractCodexResolvedRequestID(params)
+		if requestID != "" {
+			s.deleteCodexPendingRequest(sessionID, requestID)
+		}
+	}
+}
+
+func (s *Server) persistCodexServerRequest(hostID string, req codexrpc.ServerRequest) {
+	method := "serverRequest/" + strings.TrimSpace(req.Method)
+	sessionID := extractCodexNotificationSessionID(method, req.Params)
+	if sessionID != "" {
+		s.putCodexPendingRequest(codexPendingRequest{
+			SessionID:  sessionID,
+			RequestID:  strings.TrimSpace(req.ID),
+			HostID:     strings.TrimSpace(hostID),
+			Method:     strings.TrimSpace(req.Method),
+			RawID:      append(json.RawMessage(nil), req.RawID...),
+			Params:     append(json.RawMessage(nil), req.Params...),
+			ReceivedAt: req.ReceivedAt,
+		})
+	}
+	s.persistCodexNotification(hostID, method, req.Params, req.ReceivedAt)
+}
+
+func (s *Server) putCodexPendingRequest(record codexPendingRequest) {
+	sessionID := strings.TrimSpace(record.SessionID)
+	requestID := strings.TrimSpace(record.RequestID)
+	if sessionID == "" || requestID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.codexPending == nil {
+		s.codexPending = map[string]map[string]codexPendingRequest{}
+	}
+	if s.codexPending[sessionID] == nil {
+		s.codexPending[sessionID] = map[string]codexPendingRequest{}
+	}
+	s.codexPending[sessionID][requestID] = record
+}
+
+func (s *Server) listCodexPendingRequests(sessionID string) []codexPendingRequest {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bySession := s.codexPending[sessionID]
+	if len(bySession) == 0 {
+		return nil
+	}
+	out := make([]codexPendingRequest, 0, len(bySession))
+	for _, item := range bySession {
+		out = append(out, item)
+	}
+	return out
+}
+
+func (s *Server) getCodexPendingRequest(sessionID string, requestID string) (codexPendingRequest, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	requestID = strings.TrimSpace(requestID)
+	if sessionID == "" || requestID == "" {
+		return codexPendingRequest{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bySession := s.codexPending[sessionID]
+	if len(bySession) == 0 {
+		return codexPendingRequest{}, false
+	}
+	item, ok := bySession[requestID]
+	return item, ok
+}
+
+func (s *Server) deleteCodexPendingRequest(sessionID string, requestID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	requestID = strings.TrimSpace(requestID)
+	if sessionID == "" || requestID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bySession := s.codexPending[sessionID]
+	if len(bySession) == 0 {
+		return
+	}
+	delete(bySession, requestID)
+	if len(bySession) == 0 {
+		delete(s.codexPending, sessionID)
+	}
+}
+
+func extractCodexResolvedRequestID(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(params, &payload); err != nil {
+		return ""
+	}
+	if value := strings.TrimSpace(asString(payload["requestId"])); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(asString(payload["request_id"])); value != "" {
+		return value
+	}
+	return ""
 }
 
 func extractCodexNotificationSessionID(method string, params json.RawMessage) string {
