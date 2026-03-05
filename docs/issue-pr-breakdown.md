@@ -98,3 +98,37 @@ Planned PR order:
 7. PR-G -> #144
 8. PR-H -> #145
 9. PR-I -> #146
+
+## Codex App-Server Refactor Wave (2026-03)
+
+Design baseline:
+
+- [`docs/codex-app-server-refactor-v1.md`](docs/codex-app-server-refactor-v1.md)
+
+Epic:
+
+- [#152](https://github.com/hellsoul86/remote-llm-cli/issues/152) codex app-server transport refactor v1
+
+Issue queue:
+
+1. [#153](https://github.com/hellsoul86/remote-llm-cli/issues/153) backend bridge manager over SSH stdio
+2. [#154](https://github.com/hellsoul86/remote-llm-cli/issues/154) backend v2 session/turn APIs backed by app-server threads
+3. [#155](https://github.com/hellsoul86/remote-llm-cli/issues/155) backend server-request approvals pipeline
+4. [#156](https://github.com/hellsoul86/remote-llm-cli/issues/156) backend session stream gateway (WebSocket + SSE replay)
+5. [#157](https://github.com/hellsoul86/remote-llm-cli/issues/157) web transport migration to thread/turn stream client
+6. [#158](https://github.com/hellsoul86/remote-llm-cli/issues/158) web native app-server notification rendering and approval UX
+7. [#159](https://github.com/hellsoul86/remote-llm-cli/issues/159) protocol schema sync + contract tests
+8. [#160](https://github.com/hellsoul86/remote-llm-cli/issues/160) parity e2e suite for app-server transport
+9. [#161](https://github.com/hellsoul86/remote-llm-cli/issues/161) staged cutover and rollback gate
+
+Planned PR order:
+
+1. PR-J -> #153
+2. PR-K -> #154
+3. PR-L -> #155
+4. PR-M -> #156
+5. PR-N -> #157
+6. PR-O -> #158
+7. PR-P -> #159
+8. PR-Q -> #160
+9. PR-R -> #161
