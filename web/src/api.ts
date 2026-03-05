@@ -826,12 +826,144 @@ type StreamSessionEventsOptions = {
 };
 
 export async function streamSessionEvents(token: string, sessionID: string, options: StreamSessionEventsOptions): Promise<void> {
+  const wsError = await streamSessionEventsViaWS(token, sessionID, options);
+  if (!wsError) {
+    return;
+  }
   const params = new URLSearchParams();
   if (typeof options.after === "number" && options.after > 0) {
     params.set("after", String(options.after));
   }
   const query = params.toString();
-  const url = query ? `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream?${query}` : `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream`;
+  const v2URL = query
+    ? `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/stream?${query}`
+    : `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/stream`;
+  try {
+    await streamSessionEventsViaSSE(v2URL, token, options);
+  } catch (err) {
+    const fallbackURL = query
+      ? `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream?${query}`
+      : `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream`;
+    if (!(err instanceof Error) || !/stream session events failed: 404\b/.test(err.message)) {
+      throw err;
+    }
+    await streamSessionEventsViaSSE(fallbackURL, token, options);
+  }
+}
+
+async function streamSessionEventsViaWS(
+  token: string,
+  sessionID: string,
+  options: StreamSessionEventsOptions,
+): Promise<Error | null> {
+  if (typeof WebSocket === "undefined") {
+    return new Error("websocket not supported");
+  }
+  const wsURL = buildSessionWSURL(token, sessionID, options.after);
+  return new Promise<Error | null>((resolve) => {
+    let opened = false;
+    let settled = false;
+    let failedBeforeOpen = false;
+    const socket = new WebSocket(wsURL);
+
+    const settle = (value: Error | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const onAbort = () => {
+      try {
+        socket.close(1000, "aborted");
+      } catch {
+        // ignore close errors
+      }
+      settle(null);
+    };
+
+    const cleanup = () => {
+      options.signal.removeEventListener("abort", onAbort);
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+    };
+
+    options.signal.addEventListener("abort", onAbort, { once: true });
+    if (options.signal.aborted) {
+      onAbort();
+      return;
+    }
+
+    socket.onopen = () => {
+      opened = true;
+    };
+
+    socket.onmessage = (event) => {
+      const raw = typeof event.data === "string" ? event.data : "";
+      if (!raw.trim()) return;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      const type = typeof parsed.type === "string" ? parsed.type.trim() : "";
+      if (!type) return;
+      if (type === "session.event") {
+        options.onFrame({
+          event: "session.event",
+          id: typeof parsed.id === "string" ? parsed.id : "",
+          data: parsed.event ?? null,
+        });
+        return;
+      }
+      options.onFrame({
+        event: type,
+        id: typeof parsed.id === "string" ? parsed.id : "",
+        data: parsed,
+      });
+    };
+
+    socket.onerror = () => {
+      if (!opened) {
+        failedBeforeOpen = true;
+      }
+    };
+
+    socket.onclose = () => {
+      if (options.signal.aborted) {
+        settle(null);
+        return;
+      }
+      if (!opened || failedBeforeOpen) {
+        settle(new Error("ws connect failed"));
+        return;
+      }
+      settle(null);
+    };
+  });
+}
+
+function buildSessionWSURL(token: string, sessionID: string, after?: number): string {
+  const base = new URL(API_BASE);
+  base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  base.pathname = `/v2/codex/sessions/${encodeURIComponent(sessionID)}/ws`;
+  if (token.trim()) {
+    base.searchParams.set("access_token", token.trim());
+  }
+  if (typeof after === "number" && after > 0) {
+    base.searchParams.set("after", String(after));
+  }
+  return base.toString();
+}
+
+async function streamSessionEventsViaSSE(
+  url: string,
+  token: string,
+  options: StreamSessionEventsOptions,
+): Promise<void> {
   const res = await fetch(url, {
     method: "GET",
     headers: token ? { Authorization: `Bearer ${token}`, Accept: "text/event-stream" } : { Accept: "text/event-stream" },
