@@ -1,4 +1,5 @@
 import { type TimelineState } from "../../domains/session";
+import { isCodexProtocolNoiseLine } from "../../domains/timeline-noise";
 import { normalizeSessionTitle } from "./utils";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -135,17 +136,6 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
   return "";
 }
 
-function isProtocolNoiseLine(line: string): boolean {
-  const normalized = line.trim();
-  if (!normalized) return true;
-  if (/^done\.?$/i.test(normalized)) return true;
-  if (normalized.includes(`"type":"thread.started"`)) return true;
-  if (normalized.includes(`"type":"turn.started"`)) return true;
-  if (normalized.includes(`"type":"turn.completed"`)) return true;
-  if (normalized.includes(`"type":"response.started"`)) return true;
-  return false;
-}
-
 export function parseCodexAssistantTextFromStdout(
   stdout: string,
   allowPlainTextFallback = true,
@@ -162,7 +152,7 @@ export function parseCodexAssistantTextFromStdout(
     try {
       parsed = JSON.parse(line);
     } catch {
-      if (!isProtocolNoiseLine(line)) {
+      if (!isCodexProtocolNoiseLine(line)) {
         plainLines.push(line);
       }
       continue;

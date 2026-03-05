@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { parseCodexAssistantTextFromStdout } from "../src/features/session/codex-parsing";
 
 type MockHarness = {
   runRequests: () => number;
@@ -1579,6 +1580,29 @@ async function installMockSessionWebSocket(
       SessionMockWebSocket as unknown as typeof WebSocket;
   }, opts);
 }
+
+test("codex parser plain-text fallback strips transport noise lines", async () => {
+  const stdout = [
+    "Connected. hosts=1 runtimes=3 queue_depth=0",
+    "local-default done status=failed exit=1 error=local command failed: exit status 1",
+    "local-default failed error=local command failed: exit status 1 hint=inspect stderr",
+    "use --skip-git-repo-check next time",
+  ].join("\n");
+  expect(parseCodexAssistantTextFromStdout(stdout, true)).toBe(
+    "use --skip-git-repo-check next time",
+  );
+});
+
+test("codex parser plain-text fallback returns empty when only noise exists", async () => {
+  const stdout = [
+    "Connected. hosts=1 runtimes=3 queue_depth=0",
+    "local-default done status=failed exit=1 error=local command failed: exit status 1",
+    '{"type":"thread.started","thread_id":"abc"}',
+    '{"type":"turn.started"}',
+    "Done.",
+  ].join("\n");
+  expect(parseCodexAssistantTextFromStdout(stdout, true)).toBe("");
+});
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");

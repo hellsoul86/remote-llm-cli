@@ -53,7 +53,6 @@ import {
   loadStoredToken,
   storeToken,
 } from "./domains/auth-token";
-import { summarizeJobEventLine } from "./domains/job-events";
 import {
   type CodexApprovalPolicy,
   type TimelineEntry,
@@ -594,16 +593,14 @@ function summarizeTargetFailures(job: RunJobRecord): string {
   for (const target of response.targets) {
     if (target?.ok !== false) continue;
     const hostName = target.host?.name?.trim() || target.host?.id || "target";
-    const parts = [`${hostName} failed`];
-    if (target.error) parts.push(`error=${target.error}`);
-    if (target.error_hint) parts.push(`hint=${target.error_hint}`);
-    if (
-      typeof target.result?.stderr === "string" &&
-      target.result.stderr.trim()
-    ) {
-      parts.push(`stderr=${clipStreamText(target.result.stderr.trim(), 1000)}`);
-    }
-    lines.push(parts.join(" "));
+    const stderr =
+      typeof target.result?.stderr === "string" ? target.result.stderr.trim() : "";
+    const reason =
+      target.error?.trim() ||
+      target.error_hint?.trim() ||
+      (stderr ? stderr.split(/\r?\n/, 1)[0]?.trim() ?? "" : "");
+    const suffix = reason ? `: ${clipStreamText(reason, 320)}` : "";
+    lines.push(`${hostName} failed${suffix}`);
   }
   return lines.join("\n");
 }
@@ -2999,7 +2996,6 @@ export function App() {
             (streamRunState?.streamSeen || streamRunState?.assistantFinalized);
 
           let stdoutStream = "";
-          const terminalHints: string[] = [];
           const showLiveStream =
             !preferSessionStream &&
             appMode === "session" &&
@@ -3017,22 +3013,6 @@ export function App() {
               if (fallbackRunState) {
                 appendCodexStdoutChunk(fallbackRunState, event.chunk);
               }
-            }
-            if (
-              event.type === "target.done" &&
-              event.status &&
-              event.status !== "ok"
-            ) {
-              const line = summarizeJobEventLine(event);
-              if (line) terminalHints.push(line);
-            }
-            if (
-              event.type === "job.failed" ||
-              event.type === "job.canceled" ||
-              event.type === "job.cancel_requested"
-            ) {
-              const line = summarizeJobEventLine(event);
-              if (line) terminalHints.push(line);
             }
           }
           if (!alreadyCompleted && showLiveStream && fallbackRunState) {
@@ -3076,18 +3056,6 @@ export function App() {
               );
             }
           }
-          if (!preferSessionStream && terminalHints.length > 0) {
-            addTimelineEntry(
-              {
-                kind: "system",
-                state: "error",
-                title: "Failed",
-                body: terminalHints.join("\n"),
-              },
-              item.threadID,
-            );
-          }
-
           if (item.threadID === activeThreadID) {
             setActiveJob(job);
             setActiveJobID(job.id);
