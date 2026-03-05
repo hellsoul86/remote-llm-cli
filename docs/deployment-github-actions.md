@@ -38,6 +38,7 @@ Set `DEPLOY_TARGETS` secret value as JSON array:
     "addr": ":8080",
     "data_path": "/opt/remote-llm-cli/shared/state.json",
     "runtime_config_path": "/opt/remote-llm-cli/shared/runtimes.json",
+    "cors_allow_origins": "https://webcli.staging.royding.ai",
     "healthcheck_url": "http://127.0.0.1:8080/v1/healthz",
     "keep_releases": 5
   }
@@ -58,6 +59,7 @@ Optional keys:
 - `addr` (default `:8080`)
 - `data_path` (default `${deploy_path}/shared/state.json`)
 - `runtime_config_path` (default empty)
+- `cors_allow_origins` (default uses `DEPLOY_CORS_ALLOW_ORIGINS` env var if set; otherwise allow-all `*` for backward compatibility)
 - `healthcheck_url` (default `http://127.0.0.1:8080/v1/healthz`)
 - `keep_releases` (default `5`)
 
@@ -75,6 +77,8 @@ Private key content for SSH login to all hosts in `DEPLOY_TARGETS`.
 
 ### 2.2 Environment variables
 
+- `DEPLOY_CORS_ALLOW_ORIGINS`: optional default CORS allowlist for API deploy targets
+  - example: `https://webcli.staging.royding.ai`
 - `VITE_API_BASE`: API base URL injected at web build time (required)
   - example: `https://webcli-api-staging.royding.ai`
 - `CF_PAGES_BRANCH`: Pages branch override (optional; default `github.ref_name`)

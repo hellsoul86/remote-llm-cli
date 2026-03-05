@@ -15,6 +15,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	data := flag.String("data", "./data/state.json", "state file path")
 	runtimeConfig := flag.String("runtime-config", "", "optional runtime config json path")
+	corsOrigins := flag.String("cors-allow-origins", "", "comma-separated CORS allowed origins, e.g. https://a.com,https://b.com")
 	flag.Parse()
 
 	if err := api.ValidateConfig(*data); err != nil {
@@ -46,7 +47,9 @@ func main() {
 		}
 		log.Printf("loaded %d runtime adapters from %s", len(adapters), path)
 	}
-	srv := api.New(st, rt)
+	srv := api.NewWithOptions(st, rt, api.ServerOptions{
+		CORSAllowedOrigins: []string{*corsOrigins},
+	})
 
 	log.Printf("remote-llm-server listening on %s", *addr)
 	log.Printf("state file: %s", *data)

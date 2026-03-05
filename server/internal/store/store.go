@@ -513,9 +513,16 @@ func (s *Store) ListRunRecords(limit int) []model.RunRecord {
 }
 
 func (s *Store) AddAuditEvent(e model.AuditEvent) error {
+	return s.AddAuditEvents([]model.AuditEvent{e})
+}
+
+func (s *Store) AddAuditEvents(events []model.AuditEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state.AuditEvents = append(s.state.AuditEvents, e)
+	s.state.AuditEvents = append(s.state.AuditEvents, events...)
 	s.state.AuditEvents = capTail(s.state.AuditEvents, s.state.RetentionPolicy.AuditEventsMax)
 	return s.saveLocked()
 }

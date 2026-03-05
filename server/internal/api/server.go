@@ -30,6 +30,10 @@ type Server struct {
 	runJobs        chan string
 	runJobWorkers  int
 	activeWorkers  int64
+	auditEvents    chan model.AuditEvent
+	corsAllowAll   bool
+	corsOrigins    map[string]struct{}
+	droppedAudits  int64
 	runViaSSH      func(ctx context.Context, h model.Host, spec runtime.CommandSpec, workdir string, opts executor.ExecOptions) (executor.ExecResult, error)
 	runRsyncViaSSH func(ctx context.Context, h model.Host, src string, dst string, opts executor.SyncOptions, execOpts executor.ExecOptions) (executor.ExecResult, error)
 	mu             sync.Mutex
@@ -48,6 +52,10 @@ type authIdentity struct {
 
 type authContextKey struct{}
 
+type ServerOptions struct {
+	CORSAllowedOrigins []string
+}
+
 const (
 	runJobStatusPending   = "pending"
 	runJobStatusRunning   = "running"
@@ -62,6 +70,9 @@ const (
 	sessionStreamBuffer   = 256
 	sessionStreamHB       = 12 * time.Second
 	sessionStreamBatch    = 1000
+	auditQueueSize        = 4096
+	auditBatchSize        = 64
+	auditFlushInterval    = 400 * time.Millisecond
 )
 
 type runJobEvent struct {
@@ -79,10 +90,18 @@ type runJobEvent struct {
 }
 
 func New(st *store.Store, rt *runtime.Registry) *Server {
+	return NewWithOptions(st, rt, ServerOptions{})
+}
+
+func NewWithOptions(st *store.Store, rt *runtime.Registry, opts ServerOptions) *Server {
+	corsAllowAll, corsOrigins := normalizeCORSAllowedOrigins(opts.CORSAllowedOrigins)
 	s := &Server{
 		store:          st,
 		runtimes:       rt,
 		runJobs:        make(chan string, runJobQueueSize),
+		auditEvents:    make(chan model.AuditEvent, auditQueueSize),
+		corsAllowAll:   corsAllowAll,
+		corsOrigins:    corsOrigins,
 		cancels:        map[string]context.CancelFunc{},
 		cancelRq:       map[string]bool{},
 		eventBuffers:   map[string][]runJobEvent{},
@@ -90,6 +109,7 @@ func New(st *store.Store, rt *runtime.Registry) *Server {
 		runViaSSH:      executor.RunViaSSH,
 		runRsyncViaSSH: executor.RunRsyncViaSSH,
 	}
+	s.startAuditWriter()
 	s.startRunJobWorkers(defaultRunJobWorkers)
 	s.recoverRunJobs()
 	return s
@@ -139,7 +159,15 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeaders(w.Header())
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if !setCORSHeaders(w.Header(), origin, s.corsAllowAll, s.corsOrigins) {
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -148,11 +176,52 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func setCORSHeaders(h http.Header) {
-	h.Set("Access-Control-Allow-Origin", "*")
+func setCORSHeaders(h http.Header, origin string, allowAll bool, allowed map[string]struct{}) bool {
+	if origin == "" {
+		// Non-browser callers do not need CORS headers.
+		return true
+	}
+	allowOrigin := ""
+	switch {
+	case allowAll:
+		allowOrigin = "*"
+	case len(allowed) == 0:
+		return false
+	default:
+		if _, ok := allowed[origin]; !ok {
+			return false
+		}
+		allowOrigin = origin
+		h.Set("Vary", "Origin")
+	}
+	h.Set("Access-Control-Allow-Origin", allowOrigin)
 	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID")
 	h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 	h.Set("Access-Control-Max-Age", "86400")
+	return true
+}
+
+func normalizeCORSAllowedOrigins(origins []string) (bool, map[string]struct{}) {
+	allowed := make(map[string]struct{}, len(origins))
+	hasConfiguredOrigin := false
+	for _, raw := range origins {
+		for _, part := range strings.Split(raw, ",") {
+			normalized := strings.TrimSpace(part)
+			if normalized == "" {
+				continue
+			}
+			hasConfiguredOrigin = true
+			if normalized == "*" {
+				return true, map[string]struct{}{}
+			}
+			allowed[normalized] = struct{}{}
+		}
+	}
+	if !hasConfiguredOrigin {
+		// Keep historical behavior for deployments that do not set this option.
+		return true, map[string]struct{}{}
+	}
+	return false, allowed
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
@@ -276,7 +345,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r, 200, 5000)
-	projects := s.store.ListProjects(limit)
+	projects := s.store.ListProjects(0)
 	hostIDFilter := strings.TrimSpace(r.URL.Query().Get("host_id"))
 	pathFilter := strings.TrimSpace(r.URL.Query().Get("path"))
 	runtimeFilter := strings.TrimSpace(r.URL.Query().Get("runtime"))
@@ -292,6 +361,9 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		filtered = append(filtered, project)
+	}
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[:limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": filtered})
 }
@@ -319,7 +391,7 @@ func (s *Server) handleUpsertProject(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		project.ID = projectBindingID(project.HostID, project.Path)
+		project.ID = projectBindingID(project.HostID, project.Path, project.Runtime)
 	}
 	if project.HostID == "" || project.Path == "" {
 		existing, ok := s.store.GetProject(project.ID)
@@ -396,7 +468,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r, 200, 5000)
-	sessions := s.store.ListSessions(limit)
+	sessions := s.store.ListSessions(0)
 	projectIDFilter := strings.TrimSpace(r.URL.Query().Get("project_id"))
 	hostIDFilter := strings.TrimSpace(r.URL.Query().Get("host_id"))
 	pathFilter := strings.TrimSpace(r.URL.Query().Get("path"))
@@ -416,6 +488,9 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		filtered = append(filtered, session)
+	}
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[:limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": filtered})
 }
@@ -649,6 +724,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			"workers_total":      workersTotal,
 			"workers_active":     workersActive,
 			"worker_utilization": utilization,
+		},
+		"audit": map[string]any{
+			"dropped_events": atomic.LoadInt64(&s.droppedAudits),
 		},
 		"success_rate": successRate,
 	})
@@ -1428,11 +1506,20 @@ func (s *Server) recoverRunJobs() {
 		case runJobStatusPending:
 			s.enqueueRecoveredRunJob(job.ID)
 		case runJobStatusRunning:
-			job.Status = runJobStatusPending
-			job.Error = "server restarted before job completion; re-queued"
-			if err := s.store.UpdateRunJob(job); err == nil {
-				s.enqueueRecoveredRunJob(job.ID)
+			finished := time.Now().UTC()
+			job.Status = runJobStatusFailed
+			job.ResultStatus = http.StatusServiceUnavailable
+			job.Error = "server restarted during execution; manual retry required"
+			job.FinishedAt = &finished
+			if err := s.store.UpdateRunJob(job); err != nil {
+				continue
 			}
+			_ = s.updateSessionRunState(job)
+			s.appendRunJobEventForJob(job, runJobEvent{
+				Type:   "job.failed",
+				Status: runJobStatusFailed,
+				Error:  job.Error,
+			})
 		}
 	}
 }
@@ -3585,6 +3672,44 @@ func (rw *responseCapture) Flush() {
 	}
 }
 
+func (s *Server) startAuditWriter() {
+	go func() {
+		ticker := time.NewTicker(auditFlushInterval)
+		defer ticker.Stop()
+		batch := make([]model.AuditEvent, 0, auditBatchSize)
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			_ = s.store.AddAuditEvents(batch)
+			batch = batch[:0]
+		}
+		for {
+			select {
+			case event, ok := <-s.auditEvents:
+				if !ok {
+					flush()
+					return
+				}
+				batch = append(batch, event)
+				if len(batch) >= auditBatchSize {
+					flush()
+				}
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+}
+
+func (s *Server) enqueueAuditEvent(event model.AuditEvent) {
+	select {
+	case s.auditEvents <- event:
+	default:
+		atomic.AddInt64(&s.droppedAudits, 1)
+	}
+}
+
 func (s *Server) requestLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now().UTC()
@@ -3594,7 +3719,7 @@ func (s *Server) requestLogMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		identity, _ := authIdentityFromContext(r.Context())
-		_ = s.store.AddAuditEvent(model.AuditEvent{
+		s.enqueueAuditEvent(model.AuditEvent{
 			ID:             fmt.Sprintf("evt_%d", started.UnixNano()),
 			Timestamp:      started,
 			Method:         r.Method,
@@ -3711,98 +3836,6 @@ func normalizeSessionID(sessionID string, fallback string) string {
 		return trimmed
 	}
 	return strings.TrimSpace(fallback)
-}
-
-func projectBindingID(hostID string, pathValue string) string {
-	hostID = strings.TrimSpace(hostID)
-	if hostID == "" {
-		hostID = "local"
-	}
-	pathValue = strings.TrimSpace(pathValue)
-	if pathValue == "" {
-		pathValue = "/"
-	}
-	return "project_" + hostID + "::" + pathValue
-}
-
-func deriveSessionTitle(promptPreview string, sessionID string) string {
-	title := strings.TrimSpace(promptPreview)
-	if title == "" {
-		return strings.TrimSpace(sessionID)
-	}
-	if len(title) <= 80 {
-		return title
-	}
-	return strings.TrimSpace(title[:80])
-}
-
-func (s *Server) ensureSessionBinding(job model.RunJobRecord, req runRequest, hosts []model.Host) (bool, string, error) {
-	sessionID := normalizeSessionID(job.SessionID, job.ID)
-	if sessionID == "" {
-		return false, "", nil
-	}
-	primaryHost := model.Host{}
-	if len(hosts) > 0 {
-		primaryHost = hosts[0]
-	}
-	projectPath := strings.TrimSpace(resolveWorkdir(req.Workdir, primaryHost.Workspace))
-	if projectPath == "" {
-		projectPath = "/home/ecs-user"
-	}
-	project := model.ProjectRecord{
-		ID:       projectBindingID(primaryHost.ID, projectPath),
-		HostID:   strings.TrimSpace(primaryHost.ID),
-		HostName: strings.TrimSpace(primaryHost.Name),
-		Path:     projectPath,
-		Runtime:  strings.TrimSpace(job.Runtime),
-	}
-	projectRecord, err := s.store.UpsertProject(project)
-	if err != nil {
-		return false, "", fmt.Errorf("upsert project binding: %w", err)
-	}
-
-	existing, exists := s.store.GetSession(sessionID)
-	title := deriveSessionTitle(job.PromptPreview, sessionID)
-	if exists && strings.TrimSpace(existing.Title) != "" {
-		title = strings.TrimSpace(existing.Title)
-	}
-	titleUpdated := !exists
-	if exists && strings.TrimSpace(existing.Title) != strings.TrimSpace(title) {
-		titleUpdated = true
-	}
-	session := model.SessionRecord{
-		ID:               sessionID,
-		ProjectID:        projectRecord.ID,
-		HostID:           strings.TrimSpace(primaryHost.ID),
-		Path:             projectPath,
-		Runtime:          strings.TrimSpace(job.Runtime),
-		RuntimeSessionID: existing.RuntimeSessionID,
-		Title:            title,
-		LastRunID:        strings.TrimSpace(job.ID),
-		LastStatus:       strings.TrimSpace(job.Status),
-	}
-	if _, err := s.store.UpsertSession(session); err != nil {
-		return false, "", fmt.Errorf("upsert session binding: %w", err)
-	}
-	return titleUpdated, title, nil
-}
-
-func (s *Server) updateSessionRunState(job model.RunJobRecord) error {
-	sessionID := normalizeSessionID(job.SessionID, job.ID)
-	if sessionID == "" {
-		return nil
-	}
-	session, ok := s.store.GetSession(sessionID)
-	if !ok {
-		return nil
-	}
-	session.LastRunID = strings.TrimSpace(job.ID)
-	session.LastStatus = strings.TrimSpace(job.Status)
-	if strings.TrimSpace(session.Runtime) == "" {
-		session.Runtime = strings.TrimSpace(job.Runtime)
-	}
-	_, err := s.store.UpsertSession(session)
-	return err
 }
 
 func toRunTargetSummaries(targets []runTargetResult) []model.RunTargetSummary {

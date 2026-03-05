@@ -100,6 +100,7 @@ jobs:
           DEPLOY_RELEASE_TARBALL: ${{ github.workspace }}/dist/remote-llm-release.tgz
           DEPLOY_RELEASE_ID: ${{ github.sha }}
           DEPLOY_SSH_KEY_PATH: ${{ env.DEPLOY_SSH_KEY_PATH }}
+          DEPLOY_CORS_ALLOW_ORIGINS: ${{ vars.DEPLOY_CORS_ALLOW_ORIGINS }}
         run: |
           if [ -z "${DEPLOY_TARGETS}" ]; then
             echo "::error::missing environment secret DEPLOY_TARGETS"
@@ -108,6 +109,7 @@ jobs:
           echo "${DEPLOY_TARGETS}" | jq -e '. | type=="array" and length>0' >/dev/null
           echo "${DEPLOY_TARGETS}" | jq -e '.[] | has("name") and has("host") and has("user")' >/dev/null
 
+          default_cors_allow_origins="${DEPLOY_CORS_ALLOW_ORIGINS:-}"
           while IFS= read -r target; do
             name="$(echo "${target}" | jq -r '.name')"
             host="$(echo "${target}" | jq -r '.host')"
@@ -127,6 +129,12 @@ jobs:
             export DEPLOY_RUNTIME_CONFIG_PATH="$(echo "${target}" | jq -r '.runtime_config_path // empty')"
             export DEPLOY_KEEP_RELEASES="$(echo "${target}" | jq -r '.keep_releases // empty')"
             export DEPLOY_HEALTHCHECK_URL="$(echo "${target}" | jq -r '.healthcheck_url // empty')"
+            target_cors_allow_origins="$(echo "${target}" | jq -r '.cors_allow_origins // empty')"
+            if [ -n "${target_cors_allow_origins}" ]; then
+              export DEPLOY_CORS_ALLOW_ORIGINS="${target_cors_allow_origins}"
+            else
+              export DEPLOY_CORS_ALLOW_ORIGINS="${default_cors_allow_origins}"
+            fi
 
             chmod +x scripts/deploy_release_via_ssh.sh
             scripts/deploy_release_via_ssh.sh
@@ -134,6 +142,7 @@ jobs:
 
           unset DEPLOY_HOST DEPLOY_USER DEPLOY_PORT DEPLOY_PATH DEPLOY_SERVICE_NAME
           unset DEPLOY_ADDR DEPLOY_DATA_PATH DEPLOY_RUNTIME_CONFIG_PATH DEPLOY_KEEP_RELEASES DEPLOY_HEALTHCHECK_URL
+          unset DEPLOY_CORS_ALLOW_ORIGINS
 
   deploy-web-pages:
     name: Deploy Web (Cloudflare Pages)

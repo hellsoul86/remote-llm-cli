@@ -91,6 +91,7 @@ type PersistedSessionState = {
 };
 
 const SESSION_STATE_KEY = "remote_llm_session_state_v1";
+const DEFAULT_PROJECT_PATH = "/";
 
 function projectTitleFromPath(path: string): string {
   const trimmed = path.trim();
@@ -202,7 +203,7 @@ function createWorkspace(index: number, path: string, hostID = "local", hostName
 }
 
 function defaultState(): PersistedSessionState {
-  const first = createWorkspace(1, "/home/ecs-user");
+  const first = createWorkspace(1, DEFAULT_PROJECT_PATH);
   return {
     workspaces: [first],
     activeWorkspaceID: first.id
@@ -307,7 +308,7 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
 }
 
 function normalizeWorkspace(raw: unknown, index: number): WorkspaceDirectory {
-  const fallback = createWorkspace(index, "/home/ecs-user");
+  const fallback = createWorkspace(index, DEFAULT_PROJECT_PATH);
   if (!raw || typeof raw !== "object") return fallback;
   const candidate = raw as Partial<WorkspaceDirectory>;
   const now = new Date().toISOString();
@@ -324,14 +325,14 @@ function normalizeWorkspace(raw: unknown, index: number): WorkspaceDirectory {
     id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : fallback.id,
     hostID: typeof candidate.hostID === "string" ? candidate.hostID : fallback.hostID,
     hostName: typeof candidate.hostName === "string" && candidate.hostName.trim() ? candidate.hostName : fallback.hostName,
-    path: typeof candidate.path === "string" && candidate.path.trim() ? candidate.path : "/home/ecs-user",
+    path: typeof candidate.path === "string" && candidate.path.trim() ? candidate.path : DEFAULT_PROJECT_PATH,
     title:
       typeof candidate.title === "string" && candidate.title.trim()
         ? candidate.title.trim()
         : projectTitleFromPath(
             typeof candidate.path === "string" && candidate.path.trim()
               ? candidate.path
-              : "/home/ecs-user",
+              : DEFAULT_PROJECT_PATH,
           ),
     sessions: safeSessions,
     activeSessionID,
@@ -370,7 +371,7 @@ export function useSessionDomain() {
   const [workspaces, setWorkspaces] = useState<WorkspaceDirectory[]>(initial.workspaces);
   const [activeWorkspaceID, setActiveWorkspaceID] = useState<string>(initial.activeWorkspaceID);
   const [threadRenameDraft, setThreadRenameDraft] = useState(initialThread?.title ?? "Session 1");
-  const [workspacePathDraft, setWorkspacePathDraft] = useState(initialWorkspace?.path ?? "/home/ecs-user");
+  const [workspacePathDraft, setWorkspacePathDraft] = useState(initialWorkspace?.path ?? DEFAULT_PROJECT_PATH);
   const [workspaceAddDraft, setWorkspaceAddDraft] = useState("");
   const [activeJobThreadID, setActiveJobThreadID] = useState(initialThread?.id ?? "");
 
@@ -1132,7 +1133,7 @@ export function useSessionDomain() {
       if (workspaces.length > 0) {
         return;
       }
-      const fallback = createWorkspace(1, "/home/ecs-user");
+      const fallback = createWorkspace(1, DEFAULT_PROJECT_PATH);
       setWorkspaces([fallback]);
       setActiveWorkspaceID(fallback.id);
       setActiveJobThreadID(fallback.sessions[0]?.id ?? "");
@@ -1149,7 +1150,7 @@ export function useSessionDomain() {
   }
 
   function resetSessionDomain() {
-    const fresh = createWorkspace(1, "/home/ecs-user");
+    const fresh = createWorkspace(1, DEFAULT_PROJECT_PATH);
     completedJobsRef.current.clear();
     workspaceCounterRef.current = 1;
     sessionCounterRef.current = 1;
