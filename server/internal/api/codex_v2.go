@@ -969,16 +969,20 @@ func (s *Server) persistCodexNotification(hostID string, method string, params j
 	if s.markCodexNotificationSeen(sessionID, dedupeKey, at) {
 		return
 	}
-	eventType := "codexrpc." + strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(method), "/", "."), " ", "_")
-	payload := map[string]any{
-		"host_id":     strings.TrimSpace(hostID),
-		"method":      strings.TrimSpace(method),
-		"params":      params,
-		"received_at": at,
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return
+	eventType, raw := normalizeCodexSessionEvent(method, params, runID)
+	if eventType == "" || len(raw) == 0 {
+		eventType = "codexrpc." + strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(method), "/", "."), " ", "_")
+		payload := map[string]any{
+			"host_id":     strings.TrimSpace(hostID),
+			"method":      strings.TrimSpace(method),
+			"params":      params,
+			"received_at": at,
+		}
+		var err error
+		raw, err = json.Marshal(payload)
+		if err != nil {
+			return
+		}
 	}
 	persisted, err := s.store.AppendSessionEvent(model.SessionEvent{
 		SessionID: sessionID,
@@ -1188,6 +1192,110 @@ func (s *Server) updateCodexSessionRunStateFromNotification(sessionID string, me
 	session.LastStatus = nextStatus
 	session.UpdatedAt = time.Now().UTC()
 	_, _ = s.store.UpsertSession(session)
+}
+
+func normalizeCodexSessionEvent(method string, params json.RawMessage, runID string) (string, json.RawMessage) {
+	normalizedMethod := strings.ToLower(strings.TrimSpace(method))
+	if normalizedMethod == "" {
+		return "", nil
+	}
+	var payload map[string]any
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &payload); err != nil {
+			payload = map[string]any{}
+		}
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	switch normalizedMethod {
+	case "thread/started", "thread/updated", "thread/named":
+		title := extractCodexThreadTitle(payload)
+		if title == "" {
+			return "", nil
+		}
+		return marshalCodexSessionEvent("session.title.updated", map[string]any{"title": title})
+	case "turn/started":
+		return marshalCodexSessionEvent("run.started", codexRunLifecyclePayload(runID, payload))
+	case "turn/completed":
+		return marshalCodexSessionEvent("run.completed", codexRunLifecyclePayload(runID, payload))
+	case "turn/failed", "error":
+		return marshalCodexSessionEvent("run.failed", codexRunLifecyclePayload(runID, payload))
+	case "turn/canceled", "turn/interrupted":
+		return marshalCodexSessionEvent("run.canceled", codexRunLifecyclePayload(runID, payload))
+	case "item/started", "item/updated", "item/completed":
+		return marshalCodexSessionEvent("assistant.delta", codexItemDeltaPayload(normalizedMethod, payload, runID))
+	default:
+		return "", nil
+	}
+}
+
+func extractCodexThreadTitle(payload map[string]any) string {
+	if title := strings.TrimSpace(asString(payload["title"])); title != "" {
+		return title
+	}
+	threadObj, ok := payload["thread"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if title := strings.TrimSpace(asString(threadObj["title"])); title != "" {
+		return title
+	}
+	if preview := strings.TrimSpace(asString(threadObj["preview"])); preview != "" {
+		return preview
+	}
+	return ""
+}
+
+func codexRunLifecyclePayload(runID string, payload map[string]any) map[string]any {
+	out := map[string]any{}
+	if runID = strings.TrimSpace(runID); runID != "" {
+		out["turn_id"] = runID
+	}
+	if value, ok := payload["error"]; ok {
+		out["error"] = value
+	}
+	if message := strings.TrimSpace(asString(payload["message"])); message != "" {
+		if _, exists := out["error"]; !exists {
+			out["error"] = message
+		}
+	}
+	return out
+}
+
+func codexItemDeltaPayload(normalizedMethod string, payload map[string]any, runID string) map[string]any {
+	line := map[string]any{
+		"type": strings.ReplaceAll(normalizedMethod, "/", "."),
+	}
+	for key, value := range payload {
+		line[key] = value
+	}
+	lineRaw, err := json.Marshal(line)
+	if err != nil {
+		lineRaw = []byte("{}")
+	}
+	out := map[string]any{
+		"chunk": string(lineRaw) + "\n",
+	}
+	if runID = strings.TrimSpace(runID); runID != "" {
+		out["turn_id"] = runID
+	}
+	return out
+}
+
+func marshalCodexSessionEvent(eventType string, payload map[string]any) (string, json.RawMessage) {
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		return "", nil
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", nil
+	}
+	return eventType, raw
 }
 
 func codexNotificationDedupKey(method string, params json.RawMessage, runID string) string {

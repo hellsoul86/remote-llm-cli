@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,11 +27,18 @@ func TestPersistCodexNotificationDedupesEquivalentPayload(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected 1 deduped event, got=%d", len(events))
 	}
-	if events[0].Type != "codexrpc.turn.completed" {
+	if events[0].Type != "run.completed" {
 		t.Fatalf("unexpected event type: %q", events[0].Type)
 	}
 	if events[0].RunID != "turn_1" {
 		t.Fatalf("unexpected run_id: %q", events[0].RunID)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode event payload: %v", err)
+	}
+	if turnID := asString(payload["turn_id"]); turnID != "turn_1" {
+		t.Fatalf("payload turn_id=%q want=turn_1", turnID)
 	}
 
 	session, ok := srv.store.GetSession(sessionID)
@@ -66,6 +74,43 @@ func TestPersistCodexNotificationKeepsDistinctPayloads(t *testing.T) {
 	if events[0].RunID != "turn_2" || events[1].RunID != "turn_2" {
 		t.Fatalf("unexpected run ids: first=%q second=%q", events[0].RunID, events[1].RunID)
 	}
+	if events[0].Type != "assistant.delta" || events[1].Type != "assistant.delta" {
+		t.Fatalf("unexpected event types: first=%q second=%q", events[0].Type, events[1].Type)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode first payload: %v", err)
+	}
+	chunk := asString(payload["chunk"])
+	if chunk == "" || !containsAll(chunk, `"type":"item.updated"`, `"turn_id":"turn_2"`) {
+		t.Fatalf("unexpected first chunk payload: %q", chunk)
+	}
+}
+
+func TestPersistCodexNotificationNormalizesThreadTitleEvents(t *testing.T) {
+	srv, httpSrv, _, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_codex_title"
+	upsertCodexTestSession(t, srv, sessionID)
+
+	params := json.RawMessage(`{"thread":{"id":"session_codex_title","title":"  better title  "}}`)
+	srv.persistCodexNotification("host_1", "thread/updated", params, time.Now().UTC())
+
+	events := srv.store.ListSessionEvents(sessionID, 0, 20)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got=%d", len(events))
+	}
+	if events[0].Type != "session.title.updated" {
+		t.Fatalf("unexpected event type: %q", events[0].Type)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode event payload: %v", err)
+	}
+	if title := asString(payload["title"]); title != "better title" {
+		t.Fatalf("payload title=%q want=better title", title)
+	}
 }
 
 func upsertCodexTestSession(t *testing.T, srv *Server, sessionID string) {
@@ -81,4 +126,13 @@ func upsertCodexTestSession(t *testing.T, srv *Server, sessionID string) {
 	if err != nil {
 		t.Fatalf("upsert session: %v", err)
 	}
+}
+
+func containsAll(body string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(body, part) {
+			return false
+		}
+	}
+	return true
 }
