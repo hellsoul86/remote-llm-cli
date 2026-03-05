@@ -53,7 +53,6 @@ import {
   storeToken,
 } from "./domains/auth-token";
 import {
-  type CodexApprovalPolicy,
   type TimelineEntry,
   useSessionDomain,
 } from "./domains/session";
@@ -80,6 +79,21 @@ import {
   normalizeSearchText,
   type CommandPaletteAction,
 } from "./features/session/command-palette";
+import {
+  APPROVAL_POLICY_OPTIONS,
+  CODEX_PLATFORM_CLOUD_ACTIONS,
+  CODEX_PLATFORM_MCP_ACTIONS,
+  COMPOSER_MAX_HEIGHT,
+  COMPOSER_MIN_HEIGHT,
+  DEFAULT_WORKSPACE_PATH,
+  EMPTY_ASSISTANT_FALLBACK,
+  MAX_COMPLETED_RUN_CACHE_SIZE,
+  MAX_SESSION_STREAMS,
+  TIMELINE_JUMP_COUNT_CAP,
+  TIMELINE_STICK_GAP_PX,
+  type CodexPlatformCloudAction,
+  type CodexPlatformMCPAction,
+} from "./features/session/config";
 import {
   clearSessionRuntimePersistence,
   loadPersistedCompletedRuns,
@@ -144,66 +158,12 @@ import {
   isGenericSessionTitle,
   resolveProjectTitle,
 } from "./features/session/utils";
-const DEFAULT_WORKSPACE_PATH = "/";
-
 type AuthPhase = "checking" | "locked" | "ready";
 
 type SessionEventHandleOptions = {
   surfaceCompletions?: boolean;
   surfaceLifecycle?: boolean;
 };
-
-const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
-const MAX_SESSION_STREAMS = 0;
-const COMPOSER_MIN_HEIGHT = 52;
-const COMPOSER_MAX_HEIGHT = 260;
-const TIMELINE_STICK_GAP_PX = 72;
-const TIMELINE_JUMP_COUNT_CAP = 99;
-const MAX_COMPLETED_RUN_CACHE_SIZE = 2400;
-const APPROVAL_POLICY_OPTIONS: Array<{
-  value: CodexApprovalPolicy;
-  label: string;
-}> = [
-  { value: "", label: "default" },
-  { value: "untrusted", label: "untrusted" },
-  { value: "on-request", label: "on-request" },
-  { value: "never", label: "never" },
-  { value: "on-failure", label: "on-failure (legacy)" },
-];
-type CodexPlatformMCPAction =
-  | "list"
-  | "get"
-  | "add"
-  | "remove"
-  | "login"
-  | "logout";
-type CodexPlatformCloudAction =
-  | "list"
-  | "status"
-  | "exec"
-  | "diff"
-  | "apply";
-const CODEX_PLATFORM_MCP_ACTIONS: Array<{
-  value: CodexPlatformMCPAction;
-  label: string;
-}> = [
-  { value: "list", label: "list" },
-  { value: "get", label: "get" },
-  { value: "add", label: "add" },
-  { value: "remove", label: "remove" },
-  { value: "login", label: "login" },
-  { value: "logout", label: "logout" },
-];
-const CODEX_PLATFORM_CLOUD_ACTIONS: Array<{
-  value: CodexPlatformCloudAction;
-  label: string;
-}> = [
-  { value: "list", label: "list" },
-  { value: "status", label: "status" },
-  { value: "exec", label: "exec" },
-  { value: "diff", label: "diff" },
-  { value: "apply", label: "apply" },
-];
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") return null;
