@@ -102,3 +102,34 @@ Per run:
 
 1. `environment`: `staging` or `production`
 2. `ref` (optional): branch/tag/sha to deploy
+
+## 5. Staging soak workflow
+
+`Staging Soak` workflow (`.github/workflows/staging-soak.yml`) is used to collect codex v2 reconnect/cursor continuity evidence.
+
+### 5.1 Environment configuration (`staging`)
+
+Secrets:
+
+- `SOAK_ACCESS_TOKEN`: staging access key for API calls
+
+Variables:
+
+- `SOAK_API_BASE`: staging API base URL (falls back to `VITE_API_BASE` when empty)
+- `SOAK_HOST_ID`: host id used for soak session start
+- `SOAK_PROJECT_PATH`: project path used for soak session start
+
+### 5.2 Trigger
+
+Run manually with `workflow_dispatch` inputs:
+
+- `duration` (default `2h`)
+- `reconnect_window` (default `30s`)
+- `prompt_interval` (default `2m`)
+- `model` (optional)
+- `archive_on_exit` (default `true`)
+
+### 5.3 Output
+
+- Uploads `codex-v2-staging-soak-report` artifact (JSON).
+- Publishes summary (`session_id`, `stream`, `turns`, terminal run counts) in workflow step summary.
