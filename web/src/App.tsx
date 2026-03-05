@@ -25,8 +25,6 @@ import {
   listRuns,
   listRuntimes,
   listSessions,
-  startCodexV2Session,
-  startCodexV2Turn,
   uploadImage,
   upsertHost,
   type Host,
@@ -68,6 +66,7 @@ import { createHostActions } from "./features/session/host-actions";
 import { createPlatformActions } from "./features/session/platform-actions";
 import { createProjectActions } from "./features/session/project-actions";
 import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
+import { createSessionSubmitAction } from "./features/session/session-submit-action";
 import {
   buildSessionCommandPaletteActions,
   normalizeSearchText,
@@ -105,8 +104,6 @@ import {
 } from "./features/session/tree";
 import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
 import {
-  extractThreadIDFromCodexSessionResponse,
-  extractTurnIDFromPayload,
   parseCodexAssistantTextFromStdout,
   parseCodexSessionTitleFromStdout,
 } from "./features/session/codex-parsing";
@@ -145,8 +142,6 @@ import {
 } from "./features/session/view-helpers";
 import {
   clipStreamText,
-  deriveSessionTitleFromPrompt,
-  isGenericSessionTitle,
 } from "./features/session/utils";
 type AuthPhase = "checking" | "locked" | "ready";
 
@@ -2004,225 +1999,38 @@ export function App() {
     startSessionStream(sessionID, token);
   }
 
-  async function submitPromptForActiveThread(trimmedPrompt: string) {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    if (activeThread.activeJobID || submittingThreadID === activeThread.id) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "running",
-          title: "Session Busy",
-          body: "This session is already running. Wait for completion or switch to another session.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-
-    const prompt = trimmedPrompt.trim();
-    if (!prompt) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Prompt Missing",
-          body: "Prompt is required.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-    if (isGenericSessionTitle(activeThread.title)) {
-      const nextTitle = deriveSessionTitleFromPrompt(prompt);
-      if (nextTitle) {
-        setThreadTitle(activeThread.id, nextTitle);
-      }
-    }
-
-    const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
-    const localHostIDs = hosts
-      .filter((host) => host.connection_mode === "local")
-      .map((host) => host.id);
-    const targetHostIDs =
-      workspaceHostID !== ""
-        ? [workspaceHostID]
-        : selectedHostIDs.length > 0
-          ? selectedHostIDs
-          : localHostIDs.length > 0
-            ? localHostIDs
-            : hosts.length > 0
-              ? [hosts[0].id]
-              : [];
-    if (targetHostIDs.length === 0) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "No Server Available",
-          body: "No server is available for this session.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-
-    const selectedHosts = hosts.filter((host) =>
-      targetHostIDs.includes(host.id),
-    );
-    const hasNonLocalTarget = selectedHosts.some(
-      (host) => host.connection_mode !== "local",
-    );
-    const safeImagePaths = !hasNonLocalTarget ? activeThread.imagePaths : [];
-    if (hasNonLocalTarget && activeThread.imagePaths.length > 0) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "running",
-          title: "Image Attachment Skipped",
-          body: "Image attachments are only applied to local-mode targets.",
-        },
-        activeThread.id,
-      );
-    }
-
-    const effectiveModel =
-      activeThread.model.trim() ||
-      sessionModelDefault.trim() ||
-      sessionModelChoices[0]?.trim() ||
-      undefined;
-    const effectiveSandbox =
-      activeThread.sandbox || runSandbox || "workspace-write";
-    const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
-
-    const runtimeName = activeRuntime?.name ?? selectedRuntime;
-    if (runtimeName !== "codex") {
-      throw new Error("Session mode only supports codex runtime.");
-    }
-
-    addTimelineEntry(
-      {
-        kind: "user",
-        title: "You",
-        body: prompt,
-      },
-      activeThread.id,
-    );
-    let targetThreadID = activeThread.id;
-    forceStickToBottom();
-    updateThreadDraft(activeThread.id, "");
-
-    const normalizedStringList = (values: string[]): string[] | undefined => {
-      if (!Array.isArray(values) || values.length === 0) return undefined;
-      const out: string[] = [];
-      const seen = new Set<string>();
-      for (const value of values) {
-        const trimmed = value.trim();
-        if (!trimmed || seen.has(trimmed)) continue;
-        seen.add(trimmed);
-        out.push(trimmed);
-      }
-      return out.length > 0 ? out : undefined;
-    };
-
-    setSubmittingThreadID(activeThread.id);
-    try {
-      const targetHostID = targetHostIDs[0]?.trim() ?? "";
-      if (!targetHostID) {
-        throw new Error("host_id is required for codex v2 session");
-      }
-
-      let sessionID = activeThread.id.trim();
-      if (isLocalDraftSessionID(sessionID)) {
-        const sessionResp = await startCodexV2Session(token, {
-          host_id: targetHostID,
-          path: effectiveWorkdir,
-          title: activeThread.title,
-          model: effectiveModel,
-          approval_policy: activeThread.approvalPolicy || undefined,
-          sandbox: effectiveSandbox,
-        });
-        const resolvedSessionID =
-          extractThreadIDFromCodexSessionResponse(sessionResp) ||
-          sessionResp.session.id.trim();
-        if (!resolvedSessionID) {
-          throw new Error("thread/start returned empty session id");
-        }
-        const previousSessionID = sessionID;
-        sessionID = bindThreadID(previousSessionID, resolvedSessionID, {
-          title: sessionResp.session.title,
-        });
-        targetThreadID = sessionID;
-        if (previousSessionID !== sessionID) {
-          stopSessionStream(previousSessionID, { preserveRunState: false, preserveHealth: false });
-          deleteSessionEventCursor(previousSessionID);
-          sessionRunStateRef.current.delete(previousSessionID);
-        }
-      }
-
-      const turnInput: Array<Record<string, unknown>> = [
-        { type: "text", text: prompt },
-      ];
-      for (const imagePath of safeImagePaths) {
-        const trimmedPath = imagePath.trim();
-        if (!trimmedPath) continue;
-        turnInput.push({
-          type: "input_image",
-          image_url: trimmedPath,
-        });
-      }
-
-      const turnResp = await startCodexV2Turn(token, sessionID, {
-        host_id: targetHostID,
-        input: turnInput,
-        mode: activeThread.codexMode,
-        resume_last: activeThread.resumeLast,
-        resume_session_id: activeThread.resumeSessionID.trim() || undefined,
-        review_uncommitted: activeThread.reviewUncommitted,
-        review_base: activeThread.reviewBase.trim() || undefined,
-        review_commit: activeThread.reviewCommit.trim() || undefined,
-        review_title: activeThread.reviewTitle.trim() || undefined,
-        model: effectiveModel,
-        cwd: effectiveWorkdir,
-        approval_policy: activeThread.approvalPolicy || undefined,
-        sandbox: effectiveSandbox,
-        search: activeThread.webSearch,
-        profile: activeThread.profile.trim() || undefined,
-        config: normalizedStringList(activeThread.configFlags),
-        enable: normalizedStringList(activeThread.enableFlags),
-        disable: normalizedStringList(activeThread.disableFlags),
-        add_dirs: normalizedStringList(activeThread.addDirs),
-        skip_git_repo_check: activeThread.skipGitRepoCheck,
-        ephemeral: activeThread.ephemeral,
-        json_output: activeThread.jsonOutput,
-      });
-      const turnID = extractTurnIDFromPayload(turnResp);
-      const runID = turnID || `run_${Date.now()}`;
-      ensureSessionRunState(sessionRunStateRef, sessionID, runID);
-      setThreadJobState(sessionID, runID, "running");
-      setActiveJobThreadID(sessionID);
-      if (sessionID === activeThreadIDRef.current) {
-        setActiveJobID(runID);
-      }
-      if (!sessionStreamStateRef.current.has(sessionID)) {
-        startSessionStream(sessionID, token);
-      }
-      setSubmittingThreadID("");
-      return;
-    } catch (error) {
-      finalizeAssistantStreamEntry(targetThreadID, "error");
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Response Failed",
-          body: String(error),
-        },
-        targetThreadID,
-      );
-      setThreadJobState(targetThreadID, "", "failed");
-      setSubmittingThreadID("");
-    }
-  }
+  const { submitPromptForActiveThread } = createSessionSubmitAction({
+    authPhase,
+    token,
+    activeThread,
+    submittingThreadID,
+    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+    activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
+    hosts,
+    selectedHostIDs,
+    sessionModelDefault,
+    sessionModelChoices,
+    runSandbox,
+    activeRuntimeName: activeRuntime?.name ?? selectedRuntime,
+    selectedRuntime,
+    activeThreadIDRef,
+    sessionRunStateRef,
+    sessionStreamStateRef,
+    addTimelineEntry,
+    setThreadTitle,
+    forceStickToBottom,
+    updateThreadDraft,
+    bindThreadID,
+    stopSessionStream,
+    deleteSessionEventCursor,
+    setThreadJobState,
+    setActiveJobThreadID,
+    setActiveJobID,
+    startSessionStream,
+    setSubmittingThreadID,
+    finalizeAssistantStreamEntry,
+    isLocalDraftSessionID,
+  });
 
   const {
     onSendPrompt,
