@@ -68,6 +68,7 @@ import { useComposerAutoResize } from "./features/session/use-composer-autosize"
 import { useCommandPaletteController } from "./features/session/use-command-palette";
 import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
 import { useSessionAlerts } from "./features/session/use-session-alerts";
+import { useSessionStreamHealth } from "./features/session/use-session-stream-health";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import {
   buildDiscoveredProjects,
@@ -114,7 +115,6 @@ import {
 } from "./features/session/session-events";
 import type {
   SessionRunStreamState,
-  SessionStreamHealth,
   SessionStreamHealthState,
 } from "./features/session/stream-types";
 import {
@@ -398,9 +398,12 @@ export function App() {
     onEnableNotifications,
     notifySessionDone,
   } = useSessionAlerts();
-  const [sessionStreamHealthByID, setSessionStreamHealthByID] = useState<
-    Record<string, SessionStreamHealth>
-  >({});
+  const {
+    sessionStreamHealthByID,
+    updateSessionStreamHealth,
+    clearSessionStreamHealth,
+    clearAllSessionStreamHealth,
+  } = useSessionStreamHealth();
   const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [cancelingThreadID, setCancelingThreadID] = useState("");
   const [deletingThreadID, setDeletingThreadID] = useState("");
@@ -1239,67 +1242,6 @@ export function App() {
     return parsed >= completionAlertCutoffMSRef.current;
   }
 
-  function updateSessionStreamHealth(
-    sessionID: string,
-    state: SessionStreamHealthState,
-    options?: {
-      retries?: number;
-      lastEventAt?: number;
-      lastError?: string;
-      throttleMS?: number;
-    },
-  ) {
-    const id = sessionID.trim();
-    if (!id) return;
-    setSessionStreamHealthByID((prev) => {
-      const current = prev[id] ?? {
-        state: "offline",
-        retries: 0,
-        lastEventAt: 0,
-        updatedAt: 0,
-        lastError: "",
-      };
-      const retries = options?.retries ?? current.retries;
-      const lastEventAt = options?.lastEventAt ?? current.lastEventAt;
-      const lastError = options?.lastError ?? current.lastError;
-      const now = Date.now();
-      const throttleMS = options?.throttleMS ?? 1100;
-      const stateChanged =
-        current.state !== state ||
-        current.retries !== retries ||
-        current.lastError !== lastError;
-      const eventAtChanged = current.lastEventAt !== lastEventAt;
-      if (
-        !stateChanged &&
-        (!eventAtChanged || now - current.updatedAt < throttleMS)
-      ) {
-        return prev;
-      }
-      const next: SessionStreamHealth = {
-        state,
-        retries,
-        lastEventAt,
-        updatedAt: now,
-        lastError,
-      };
-      return {
-        ...prev,
-        [id]: next,
-      };
-    });
-  }
-
-  function clearSessionStreamHealth(sessionID: string) {
-    const id = sessionID.trim();
-    if (!id) return;
-    setSessionStreamHealthByID((prev) => {
-      if (!(id in prev)) return prev;
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-  }
-
   function openSessionFromAlert(alert: SessionAlert) {
     if (threadWorkspaceMap.has(alert.threadID)) {
       activateThread(alert.threadID);
@@ -1604,7 +1546,7 @@ export function App() {
     sessionStreamStateRef.current.clear();
     sessionEventQueueRef.current.clear();
     sessionRunStateRef.current.clear();
-    setSessionStreamHealthByID({});
+    clearAllSessionStreamHealth();
   }
 
   async function finalizeStreamCompleted(
