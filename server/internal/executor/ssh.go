@@ -82,6 +82,81 @@ type ExecResult struct {
 	Duration   time.Duration `json:"-"`
 }
 
+// InteractiveProcess represents a long-lived remote/local command process.
+// It is intended for protocols that require bidirectional streaming IO.
+type InteractiveProcess struct {
+	command string
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  io.ReadCloser
+	stderr  io.ReadCloser
+
+	waitOnce sync.Once
+	waitErr  error
+	waitDone chan struct{}
+
+	closeOnce sync.Once
+}
+
+func (p *InteractiveProcess) CommandLine() string {
+	if p == nil {
+		return ""
+	}
+	return p.command
+}
+
+func (p *InteractiveProcess) StdinPipe() io.WriteCloser {
+	if p == nil {
+		return nil
+	}
+	return p.stdin
+}
+
+func (p *InteractiveProcess) StdoutPipe() io.ReadCloser {
+	if p == nil {
+		return nil
+	}
+	return p.stdout
+}
+
+func (p *InteractiveProcess) StderrPipe() io.ReadCloser {
+	if p == nil {
+		return nil
+	}
+	return p.stderr
+}
+
+func (p *InteractiveProcess) Wait() error {
+	if p == nil || p.cmd == nil {
+		return errors.New("interactive process is nil")
+	}
+	p.waitOnce.Do(func() {
+		p.waitErr = p.cmd.Wait()
+		close(p.waitDone)
+	})
+	<-p.waitDone
+	return p.waitErr
+}
+
+func (p *InteractiveProcess) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.closeOnce.Do(func() {
+		if p.stdin != nil {
+			_ = p.stdin.Close()
+		}
+		if p.cmd != nil && p.cmd.Process != nil {
+			_ = p.cmd.Process.Kill()
+		}
+	})
+	err := p.Wait()
+	if errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	return err
+}
+
 type ClassifiedError struct {
 	Class   ErrorClass `json:"class"`
 	Hint    string     `json:"hint,omitempty"`
@@ -154,6 +229,51 @@ func RunViaSSH(ctx context.Context, h model.Host, spec runtime.CommandSpec, work
 	}
 	res.ExitCode = -1
 	return res, classifySSHRunError(err, res.ExitCode, res.Stderr)
+}
+
+func StartInteractiveViaSSH(ctx context.Context, h model.Host, spec runtime.CommandSpec, workdir string) (*InteractiveProcess, error) {
+	var cmd *exec.Cmd
+	command := ""
+	if isLocalHostMode(h) {
+		localCmd := renderRemoteCommand(spec, workdir)
+		command = "local sh -lc " + shellQuote(localCmd)
+		cmd = exec.CommandContext(ctx, "sh", "-lc", localCmd)
+	} else {
+		remoteCmd := renderRemoteCommand(spec, workdir)
+		sshArgs := buildSSHArgs(h, remoteCmd)
+		command = "ssh " + strings.Join(sshArgs, " ")
+		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
+	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return nil, err
+	}
+	return &InteractiveProcess{
+		command:  command,
+		cmd:      cmd,
+		stdin:    stdin,
+		stdout:   stdout,
+		stderr:   stderr,
+		waitDone: make(chan struct{}),
+	}, nil
 }
 
 func runViaLocalShell(ctx context.Context, spec runtime.CommandSpec, workdir string, opts ExecOptions) (ExecResult, error) {
