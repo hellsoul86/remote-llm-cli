@@ -1113,12 +1113,23 @@ async function mockSessionApi(
 
 async function installMockSessionWebSocket(
   page: Page,
-  opts: { sessionID: string; marker: string; mode?: "replay-once" | "reset-reconnect" },
+  opts: {
+    sessionID: string;
+    marker: string;
+    mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
+  },
 ): Promise<void> {
-  await page.addInitScript((config: { sessionID: string; marker: string; mode?: "replay-once" | "reset-reconnect" }) => {
+  await page.addInitScript((config: {
+    sessionID: string;
+    marker: string;
+    mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
+  }) => {
     const globalAny = window as unknown as {
       __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
-      __mockWsControl?: { triggerResetReconnect?: () => void };
+      __mockWsControl?: {
+        triggerResetReconnect?: () => void;
+        triggerFlakyResetReconnect?: () => void;
+      };
       WebSocket: typeof WebSocket;
     };
     const mode = config.mode ?? "replay-once";
@@ -1126,6 +1137,11 @@ async function installMockSessionWebSocket(
     const nowISO = () => new Date().toISOString();
     const activeSockets = new Set<SessionMockWebSocket>();
     const resetState: { phase: "idle" | "await_reconnect" | "done" } = {
+      phase: "idle",
+    };
+    const flakyResetState: {
+      phase: "idle" | "await_reconnect_1" | "await_reconnect_2" | "done";
+    } = {
       phase: "idle",
     };
 
@@ -1229,6 +1245,91 @@ async function installMockSessionWebSocket(
                 },
               ];
               resetState.phase = "done";
+              this.pump(frames);
+              return;
+            }
+            this.emit({
+              type: "session.ready",
+              session_id: sessionID,
+              cursor: readyCursor,
+            });
+            return;
+          }
+          if (mode === "flaky-reset-reconnect") {
+            if (
+              sessionID === config.sessionID &&
+              flakyResetState.phase === "await_reconnect_1" &&
+              safeAfter >= 2
+            ) {
+              const runID = "turn_1";
+              const chunk =
+                '{"type":"thread.started","thread_id":"ws_flaky"}\n' +
+                '{"type":"turn.started"}\n' +
+                JSON.stringify({
+                  type: "item.completed",
+                  item: { type: "agent_message", text: `ws flaky reset mid ${config.marker}` },
+                }) +
+                "\n";
+              flakyResetState.phase = "await_reconnect_2";
+              this.emit({
+                type: "session.event",
+                id: "3",
+                event: {
+                  seq: 3,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "assistant.delta",
+                  payload: { chunk },
+                  created_at: nowISO(),
+                },
+              });
+              this.emit({
+                type: "session.reset",
+                session_id: config.sessionID,
+                reason: "backpressure",
+                next_after: 3,
+              });
+              window.setTimeout(() => this.close(1012, "mock-reset-2"), 0);
+              return;
+            }
+            if (
+              sessionID === config.sessionID &&
+              flakyResetState.phase === "await_reconnect_2" &&
+              safeAfter >= 3
+            ) {
+              const runID = "turn_1";
+              flakyResetState.phase = "done";
+              const frames: Array<Record<string, unknown>> = [
+                {
+                  type: "session.event",
+                  id: "4",
+                  event: {
+                    seq: 4,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "assistant.completed",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.event",
+                  id: "5",
+                  event: {
+                    seq: 5,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "run.completed",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.ready",
+                  session_id: config.sessionID,
+                  cursor: 5,
+                },
+              ];
               this.pump(frames);
               return;
             }
@@ -1419,6 +1520,54 @@ async function installMockSessionWebSocket(
             next_after: 2,
           });
           window.setTimeout(() => socket.close(1012, "mock-reset"), 0);
+        }
+      },
+      triggerFlakyResetReconnect: () => {
+        if (mode !== "flaky-reset-reconnect") return;
+        if (flakyResetState.phase !== "idle") return;
+        flakyResetState.phase = "await_reconnect_1";
+        const runID = "turn_1";
+        const chunk =
+          '{"type":"thread.started","thread_id":"ws_flaky"}\n' +
+          '{"type":"turn.started"}\n' +
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: `ws flaky reset ${config.marker}` },
+          }) +
+          "\n";
+        for (const socket of Array.from(activeSockets)) {
+          if (socket.sessionID !== config.sessionID) continue;
+          socket.emit({
+            type: "session.event",
+            id: "1",
+            event: {
+              seq: 1,
+              session_id: config.sessionID,
+              run_id: runID,
+              type: "run.started",
+              payload: { turn_id: runID },
+              created_at: nowISO(),
+            },
+          });
+          socket.emit({
+            type: "session.event",
+            id: "2",
+            event: {
+              seq: 2,
+              session_id: config.sessionID,
+              run_id: runID,
+              type: "assistant.delta",
+              payload: { chunk },
+              created_at: nowISO(),
+            },
+          });
+          socket.emit({
+            type: "session.reset",
+            session_id: config.sessionID,
+            reason: "backpressure",
+            next_after: 2,
+          });
+          window.setTimeout(() => socket.close(1012, "mock-reset-1"), 0);
         }
       },
     };
@@ -2149,6 +2298,61 @@ test("websocket reset reconnect completes once without SSE fallback", async ({
         return Array.isArray(state?.calls)
           ? state.calls.some((item) => item.sessionID === "session_cli_1" && item.after > 0)
           : false;
+      }),
+    )
+    .toBe(true);
+});
+
+test("websocket repeated resets reconnect and complete once", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `WS_FLAKY_${Date.now()}`;
+  await installMockSessionWebSocket(page, {
+    sessionID: "session_cli_1",
+    marker,
+    mode: "flaky-reset-reconnect",
+  });
+  const harness = await mockSessionApi(page, `ws flaky ${marker}`, marker, {
+    streamPattern: "ready-only",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`trigger ws flaky reset ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockWsControl?: { triggerFlakyResetReconnect?: () => void };
+      }
+    ).__mockWsControl?.triggerFlakyResetReconnect?.();
+  });
+
+  const assistantEntry = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
+  await expect(assistantEntry).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    timeout: 15000,
+  });
+  await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as unknown as {
+            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+          }
+        ).__mockWsState;
+        if (!Array.isArray(state?.calls)) return false;
+        const calls = state.calls.filter((item) => item.sessionID === "session_cli_1");
+        const hasAfter2 = calls.some((item) => item.after >= 2);
+        const hasAfter3 = calls.some((item) => item.after >= 3);
+        return hasAfter2 && hasAfter3;
       }),
     )
     .toBe(true);
