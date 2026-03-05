@@ -4434,80 +4434,86 @@ export function App() {
     const sourceProjectID = projectID.trim();
     const sourceHostID = projectHostID.trim();
     const sourcePath = projectPath.trim();
-    let targetProjectID = sourceProjectID;
-    let remoteProjectResolved = sourceProjectIDSet.has(targetProjectID);
-
-    if (!remoteProjectResolved) {
-      try {
-        const remoteProjects = await listProjects(token, 600, { runtime: "codex" });
-        setSourceProjectIDs(
-          remoteProjects
-            .map((project) => project.id.trim())
-            .filter((id) => id !== ""),
-        );
-        const matched =
-          remoteProjects.find((project) => project.id.trim() === sourceProjectID) ??
-          remoteProjects.find(
-            (project) =>
-              project.host_id.trim() === sourceHostID &&
-              project.path.trim() === sourcePath,
-          );
-        if (matched?.id?.trim()) {
-          targetProjectID = matched.id.trim();
-          remoteProjectResolved = true;
-        }
-      } catch {
-        // no-op: keep fallback to local-only message below
-      }
-    }
-
-    if (!remoteProjectResolved || !targetProjectID) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Archive Unavailable",
-          body: "Project is local-only and cannot be archived remotely.",
-        },
-        activeThreadID,
-      );
-      return;
-    }
-
-    let resolvedSessionCount = sessionCount;
-    try {
-      const remoteSessions = await listSessions(token, 200, {
-        project_id: targetProjectID,
-        runtime: "codex",
-      });
-      resolvedSessionCount = remoteSessions.length;
-    } catch {
-      // fallback to current UI count
-    }
-
-    if (resolvedSessionCount > 0) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Archive Blocked",
-          body:
-            resolvedSessionCount === 1
-              ? "Project still has 1 session. Archive it first."
-              : `Project still has ${resolvedSessionCount} sessions. Archive them first.`,
-        },
-        activeThreadID,
-      );
-      return;
-    }
+    const loadingKey = sourceProjectID;
 
     const confirmed = window.confirm(
-      `Archive empty project "${projectPath}"?`,
+      `Archive empty project "${sourcePath}"?`,
     );
     if (!confirmed) return;
 
-    setDeletingProjectID(targetProjectID);
+    setDeletingProjectID(loadingKey);
+
+    let targetProjectID = sourceProjectID;
+    let remoteProjectResolved = sourceProjectIDSet.has(targetProjectID);
     try {
+      if (!remoteProjectResolved) {
+        try {
+          const remoteProjects = await listProjects(token, 600, {
+            runtime: "codex",
+          });
+          setSourceProjectIDs(
+            remoteProjects
+              .map((project) => project.id.trim())
+              .filter((id) => id !== ""),
+          );
+          const matched =
+            remoteProjects.find(
+              (project) => project.id.trim() === sourceProjectID,
+            ) ??
+            remoteProjects.find(
+              (project) =>
+                project.host_id.trim() === sourceHostID &&
+                project.path.trim() === sourcePath,
+            );
+          if (matched?.id?.trim()) {
+            targetProjectID = matched.id.trim();
+            remoteProjectResolved = true;
+          }
+        } catch {
+          // no-op: keep fallback to local-only message below
+        }
+      }
+
+      if (!remoteProjectResolved || !targetProjectID) {
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "error",
+            title: "Archive Unavailable",
+            body: "Project is local-only and cannot be archived remotely.",
+          },
+          activeThreadID,
+        );
+        return;
+      }
+
+      let resolvedSessionCount = sessionCount;
+      try {
+        const remoteSessions = await listSessions(token, 200, {
+          project_id: targetProjectID,
+          runtime: "codex",
+        });
+        resolvedSessionCount = remoteSessions.length;
+      } catch {
+        // fallback to current UI count
+      }
+
+      if (resolvedSessionCount > 0) {
+        addTimelineEntry(
+          {
+            kind: "system",
+            state: "error",
+            title: "Archive Blocked",
+            body:
+              resolvedSessionCount === 1
+                ? "Project still has 1 session. Archive it first."
+                : `Project still has ${resolvedSessionCount} sessions. Archive them first.`,
+          },
+          activeThreadID,
+        );
+        return;
+      }
+
       await deleteProject(token, targetProjectID);
       await refreshProjectsFromSource(token, hosts, false, true);
       addTimelineEntry(
