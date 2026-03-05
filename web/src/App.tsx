@@ -35,7 +35,6 @@ import {
   probeHost,
   startCodexV2Session,
   startCodexV2Turn,
-  streamSessionEvents,
   uploadImage,
   upsertHost,
   upsertProject,
@@ -99,6 +98,7 @@ import {
   filterSessionTreeHosts,
   buildSessionTreeHosts,
 } from "./features/session/tree";
+import { runSessionStreamLoop } from "./features/session/stream-loop";
 import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
 import {
   buildCodexRuntimeCardFromEvent,
@@ -1338,22 +1338,6 @@ export function App() {
     );
   }
 
-  function waitWithAbort(ms: number, signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return Promise.resolve();
-    return new Promise((resolve) => {
-      const timer = window.setTimeout(() => {
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      }, ms);
-      const onAbort = () => {
-        window.clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
-  }
-
   function trimCompletedRunsStore() {
     while (completedJobsRef.current.size > MAX_COMPLETED_RUN_CACHE_SIZE) {
       const oldest = completedJobsRef.current.values().next().value;
@@ -1911,80 +1895,40 @@ export function App() {
       lastError: "",
       throttleMS: 0,
     });
-
-    const run = async () => {
-      let backoff = 700;
-      let retries = 0;
-      while (!controller.signal.aborted) {
-        if (retries > 0) {
-          updateSessionStreamHealth(trimmedSessionID, "reconnecting", {
-            retries,
-            throttleMS: 0,
-          });
-        }
-        const after = sessionEventCursorRef.current.get(trimmedSessionID) ?? 0;
+    void runSessionStreamLoop({
+      authToken,
+      sessionID: trimmedSessionID,
+      controller,
+      getAfter: () => sessionEventCursorRef.current.get(trimmedSessionID) ?? 0,
+      setSuppressReplaySurface: (value) => {
         const streamState = sessionStreamStateRef.current.get(trimmedSessionID);
         if (streamState && streamState.controller === controller) {
-          streamState.suppressReplaySurface = after <= 0;
+          streamState.suppressReplaySurface = value;
         }
-        try {
-          await streamSessionEvents(authToken, trimmedSessionID, {
-            after,
-            signal: controller.signal,
-            onFrame: (frame) =>
-              handleSessionStreamFrame(trimmedSessionID, frame),
-          });
-          if (controller.signal.aborted) break;
-          const isRunning = runningSessionIDsRef.current.has(trimmedSessionID);
-          if (isRunning) {
-            retries += 1;
-            updateSessionStreamHealth(trimmedSessionID, "reconnecting", {
-              retries,
-              lastError: "stream closed, retrying",
-              throttleMS: 0,
-            });
-          } else {
-            retries = 0;
-            updateSessionStreamHealth(trimmedSessionID, "live", {
-              retries: 0,
-              lastError: "",
-              throttleMS: 0,
-            });
-          }
-        } catch {
-          if (controller.signal.aborted) break;
-          retries += 1;
-          updateSessionStreamHealth(
-            trimmedSessionID,
-            retries >= 3 ? "error" : "reconnecting",
-            {
-              retries,
-              lastError: "stream interrupted, retrying",
-              throttleMS: 0,
-            },
-          );
-        }
+      },
+      onFrame: (frame) => handleSessionStreamFrame(trimmedSessionID, frame),
+      isRunningSession: () => runningSessionIDsRef.current.has(trimmedSessionID),
+      onState: (state, options) => {
         const active = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (
-          !active ||
-          active.controller !== controller ||
-          controller.signal.aborted
-        )
-          break;
-        active.ready = false;
-        await waitWithAbort(backoff, controller.signal);
-        backoff = Math.min(6000, Math.round(backoff * 1.7));
-      }
-      const active = sessionStreamStateRef.current.get(trimmedSessionID);
-      if (active && active.controller === controller) {
-        sessionStreamStateRef.current.delete(trimmedSessionID);
-        sessionEventQueueRef.current.delete(trimmedSessionID);
-        updateSessionStreamHealth(trimmedSessionID, "offline", {
+        if (!active || active.controller !== controller) return;
+        updateSessionStreamHealth(trimmedSessionID, state, {
+          retries: options?.retries,
+          lastError: options?.lastError,
           throttleMS: 0,
         });
-      }
-    };
-    void run();
+      },
+      onBeforeBackoff: () => {
+        const active = sessionStreamStateRef.current.get(trimmedSessionID);
+        if (!active || active.controller !== controller) return;
+        active.ready = false;
+      },
+      onFinalize: () => {
+        const active = sessionStreamStateRef.current.get(trimmedSessionID);
+        if (!active || active.controller !== controller) return;
+        sessionStreamStateRef.current.delete(trimmedSessionID);
+        sessionEventQueueRef.current.delete(trimmedSessionID);
+      },
+    });
   }
 
   async function loadWorkspace(authToken: string) {
