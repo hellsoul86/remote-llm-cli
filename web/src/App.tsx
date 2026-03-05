@@ -1310,6 +1310,9 @@ export function App() {
   const timelineStickToBottomRef = useRef(true);
   const timelineForceStickRef = useRef(false);
   const timelineLastSignatureRef = useRef("");
+  const timelineLastCountRef = useRef(0);
+  const timelineLastTailIDRef = useRef("");
+  const timelineLastTailStateRef = useRef("");
   const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const commandPaletteInputRef = useRef<HTMLInputElement | null>(null);
@@ -3154,7 +3157,6 @@ export function App() {
           state.stdout.includes('"type":"thread.started"')
         ) {
           state.streamSeen = true;
-          upsertAssistantStreamEntry(sessionID, "Thinking...");
         }
         return;
       }
@@ -3755,10 +3757,21 @@ export function App() {
       String(activeTimelineTail?.body?.length ?? 0),
     ].join("|");
     const previousSignature = timelineLastSignatureRef.current;
+    const previousCount = timelineLastCountRef.current;
+    const previousTailID = timelineLastTailIDRef.current;
+    const previousTailState = timelineLastTailStateRef.current;
+    const nextTailID = activeTimelineTail?.id ?? "";
+    const nextTailState = activeTimelineTail?.state ?? "";
+    timelineLastCountRef.current = activeTimeline.length;
+    timelineLastTailIDRef.current = nextTailID;
+    timelineLastTailStateRef.current = nextTailState;
     if (threadChanged) {
       lastTimelineThreadIDRef.current = activeThreadID;
       timelineForceStickRef.current = true;
       timelineLastSignatureRef.current = nextSignature;
+      timelineLastCountRef.current = activeTimeline.length;
+      timelineLastTailIDRef.current = nextTailID;
+      timelineLastTailStateRef.current = nextTailState;
       setTimelineUnreadCount(0);
     }
     const shouldStick =
@@ -3768,10 +3781,16 @@ export function App() {
     const timelineChanged =
       !threadChanged && previousSignature !== nextSignature;
     if (!shouldStick && timelineChanged) {
+      const structuralChange =
+        previousCount !== activeTimeline.length ||
+        previousTailID !== nextTailID ||
+        previousTailState !== nextTailState;
       timelineLastSignatureRef.current = nextSignature;
-      setTimelineUnreadCount((count) =>
-        Math.min(TIMELINE_JUMP_COUNT_CAP, count + 1),
-      );
+      if (structuralChange) {
+        setTimelineUnreadCount((count) =>
+          Math.min(TIMELINE_JUMP_COUNT_CAP, count + 1),
+        );
+      }
       return;
     }
     timelineLastSignatureRef.current = nextSignature;
@@ -4042,7 +4061,6 @@ export function App() {
                 sourceStdout.includes('"type":"thread.started"')
               ) {
                 jobStreamSeenRef.current.set(item.jobID, true);
-                upsertAssistantStreamEntry(item.threadID, "Thinking...");
               }
             } else {
               jobStreamSeenRef.current.set(item.jobID, true);
@@ -4764,9 +4782,6 @@ export function App() {
       },
       activeThread.id,
     );
-    if (runAsyncMode) {
-      upsertAssistantStreamEntry(activeThread.id, "Thinking...");
-    }
     timelineForceStickRef.current = true;
     timelineStickToBottomRef.current = true;
     updateThreadDraft(activeThread.id, "");

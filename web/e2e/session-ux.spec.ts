@@ -19,6 +19,7 @@ type MockOptions = {
   jobEventFirstPollDelayMS?: number;
   streamFailAttempts?: number;
   runtimeCommandEvents?: boolean;
+  assistantDeltaEvents?: number;
 };
 
 function buildLongAssistantReply(marker: string): string {
@@ -54,6 +55,7 @@ async function mockSessionApi(
   );
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
+  const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
   let sessionOneStreamAttempts = 0;
   const sessionOneStreamAfterValues: number[] = [];
   let canceled = false;
@@ -494,45 +496,59 @@ async function mockSessionApi(
       return;
     }
     if (streamPattern === "completion-once") {
-      const chunkLines = [
-        `{"type":"thread.started","thread_id":"t_ux"}`,
-        `{"type":"turn.started"}`,
-      ];
-      if (runtimeCommandEvents) {
-        chunkLines.push(
-          JSON.stringify({
-            type: "item.started",
-            item: {
-              id: "item_cmd_1",
-              type: "command_execution",
-              command: "ls -la",
-              aggregated_output: "",
-              exit_code: null,
-              status: "in_progress",
-            },
-          }),
-        );
+      const chunkFromText = (text: string, includePrelude: boolean): string => {
+        const chunkLines: string[] = [];
+        if (includePrelude) {
+          chunkLines.push(`{"type":"thread.started","thread_id":"t_ux"}`);
+          chunkLines.push(`{"type":"turn.started"}`);
+          if (runtimeCommandEvents) {
+            chunkLines.push(
+              JSON.stringify({
+                type: "item.started",
+                item: {
+                  id: "item_cmd_1",
+                  type: "command_execution",
+                  command: "ls -la",
+                  aggregated_output: "",
+                  exit_code: null,
+                  status: "in_progress",
+                },
+              }),
+            );
+            chunkLines.push(
+              JSON.stringify({
+                type: "item.completed",
+                item: {
+                  id: "item_cmd_1",
+                  type: "command_execution",
+                  command: "ls -la",
+                  aggregated_output: "README.md",
+                  exit_code: 0,
+                  status: "completed",
+                },
+              }),
+            );
+          }
+        }
         chunkLines.push(
           JSON.stringify({
             type: "item.completed",
-            item: {
-              id: "item_cmd_1",
-              type: "command_execution",
-              command: "ls -la",
-              aggregated_output: "README.md",
-              exit_code: 0,
-              status: "completed",
-            },
+            item: { type: "agent_message", text },
           }),
         );
+        return `${chunkLines.join("\n")}\n`;
+      };
+      const replyLines = assistantReply.split("\n");
+      const deltaChunks: string[] = [];
+      for (let index = 0; index < assistantDeltaEvents; index += 1) {
+        const ratio = (index + 1) / assistantDeltaEvents;
+        const lineCount = Math.max(
+          1,
+          Math.min(replyLines.length, Math.round(replyLines.length * ratio)),
+        );
+        const text = replyLines.slice(0, lineCount).join("\n");
+        deltaChunks.push(chunkFromText(text, index === 0));
       }
-      chunkLines.push(
-        JSON.stringify({
-          type: "item.completed",
-          item: { type: "agent_message", text: assistantReply },
-        }),
-      );
-      const chunk = `${chunkLines.join("\n")}\n`;
       const events = [
         {
           seq: 1,
@@ -547,24 +563,26 @@ async function mockSessionApi(
           createdAt: "2026-03-03T00:00:00Z",
         },
         {
-          seq: 3,
-          type: "assistant.delta",
-          payload: { job_id: "job_ux_1", chunk },
-          createdAt: "2026-03-03T00:00:00Z",
-        },
-        {
-          seq: 4,
+          seq: 3 + deltaChunks.length,
           type: "target.done",
           payload: { job_id: "job_ux_1", host_name: "local-default", status: "ok", exit_code: 0 },
           createdAt: "2026-03-03T00:00:01Z",
         },
         {
-          seq: 5,
+          seq: 4 + deltaChunks.length,
           type: "assistant.completed",
           payload: { job_id: "job_ux_1", run_id: "job_ux_1" },
           createdAt: "2026-03-03T00:00:01Z",
         },
       ];
+      for (let index = 0; index < deltaChunks.length; index += 1) {
+        events.splice(2 + index, 0, {
+          seq: 3 + index,
+          type: "assistant.delta",
+          payload: { job_id: "job_ux_1", chunk: deltaChunks[index] },
+          createdAt: "2026-03-03T00:00:00Z",
+        });
+      }
       if (titleUpdate) {
         events.push({
           seq: events.length + 1,
@@ -1083,6 +1101,7 @@ test("jump-to-latest appears when timeline grows off-bottom", async ({
   const assistantReply = buildLongAssistantReply(marker);
   const harness = await mockSessionApi(page, assistantReply, marker, {
     jobEventFirstPollDelayMS: 1200,
+    assistantDeltaEvents: 8,
   });
   await unlock(page);
 
@@ -1116,6 +1135,10 @@ test("jump-to-latest appears when timeline grows off-bottom", async ({
 
   const jumpButton = page.getByTestId("timeline-jump-latest");
   await expect(jumpButton).toBeVisible({ timeout: 12000 });
+  const jumpLabel = (await jumpButton.innerText()).trim().toLowerCase();
+  const jumpMatch = jumpLabel.match(/\((\d+)\)/);
+  const jumpCount = jumpMatch ? Number.parseInt(jumpMatch[1] ?? "0", 10) : 1;
+  expect(Number.isFinite(jumpCount) && jumpCount <= 3).toBeTruthy();
   await jumpButton.click();
   await expect(jumpButton).toHaveCount(0);
 
