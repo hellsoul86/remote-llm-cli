@@ -3479,7 +3479,7 @@ export function App() {
     void run();
   }
 
-  async function loadWorkspace(authToken: string, emitConnectedNote: boolean) {
+  async function loadWorkspace(authToken: string) {
     const refreshStartedAtMS = Date.now();
     setIsRefreshing(true);
     try {
@@ -3560,32 +3560,10 @@ export function App() {
           jobStreamSeenRef.current.set(job.id, false);
         }
       }
-      if (emitConnectedNote) {
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "success",
-            title: "Connected",
-            body: `Connected. hosts=${nextHosts.length} runtimes=${nextRuntimes.length} queue_depth=${nextMetrics.queue.depth}`,
-          },
-          activeThreadID,
-        );
-      }
       // Only surface completion alerts for events that happen after this sync starts.
       completionAlertCutoffMSRef.current = refreshStartedAtMS;
     } catch (error) {
       setHealth(`error: ${String(error)}`);
-      if (emitConnectedNote) {
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Connection Failed",
-            body: String(error),
-          },
-          activeThreadID,
-        );
-      }
       throw error;
     } finally {
       setIsRefreshing(false);
@@ -3608,7 +3586,7 @@ export function App() {
       storeToken(trimmed);
       setToken(trimmed);
       setTokenInput(trimmed);
-      await loadWorkspace(trimmed, true);
+      await loadWorkspace(trimmed);
       setAuthPhase("ready");
     } catch (error) {
       clearStoredToken();
@@ -4376,7 +4354,7 @@ export function App() {
 
   async function onRefreshWorkspace() {
     if (authPhase !== "ready" || !token.trim()) return;
-    await loadWorkspace(token, false);
+    await loadWorkspace(token);
   }
 
   async function onCreateProject(event: FormEvent<HTMLFormElement>) {
@@ -5076,7 +5054,7 @@ export function App() {
         workspace: "",
       });
       setEditingHostID("");
-      await loadWorkspace(token, false);
+      await loadWorkspace(token);
       addTimelineEntry({
         kind: "system",
         state: "success",
@@ -5160,7 +5138,7 @@ export function App() {
       if (editingHostID === host.id) {
         onCancelHostEdit();
       }
-      await loadWorkspace(token, false);
+      await loadWorkspace(token);
       setOpsNotice(`Deleted host ${host.name}.`);
     } catch (error) {
       setOpsNotice(`Delete failed for ${host.name}: ${String(error)}`);
@@ -5183,7 +5161,7 @@ export function App() {
         setThreadJobState(related.threadID, "", "canceled");
       }
       setOpsNotice(`Cancel requested for ${job.id}.`);
-      await loadWorkspace(token, false);
+      await loadWorkspace(token);
     } catch (error) {
       setOpsNotice(`Cancel failed for ${job.id}: ${String(error)}`);
     }
