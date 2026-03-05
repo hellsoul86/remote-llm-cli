@@ -67,6 +67,7 @@ import { useComposerAutoResize } from "./features/session/use-composer-autosize"
 import { useCommandPaletteController } from "./features/session/use-command-palette";
 import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
 import { useSessionAlerts } from "./features/session/use-session-alerts";
+import { useSessionEventCursor } from "./features/session/use-session-event-cursor";
 import { useSessionStreamHealth } from "./features/session/use-session-stream-health";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import {
@@ -81,10 +82,8 @@ import {
 import {
   clearSessionRuntimePersistence,
   loadPersistedCompletedRuns,
-  loadPersistedSessionEventCursors,
   loadSessionTreePrefs,
   persistCompletedRuns,
-  persistSessionEventCursors,
   persistSessionTreePrefs,
 } from "./features/session/persistence";
 import {
@@ -398,6 +397,12 @@ export function App() {
     notifySessionDone,
   } = useSessionAlerts();
   const {
+    sessionEventCursorRef,
+    setSessionEventCursor,
+    deleteSessionEventCursor,
+    pruneSessionEventCursors,
+  } = useSessionEventCursor();
+  const {
     sessionStreamHealthByID,
     updateSessionStreamHealth,
     clearSessionStreamHealth,
@@ -439,9 +444,6 @@ export function App() {
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
   const jobNoTextFinalizeRetriesRef = useRef<Map<string, number>>(new Map());
-  const sessionEventCursorRef = useRef<Map<string, number>>(
-    loadPersistedSessionEventCursors(),
-  );
   const sessionStreamStateRef = useRef<
     Map<
       string,
@@ -830,21 +832,13 @@ export function App() {
         }
       }
     }
-    let cursorChanged = false;
-    for (const sessionID of Array.from(sessionEventCursorRef.current.keys())) {
-      if (validSessionIDs.has(sessionID)) continue;
-      sessionEventCursorRef.current.delete(sessionID);
-      cursorChanged = true;
-    }
+    pruneSessionEventCursors(validSessionIDs);
     for (const sessionID of Array.from(sessionEventQueueRef.current.keys())) {
       if (validSessionIDs.has(sessionID)) continue;
       sessionEventQueueRef.current.delete(sessionID);
     }
-    if (cursorChanged) {
-      persistSessionEventCursors(sessionEventCursorRef.current);
-    }
     runningSessionIDsRef.current = running;
-  }, [workspaces]);
+  }, [workspaces, pruneSessionEventCursors]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -1352,22 +1346,6 @@ export function App() {
     trimCompletedRunsStore();
     persistCompletedRuns(completedJobsRef.current);
     return true;
-  }
-
-  function setSessionEventCursor(sessionID: string, cursor: number) {
-    const normalizedSessionID = sessionID.trim();
-    if (!normalizedSessionID || !Number.isFinite(cursor) || cursor <= 0) return;
-    const current = sessionEventCursorRef.current.get(normalizedSessionID) ?? 0;
-    if (cursor <= current) return;
-    sessionEventCursorRef.current.set(normalizedSessionID, cursor);
-    persistSessionEventCursors(sessionEventCursorRef.current);
-  }
-
-  function deleteSessionEventCursor(sessionID: string) {
-    const normalizedSessionID = sessionID.trim();
-    if (!normalizedSessionID) return;
-    if (!sessionEventCursorRef.current.delete(normalizedSessionID)) return;
-    persistSessionEventCursors(sessionEventCursorRef.current);
   }
 
   function sessionActiveRunID(sessionID: string): string {
