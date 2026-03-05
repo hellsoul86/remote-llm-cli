@@ -17,7 +17,6 @@ import {
   codexPlatformMCP,
   discoverCodexSessions,
   discoverCodexModels,
-  deleteHost,
   forkCodexV2Session,
   getMetrics,
   getRunJob,
@@ -31,7 +30,6 @@ import {
   listRuns,
   listRuntimes,
   listSessions,
-  probeHost,
   startCodexV2Session,
   startCodexV2Turn,
   uploadImage,
@@ -71,6 +69,7 @@ import {
   buildDiscoveredProjects,
   buildProjectsFromRecords,
 } from "./features/session/project-sync";
+import { createHostActions } from "./features/session/host-actions";
 import { createProjectActions } from "./features/session/project-actions";
 import {
   buildSessionCommandPaletteActions,
@@ -2501,138 +2500,26 @@ export function App() {
     }
   }
 
-  async function onAddHost(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (authPhase !== "ready" || !token.trim()) return;
-
-    const mode = hostForm.connectionMode ?? "ssh";
-    if (!hostForm.name.trim() || (mode === "ssh" && !hostForm.host.trim())) {
-      const validationMessage =
-        mode === "ssh"
-          ? "name and host are required for ssh mode."
-          : "name is required.";
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Host Validation",
-        body: validationMessage,
-      });
-      return;
-    }
-
-    const hostName = hostForm.name.trim();
-    const editing = editingHostID;
-
-    setAddingHost(true);
-    try {
-      await upsertHost(token, {
-        id: editing || undefined,
-        name: hostName,
-        connection_mode: mode,
-        host: hostForm.host.trim() || undefined,
-        user: hostForm.user.trim() || undefined,
-        workspace: hostForm.workspace.trim() || undefined,
-      });
-      setHostForm({
-        name: "",
-        connectionMode: "ssh",
-        host: "",
-        user: "",
-        workspace: "",
-      });
-      setEditingHostID("");
-      await loadWorkspace(token);
-      addTimelineEntry({
-        kind: "system",
-        state: "success",
-        title: editing ? "Host Updated" : "Host Saved",
-        body: `${editing ? "Updated" : "Saved"} host ${hostName}.`,
-      });
-      setOpsNotice(`${editing ? "Updated" : "Saved"} host ${hostName}.`);
-    } catch (error) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Host Save Failed",
-        body: String(error),
-      });
-    } finally {
-      setAddingHost(false);
-    }
-  }
-
-  function onStartEditHost(host: Host) {
-    setEditingHostID(host.id);
-    setHostForm({
-      name: host.name,
-      connectionMode: host.connection_mode === "local" ? "local" : "ssh",
-      host: host.host,
-      user: host.user ?? "",
-      workspace: host.workspace ?? "",
-    });
-    setOpsNotice(`Editing host ${host.name}.`);
-  }
-
-  function onCancelHostEdit() {
-    setEditingHostID("");
-    setHostForm({
-      name: "",
-      connectionMode: "ssh",
-      host: "",
-      user: "",
-      workspace: "",
-    });
-    setOpsNotice("Canceled host edit.");
-  }
-
-  async function onProbeHost(host: Host) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    setOpsHostBusyID(host.id);
-    setOpsNotice(`Probing ${host.name}...`);
-    try {
-      const result = await probeHost(token, host.id, { preflight: true });
-      const ssh = result.ssh?.ok ? "ok" : "fail";
-      const codex = result.codex?.ok ? "ok" : "fail";
-      const login = result.codex_login?.ok ? "ok" : "fail";
-      const sshErr = result.ssh?.error ? ` ssh_error=${result.ssh.error}` : "";
-      const codexErr = result.codex?.error
-        ? ` codex_error=${result.codex.error}`
-        : "";
-      const loginErr = result.codex_login?.error
-        ? ` login_error=${result.codex_login.error}`
-        : "";
-      setOpsNotice(
-        `Probe ${host.name}: ssh=${ssh} codex=${codex} login=${login}${sshErr}${codexErr}${loginErr}`,
-      );
-    } catch (error) {
-      setOpsNotice(`Probe failed for ${host.name}: ${String(error)}`);
-    } finally {
-      setOpsHostBusyID("");
-    }
-  }
-
-  async function onDeleteHost(host: Host) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (typeof window !== "undefined") {
-      const confirmed = window.confirm(`Delete host '${host.name}'?`);
-      if (!confirmed) return;
-    }
-
-    setOpsHostBusyID(host.id);
-    try {
-      await deleteHost(token, host.id);
-      setSelectedHostIDs((prev) => prev.filter((id) => id !== host.id));
-      if (editingHostID === host.id) {
-        onCancelHostEdit();
-      }
-      await loadWorkspace(token);
-      setOpsNotice(`Deleted host ${host.name}.`);
-    } catch (error) {
-      setOpsNotice(`Delete failed for ${host.name}: ${String(error)}`);
-    } finally {
-      setOpsHostBusyID("");
-    }
-  }
+  const {
+    onAddHost,
+    onStartEditHost,
+    onCancelHostEdit,
+    onProbeHost,
+    onDeleteHost,
+  } = createHostActions({
+    authPhase,
+    token,
+    hostForm,
+    editingHostID,
+    setHostForm,
+    setEditingHostID,
+    setAddingHost,
+    setOpsHostBusyID,
+    setOpsNotice,
+    setSelectedHostIDs,
+    addTimelineEntry,
+    loadWorkspace,
+  });
 
   async function onCancelJob(job: RunJobRecord) {
     if (authPhase !== "ready" || !token.trim()) return;
