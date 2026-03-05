@@ -20,6 +20,7 @@ import {
 import { CommandPalette } from "./features/session/components/CommandPalette";
 import { SessionComposer } from "./features/session/components/SessionComposer";
 import { SessionHeader } from "./features/session/components/SessionHeader";
+import { OpsActiveJobPanel } from "./features/session/components/OpsActiveJobPanel";
 import { OpsCodexPlatformPanel } from "./features/session/components/OpsCodexPlatformPanel";
 import { SessionSidebar } from "./features/session/components/SessionSidebar";
 import { SessionTimeline } from "./features/session/components/SessionTimeline";
@@ -92,7 +93,6 @@ import type {
 } from "./features/session/stream-types";
 import {
   formatClock,
-  formatDateTime,
   isJobActive,
   lastUserPromptFromTimeline,
 } from "./features/session/runtime-utils";
@@ -1718,36 +1718,11 @@ export function App() {
               platformCloudResult={platformCloudResult}
             />
 
-            <section className="inspect-block">
-              <h3>Active Job</h3>
-              {activeJob ? (
-                <div className="job-card">
-                  <div className="job-head">
-                    <strong>{activeJob.id}</strong>
-                    <span className={`tone-${statusTone(activeJob.status)}`}>
-                      {activeJob.status}
-                    </span>
-                  </div>
-                  <p>runtime={activeJob.runtime}</p>
-                  <p>thread={activeJobThreadID}</p>
-                  <p>queued={formatDateTime(activeJob.queued_at)}</p>
-                  <p>
-                    hosts total={activeJob.total_hosts ?? 0} ok=
-                    {activeJob.succeeded_hosts ?? 0} failed=
-                    {activeJob.failed_hosts ?? 0}
-                  </p>
-                  <div className="progress-track" aria-label="job progress">
-                    <span style={{ width: `${activeProgress}%` }} />
-                  </div>
-                  <p>http={activeJob.result_status ?? "n/a"}</p>
-                  {activeJob.error ? (
-                    <p className="tone-err">{activeJob.error}</p>
-                  ) : null}
-                </div>
-              ) : (
-                <p className="pane-subtle-light">No active async job.</p>
-              )}
-            </section>
+            <OpsActiveJobPanel
+              activeJob={activeJob}
+              activeJobThreadID={activeJobThreadID}
+              activeProgress={activeProgress}
+            />
 
             <section className="inspect-block">
               <h3>Recent Jobs</h3>
