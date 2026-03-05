@@ -1334,6 +1334,7 @@ export function App() {
       }
     >
   >(new Map());
+  const sessionEventQueueRef = useRef<Map<string, Promise<void>>>(new Map());
   const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(
     new Map(),
   );
@@ -1929,6 +1930,10 @@ export function App() {
       if (validSessionIDs.has(sessionID)) continue;
       sessionEventCursorRef.current.delete(sessionID);
       cursorChanged = true;
+    }
+    for (const sessionID of Array.from(sessionEventQueueRef.current.keys())) {
+      if (validSessionIDs.has(sessionID)) continue;
+      sessionEventQueueRef.current.delete(sessionID);
     }
     if (cursorChanged) {
       persistSessionEventCursors(sessionEventCursorRef.current);
@@ -2952,6 +2957,7 @@ export function App() {
     if (!state) return;
     state.controller.abort();
     sessionStreamStateRef.current.delete(sessionID);
+    sessionEventQueueRef.current.delete(sessionID);
     if (!options?.preserveRunState) {
       sessionRunStateRef.current.delete(sessionID);
     }
@@ -2965,6 +2971,7 @@ export function App() {
       state.controller.abort();
     }
     sessionStreamStateRef.current.clear();
+    sessionEventQueueRef.current.clear();
     sessionRunStateRef.current.clear();
     setSessionStreamHealthByID({});
   }
@@ -3357,9 +3364,22 @@ export function App() {
     const surfaceByReplay = !state.suppressReplaySurface;
     const surfaceCompletions = state.ready || surfaceByReplay;
     const surfaceLifecycle = state.ready || surfaceByReplay;
-    void handleSessionEventRecord(sessionID, event, {
-      surfaceCompletions,
-      surfaceLifecycle,
+    const previousQueue =
+      sessionEventQueueRef.current.get(sessionID) ?? Promise.resolve();
+    const nextQueue = previousQueue
+      .catch(() => undefined)
+      .then(() =>
+        handleSessionEventRecord(sessionID, event, {
+          surfaceCompletions,
+          surfaceLifecycle,
+        }),
+      )
+      .catch(() => undefined);
+    sessionEventQueueRef.current.set(sessionID, nextQueue);
+    void nextQueue.finally(() => {
+      const currentQueue = sessionEventQueueRef.current.get(sessionID);
+      if (currentQueue !== nextQueue) return;
+      sessionEventQueueRef.current.delete(sessionID);
     });
   }
 
@@ -3448,6 +3468,7 @@ export function App() {
       const active = sessionStreamStateRef.current.get(trimmedSessionID);
       if (active && active.controller === controller) {
         sessionStreamStateRef.current.delete(trimmedSessionID);
+        sessionEventQueueRef.current.delete(trimmedSessionID);
         updateSessionStreamHealth(trimmedSessionID, "offline", {
           throttleMS: 0,
         });
