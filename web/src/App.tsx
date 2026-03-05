@@ -40,7 +40,6 @@ import {
   upsertHost,
   upsertProject,
   type Host,
-  type ProjectRecord,
   type SessionEventRecord,
   type SessionRecord,
   type SessionStreamFrame,
@@ -71,6 +70,10 @@ import { useComposerAutoResize } from "./features/session/use-composer-autosize"
 import { useCommandPaletteController } from "./features/session/use-command-palette";
 import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
+import {
+  buildDiscoveredProjects,
+  buildProjectsFromRecords,
+} from "./features/session/project-sync";
 import {
   buildSessionCommandPaletteActions,
   normalizeSearchText,
@@ -1915,232 +1918,6 @@ export function App() {
     return listHosts(authToken);
   }
 
-  function buildDiscoveredProjects(
-    sourceHosts: Host[],
-    targets: Array<{
-      host: Host;
-      ok: boolean;
-      sessions?: Array<{
-        session_id: string;
-        cwd?: string;
-        thread_name?: string;
-        updated_at: string;
-      }>;
-    }>,
-  ) {
-    const hostMap = new Map<string, Host>();
-    for (const host of sourceHosts) hostMap.set(host.id, host);
-
-    const grouped = new Map<
-      string,
-      Map<string, Array<{ id: string; title: string; updatedAt?: string }>>
-    >();
-    for (const target of targets) {
-      const hostID = target.host?.id?.trim();
-      if (!hostID) continue;
-      if (!grouped.has(hostID)) grouped.set(hostID, new Map());
-      const pathMap = grouped.get(hostID)!;
-      const sessions = Array.isArray(target.sessions) ? target.sessions : [];
-      for (const sessionItem of sessions) {
-        const projectPath =
-          sessionItem.cwd?.trim() ||
-          target.host.workspace?.trim() ||
-          hostMap.get(hostID)?.workspace?.trim() ||
-          DEFAULT_WORKSPACE_PATH;
-        if (!pathMap.has(projectPath)) pathMap.set(projectPath, []);
-        pathMap.get(projectPath)!.push({
-          id: sessionItem.session_id,
-          title: sessionItem.thread_name?.trim() || sessionItem.session_id,
-          updatedAt: sessionItem.updated_at,
-        });
-      }
-      if (sessions.length === 0) {
-        const fallbackPath =
-          target.host.workspace?.trim() ||
-          hostMap.get(hostID)?.workspace?.trim();
-        if (fallbackPath && !pathMap.has(fallbackPath)) {
-          pathMap.set(fallbackPath, []);
-        }
-      }
-    }
-
-    const projects: Array<{
-      hostID: string;
-      hostName: string;
-      path: string;
-      title: string;
-      sessions: Array<{ id: string; title: string; updatedAt?: string }>;
-    }> = [];
-    for (const [hostID, pathMap] of grouped.entries()) {
-      const host = hostMap.get(hostID);
-      const hostName = host?.name ?? hostID;
-      for (const [projectPath, sessions] of pathMap.entries()) {
-        const orderedSessions = [...sessions].sort((a, b) => {
-          const left = a.updatedAt ?? "";
-          const right = b.updatedAt ?? "";
-          if (left === right) return a.title.localeCompare(b.title);
-          return left > right ? -1 : 1;
-        });
-        projects.push({
-          hostID,
-          hostName,
-          path: projectPath,
-          title: resolveProjectTitle(projectPath),
-          sessions: orderedSessions,
-        });
-      }
-    }
-
-    if (projects.length > 0) return projects;
-
-    // Fallback: no discoverable sessions yet, still expose one default project per host.
-    return sourceHosts.map((host) => ({
-      hostID: host.id,
-      hostName: host.name,
-      path: host.workspace?.trim() || DEFAULT_WORKSPACE_PATH,
-      title: resolveProjectTitle(host.workspace?.trim() || DEFAULT_WORKSPACE_PATH),
-      sessions: [],
-    }));
-  }
-
-  function buildProjectsFromRecords(
-    sourceHosts: Host[],
-    projects: ProjectRecord[],
-    sessions: SessionRecord[],
-  ) {
-    const hostMap = new Map<string, Host>();
-    for (const host of sourceHosts) {
-      hostMap.set(host.id, host);
-    }
-
-    const projectKeyByID = new Map<string, string>();
-    const grouped = new Map<
-      string,
-      {
-        projectID: string;
-        hostID: string;
-        hostName: string;
-        path: string;
-        title: string;
-        sessions: Array<{ id: string; title: string; updatedAt?: string }>;
-      }
-    >();
-    const sessionSeenByProjectKey = new Map<string, Set<string>>();
-
-    const ensureProjectBucket = (
-      hostIDRaw: string,
-      hostNameRaw: string,
-      pathRaw: string,
-      titleRaw?: string,
-      projectIDRaw?: string,
-    ) => {
-      const hostID = hostIDRaw.trim();
-      const path = pathRaw.trim();
-      if (!hostID || !path) return "";
-      if (sourceHosts.length > 0 && !hostMap.has(hostID)) return "";
-      const key = `${hostID}::${path}`;
-      const resolvedTitle = resolveProjectTitle(path, titleRaw);
-      const projectID = projectIDRaw?.trim() ?? "";
-      if (!grouped.has(key)) {
-        const host = hostMap.get(hostID);
-        grouped.set(key, {
-          projectID,
-          hostID,
-          hostName: hostNameRaw.trim() || host?.name || hostID,
-          path,
-          title: resolvedTitle,
-          sessions: [],
-        });
-      } else if (titleRaw?.trim()) {
-        const current = grouped.get(key);
-        if (current && current.title.trim() !== titleRaw.trim()) {
-          current.title = resolvedTitle;
-        }
-        if (current && !current.projectID && projectID) {
-          current.projectID = projectID;
-        }
-      } else {
-        const current = grouped.get(key);
-        if (current && !current.projectID && projectID) {
-          current.projectID = projectID;
-        }
-      }
-      if (!sessionSeenByProjectKey.has(key)) {
-        sessionSeenByProjectKey.set(key, new Set<string>());
-      }
-      return key;
-    };
-
-    for (const project of projects) {
-      const key = ensureProjectBucket(
-        project.host_id,
-        project.host_name ?? "",
-        project.path,
-        project.title,
-        project.id,
-      );
-      if (!key) continue;
-      projectKeyByID.set(project.id, key);
-    }
-
-    for (const sessionRecord of sessions) {
-      const sessionID = sessionRecord.id.trim();
-      if (!sessionID) continue;
-      const fromProjectID =
-        projectKeyByID.get(sessionRecord.project_id.trim()) ?? "";
-      const fallbackHostID = sessionRecord.host_id.trim();
-      const fallbackPath = sessionRecord.path.trim();
-      const fallbackHostName =
-        hostMap.get(fallbackHostID)?.name ?? fallbackHostID;
-      const key =
-        fromProjectID ||
-        ensureProjectBucket(fallbackHostID, fallbackHostName, fallbackPath);
-      if (!key) continue;
-      const bucket = grouped.get(key);
-      const seen = sessionSeenByProjectKey.get(key);
-      if (!bucket || !seen || seen.has(sessionID)) continue;
-      seen.add(sessionID);
-      bucket.sessions.push({
-        id: sessionID,
-        title: sessionRecord.title?.trim() || sessionID,
-        updatedAt: sessionRecord.updated_at,
-      });
-    }
-
-    for (const bucket of grouped.values()) {
-      bucket.sessions.sort((a, b) => {
-        const left = a.updatedAt ?? "";
-        const right = b.updatedAt ?? "";
-        if (left === right) return a.title.localeCompare(b.title);
-        return left > right ? -1 : 1;
-      });
-    }
-
-    const byHost = new Set<string>();
-    for (const bucket of grouped.values()) {
-      byHost.add(bucket.hostID);
-    }
-    for (const host of sourceHosts) {
-      if (byHost.has(host.id)) continue;
-      ensureProjectBucket(
-        host.id,
-        host.name,
-        host.workspace?.trim() || DEFAULT_WORKSPACE_PATH,
-        "",
-        "",
-      );
-    }
-
-    return Array.from(grouped.values()).map((project) => ({
-      id: project.projectID || undefined,
-      hostID: project.hostID,
-      hostName: project.hostName,
-      path: project.path,
-      title: project.title,
-      sessions: project.sessions,
-    }));
-  }
-
   async function refreshProjectsFromDiscovery(
     authToken: string,
     sourceHosts: Host[],
@@ -2149,9 +1926,12 @@ export function App() {
   ) {
     if (!discoverEnabled) {
       setSourceProjectIDs([]);
-      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []), {
+      syncProjectsFromDiscovery(
+        buildDiscoveredProjects(sourceHosts, [], DEFAULT_WORKSPACE_PATH),
+        {
         source: "discovery",
-      });
+        },
+      );
       return;
     }
     try {
@@ -2162,15 +1942,22 @@ export function App() {
       });
       setSourceProjectIDs([]);
       syncProjectsFromDiscovery(
-        buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []),
+        buildDiscoveredProjects(
+          sourceHosts,
+          discovered.body.targets ?? [],
+          DEFAULT_WORKSPACE_PATH,
+        ),
         { source: "discovery" },
       );
     } catch {
       setSourceProjectIDs([]);
       if (!preserveOnError) {
-        syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []), {
-          source: "discovery",
-        });
+        syncProjectsFromDiscovery(
+          buildDiscoveredProjects(sourceHosts, [], DEFAULT_WORKSPACE_PATH),
+          {
+            source: "discovery",
+          },
+        );
       }
     }
   }
@@ -2233,7 +2020,12 @@ export function App() {
           .map((project) => project.id.trim())
           .filter((id) => id !== ""),
       );
-      const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
+      const built = buildProjectsFromRecords(
+        sourceHosts,
+        projects,
+        sessions,
+        DEFAULT_WORKSPACE_PATH,
+      );
       const hasSessionItems = built.some((project) => project.sessions.length > 0);
       if (!hasSessionItems && discoverEnabled) {
         throw new Error("empty session snapshot");
