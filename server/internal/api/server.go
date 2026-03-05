@@ -257,8 +257,12 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
 		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing bearer token"})
-			return
+			queryToken := strings.TrimSpace(r.URL.Query().Get("access_token"))
+			if queryToken == "" {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing bearer token"})
+				return
+			}
+			token = queryToken
 		}
 		prefix, secret, ok := accesskey.ParseFullKey(token)
 		if !ok {
