@@ -67,7 +67,10 @@ import { SessionHeader } from "./features/session/components/SessionHeader";
 import { SessionSidebar } from "./features/session/components/SessionSidebar";
 import { SessionTimeline } from "./features/session/components/SessionTimeline";
 import { TokenGate } from "./features/session/components/TokenGate";
+import { useComposerAutoResize } from "./features/session/use-composer-autosize";
 import { useCommandPaletteController } from "./features/session/use-command-palette";
+import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
+import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import {
   buildSessionCommandPaletteActions,
   normalizeSearchText,
@@ -957,17 +960,6 @@ export function App() {
   const [treeCursorSessionID, setTreeCursorSessionID] = useState("");
   const [expandedMessageIDs, setExpandedMessageIDs] = useState<string[]>([]);
   const [copiedCodeKey, setCopiedCodeKey] = useState("");
-  const [timelineUnreadCount, setTimelineUnreadCount] = useState(0);
-
-  const timelineViewportRef = useRef<HTMLElement | null>(null);
-  const timelineBottomRef = useRef<HTMLDivElement | null>(null);
-  const timelineStickToBottomRef = useRef(true);
-  const timelineForceStickRef = useRef(false);
-  const timelineLastSignatureRef = useRef("");
-  const timelineLastCountRef = useRef(0);
-  const timelineLastTailIDRef = useRef("");
-  const timelineLastTailStateRef = useRef("");
-  const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
@@ -1256,6 +1248,38 @@ export function App() {
       .slice(0, 48);
   }, [commandPaletteActions, commandPaletteQuery]);
   const activeTimelineTail = activeTimeline[activeTimeline.length - 1];
+  const {
+    timelineUnreadCount,
+    timelineViewportRef,
+    timelineBottomRef,
+    onTimelineScroll,
+    jumpTimelineToLatest,
+    forceStickToBottom,
+  } = useTimelineScrollController({
+    activeThreadID,
+    timelineLength: activeTimeline.length,
+    timelineTailID: activeTimelineTail?.id ?? "",
+    timelineTailState: activeTimelineTail?.state ?? "",
+    timelineTailBody: activeTimelineTail?.body ?? "",
+    stickGapPx: TIMELINE_STICK_GAP_PX,
+    jumpCountCap: TIMELINE_JUMP_COUNT_CAP,
+  });
+  useComposerAutoResize({
+    inputRef: promptInputRef,
+    value: activeDraft,
+    activeThreadID,
+    minHeight: COMPOSER_MIN_HEIGHT,
+    maxHeight: COMPOSER_MAX_HEIGHT,
+  });
+  useGlobalShortcuts({
+    authReady: authPhase === "ready",
+    appMode,
+    commandPaletteOpen,
+    onOpenCommandPalette: () => openCommandPalette(),
+    onCloseCommandPalette: () => closeCommandPalette(),
+    onCreateThreadAndFocus: createThreadAndFocus,
+    onSwitchThreadByOffset: switchThreadByOffset,
+  });
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -3154,112 +3178,6 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const node = timelineViewportRef.current;
-    if (!node) return;
-    const threadChanged = lastTimelineThreadIDRef.current !== activeThreadID;
-    const nextSignature = [
-      activeThreadID,
-      String(activeTimeline.length),
-      activeTimelineTail?.id ?? "",
-      activeTimelineTail?.state ?? "",
-      String(activeTimelineTail?.body?.length ?? 0),
-    ].join("|");
-    const previousSignature = timelineLastSignatureRef.current;
-    const previousCount = timelineLastCountRef.current;
-    const previousTailID = timelineLastTailIDRef.current;
-    const previousTailState = timelineLastTailStateRef.current;
-    const nextTailID = activeTimelineTail?.id ?? "";
-    const nextTailState = activeTimelineTail?.state ?? "";
-    timelineLastCountRef.current = activeTimeline.length;
-    timelineLastTailIDRef.current = nextTailID;
-    timelineLastTailStateRef.current = nextTailState;
-    if (threadChanged) {
-      lastTimelineThreadIDRef.current = activeThreadID;
-      timelineForceStickRef.current = true;
-      timelineLastSignatureRef.current = nextSignature;
-      timelineLastCountRef.current = activeTimeline.length;
-      timelineLastTailIDRef.current = nextTailID;
-      timelineLastTailStateRef.current = nextTailState;
-      setTimelineUnreadCount(0);
-    }
-    const shouldStick =
-      timelineForceStickRef.current ||
-      timelineStickToBottomRef.current ||
-      threadChanged;
-    const timelineChanged =
-      !threadChanged && previousSignature !== nextSignature;
-    if (!shouldStick && timelineChanged) {
-      const structuralChange =
-        previousCount !== activeTimeline.length ||
-        previousTailID !== nextTailID ||
-        previousTailState !== nextTailState;
-      timelineLastSignatureRef.current = nextSignature;
-      if (structuralChange) {
-        setTimelineUnreadCount((count) =>
-          Math.min(TIMELINE_JUMP_COUNT_CAP, count + 1),
-        );
-      }
-      return;
-    }
-    timelineLastSignatureRef.current = nextSignature;
-    if (!shouldStick) return;
-    const frame = window.requestAnimationFrame(() => {
-      if (timelineBottomRef.current) {
-        timelineBottomRef.current.scrollIntoView({ block: "end" });
-      } else {
-        node.scrollTop = node.scrollHeight;
-      }
-      timelineForceStickRef.current = false;
-      setTimelineUnreadCount(0);
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
-  }, [
-    activeThreadID,
-    activeTimeline.length,
-    activeTimelineTail?.body,
-    activeTimelineTail?.state,
-  ]);
-
-  function onTimelineScroll() {
-    const node = timelineViewportRef.current;
-    if (!node) return;
-    const gap = Math.abs(
-      node.scrollHeight - node.clientHeight - node.scrollTop,
-    );
-    const pinned = gap <= TIMELINE_STICK_GAP_PX;
-    timelineStickToBottomRef.current = pinned;
-    if (pinned) {
-      setTimelineUnreadCount(0);
-    }
-  }
-
-  function jumpTimelineToLatest() {
-    const node = timelineViewportRef.current;
-    if (!node) return;
-    timelineForceStickRef.current = true;
-    timelineStickToBottomRef.current = true;
-    setTimelineUnreadCount(0);
-    if (timelineBottomRef.current) {
-      timelineBottomRef.current.scrollIntoView({ block: "end" });
-      return;
-    }
-    node.scrollTop = node.scrollHeight;
-  }
-
-  useEffect(() => {
-    const node = promptInputRef.current;
-    if (!node) return;
-    node.style.height = "0px";
-    const nextHeight = Math.max(
-      COMPOSER_MIN_HEIGHT,
-      Math.min(COMPOSER_MAX_HEIGHT, node.scrollHeight),
-    );
-    node.style.height = `${nextHeight}px`;
-  }, [activeThreadID, activeDraft]);
-
-  useEffect(() => {
     if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
     const activeRunID = activeThread?.activeJobID?.trim() ?? "";
     if (!activeRunID || !knownJobIDSet.has(activeRunID)) {
@@ -3277,66 +3195,6 @@ export function App() {
         setActiveJob(null);
       });
   }, [appMode, authPhase, token, activeThread?.id, activeThread?.activeJobID, knownJobIDSet]);
-
-  useEffect(() => {
-    if (authPhase !== "ready") return;
-
-    const handleGlobalKeydown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        if (commandPaletteOpen) {
-          closeCommandPalette();
-          return;
-        }
-        openCommandPalette();
-        return;
-      }
-
-      if (commandPaletteOpen) {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          closeCommandPalette();
-        }
-        return;
-      }
-
-      if (appMode !== "session") return;
-
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        event.shiftKey &&
-        event.key.toLowerCase() === "n"
-      ) {
-        event.preventDefault();
-        createThreadAndFocus();
-        return;
-      }
-
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        event.shiftKey &&
-        (event.key === "ArrowUp" || event.key === "[")
-      ) {
-        event.preventDefault();
-        switchThreadByOffset(-1);
-        return;
-      }
-
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        event.shiftKey &&
-        (event.key === "ArrowDown" || event.key === "]")
-      ) {
-        event.preventDefault();
-        switchThreadByOffset(1);
-      }
-    };
-
-    window.addEventListener("keydown", handleGlobalKeydown);
-    return () => {
-      window.removeEventListener("keydown", handleGlobalKeydown);
-    };
-  }, [authPhase, appMode, threads, activeThreadID, commandPaletteOpen]);
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim()) return;
@@ -4158,8 +4016,7 @@ export function App() {
       activeThread.id,
     );
     let targetThreadID = activeThread.id;
-    timelineForceStickRef.current = true;
-    timelineStickToBottomRef.current = true;
+    forceStickToBottom();
     updateThreadDraft(activeThread.id, "");
 
     const normalizedStringList = (values: string[]): string[] | undefined => {
