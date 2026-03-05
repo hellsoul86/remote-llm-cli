@@ -22,6 +22,7 @@ import { SessionComposer } from "./features/session/components/SessionComposer";
 import { SessionHeader } from "./features/session/components/SessionHeader";
 import { OpsActiveJobPanel } from "./features/session/components/OpsActiveJobPanel";
 import { OpsCodexPlatformPanel } from "./features/session/components/OpsCodexPlatformPanel";
+import { OpsRecentJobsPanel } from "./features/session/components/OpsRecentJobsPanel";
 import { SessionSidebar } from "./features/session/components/SessionSidebar";
 import { SessionTimeline } from "./features/session/components/SessionTimeline";
 import { TokenGate } from "./features/session/components/TokenGate";
@@ -97,7 +98,6 @@ import {
   lastUserPromptFromTimeline,
 } from "./features/session/runtime-utils";
 import {
-  statusTone,
   streamHealthCopy,
   streamHealthTone,
 } from "./features/session/view-helpers";
@@ -1724,86 +1724,18 @@ export function App() {
               activeProgress={activeProgress}
             />
 
-            <section className="inspect-block">
-              <h3>Recent Jobs</h3>
-              <div className="ops-filter-row">
-                <label>
-                  status
-                  <select
-                    value={opsJobStatusFilter}
-                    onChange={(event) =>
-                      setOpsJobStatusFilter(
-                        event.target.value as
-                          | "all"
-                          | "pending"
-                          | "running"
-                          | "succeeded"
-                          | "failed"
-                          | "canceled",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="pending">pending</option>
-                    <option value="running">running</option>
-                    <option value="succeeded">succeeded</option>
-                    <option value="failed">failed</option>
-                    <option value="canceled">canceled</option>
-                  </select>
-                </label>
-                <label>
-                  type
-                  <select
-                    value={opsJobTypeFilter}
-                    onChange={(event) =>
-                      setOpsJobTypeFilter(
-                        event.target.value as "all" | "run" | "sync",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="run">run</option>
-                    <option value="sync">sync</option>
-                  </select>
-                </label>
-              </div>
-              {filteredOpsJobs.length === 0 ? (
-                <p className="pane-subtle-light">No jobs yet.</p>
-              ) : (
-                <ul className="history-list">
-                  {filteredOpsJobs.slice(0, 8).map((job) => (
-                    <li key={job.id}>
-                      <div className="history-item-main">
-                        <button
-                          className="ghost"
-                          onClick={() => {
-                            setActiveJobID(job.id);
-                            setActiveJob(job);
-                          }}
-                        >
-                          {job.id}
-                        </button>
-                        <span className={`tone-${statusTone(job.status)}`}>
-                          {job.status}
-                        </span>
-                        <span>{job.type}</span>
-                      </div>
-                      <div className="history-item-actions">
-                        {isJobActive(job) ? (
-                          <button
-                            type="button"
-                            className="ghost danger-ghost"
-                            onClick={() => void onCancelJob(job)}
-                          >
-                            Cancel
-                          </button>
-                        ) : null}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+            <OpsRecentJobsPanel
+              opsJobStatusFilter={opsJobStatusFilter}
+              onOpsJobStatusFilterChange={setOpsJobStatusFilter}
+              opsJobTypeFilter={opsJobTypeFilter}
+              onOpsJobTypeFilterChange={setOpsJobTypeFilter}
+              filteredOpsJobs={filteredOpsJobs}
+              onSelectActiveJob={(job) => {
+                setActiveJobID(job.id);
+                setActiveJob(job);
+              }}
+              onCancelJob={onCancelJob}
+            />
 
             <section className="inspect-block">
               <h3>Recent Runs</h3>
