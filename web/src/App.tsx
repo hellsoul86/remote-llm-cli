@@ -12,9 +12,6 @@ import {
   API_BASE,
   archiveCodexV2Session,
   cancelRunJob,
-  codexPlatformCloud,
-  codexPlatformLogin,
-  codexPlatformMCP,
   discoverCodexSessions,
   discoverCodexModels,
   forkCodexV2Session,
@@ -70,6 +67,7 @@ import {
   buildProjectsFromRecords,
 } from "./features/session/project-sync";
 import { createHostActions } from "./features/session/host-actions";
+import { createPlatformActions } from "./features/session/platform-actions";
 import { createProjectActions } from "./features/session/project-actions";
 import {
   buildSessionCommandPaletteActions,
@@ -142,7 +140,6 @@ import {
   formatCodexPlatformResult,
   parseMessageSegments,
   shouldCollapseMessageBody,
-  splitCSVValues,
   statusTone,
   streamHealthCopy,
   streamHealthTone,
@@ -2354,151 +2351,34 @@ export function App() {
     await submitPromptForActiveThread(trimmed);
   }
 
-  async function onRunPlatformLogin(action: "status" | "login_device" | "logout") {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const hostID = platformHostID.trim();
-    if (!hostID) {
-      setPlatformNotice("Select a target host first.");
-      return;
-    }
-    setPlatformBusySection("login");
-    setPlatformNotice(`Running login ${action} on ${platformHost?.name ?? hostID}...`);
-    try {
-      const result = await codexPlatformLogin(token, {
-        host_id: hostID,
-        action,
-      });
-      setPlatformLoginResult(result);
-      setPlatformNotice(`Login ${action} finished on ${result.host.name}.`);
-    } catch (error) {
-      setPlatformNotice(String(error));
-    } finally {
-      setPlatformBusySection("");
-    }
-  }
-
-  async function onRunPlatformMCP() {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const hostID = platformHostID.trim();
-    if (!hostID) {
-      setPlatformNotice("Select a target host first.");
-      return;
-    }
-    const command = platformMCPCommand
-      .trim()
-      .split(/\s+/)
-      .filter((item) => item !== "");
-    const request: {
-      host_id: string;
-      action: CodexPlatformMCPAction;
-      name?: string;
-      url?: string;
-      command?: string[];
-      env?: string[];
-      bearer_token_env_var?: string;
-      scopes?: string[];
-    } = {
-      host_id: hostID,
-      action: platformMCPAction,
-    };
-    if (platformMCPName.trim()) {
-      request.name = platformMCPName.trim();
-    }
-    if (platformMCPURL.trim()) {
-      request.url = platformMCPURL.trim();
-    }
-    if (command.length > 0) {
-      request.command = command;
-    }
-    const envValues = splitCSVValues(platformMCPEnvCSV);
-    if (envValues.length > 0) {
-      request.env = envValues;
-    }
-    if (platformMCPBearerTokenEnvVar.trim()) {
-      request.bearer_token_env_var = platformMCPBearerTokenEnvVar.trim();
-    }
-    const scopeValues = splitCSVValues(platformMCPScopeCSV);
-    if (scopeValues.length > 0) {
-      request.scopes = scopeValues;
-    }
-
-    setPlatformBusySection("mcp");
-    setPlatformNotice(`Running mcp ${platformMCPAction} on ${platformHost?.name ?? hostID}...`);
-    try {
-      const result = await codexPlatformMCP(token, request);
-      setPlatformMCPResult(result);
-      setPlatformNotice(`MCP ${platformMCPAction} finished on ${result.host.name}.`);
-    } catch (error) {
-      setPlatformNotice(String(error));
-    } finally {
-      setPlatformBusySection("");
-    }
-  }
-
-  async function onRunPlatformCloud() {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const hostID = platformHostID.trim();
-    if (!hostID) {
-      setPlatformNotice("Select a target host first.");
-      return;
-    }
-    const attempts = Number.parseInt(platformCloudAttempts, 10);
-    const limit = Number.parseInt(platformCloudLimit, 10);
-    const attempt = Number.parseInt(platformCloudAttempt, 10);
-    const request: {
-      host_id: string;
-      action: CodexPlatformCloudAction;
-      task_id?: string;
-      env_id?: string;
-      query?: string;
-      attempts?: number;
-      branch?: string;
-      limit?: number;
-      cursor?: string;
-      attempt?: number;
-    } = {
-      host_id: hostID,
-      action: platformCloudAction,
-    };
-    if (platformCloudTaskID.trim()) {
-      request.task_id = platformCloudTaskID.trim();
-    }
-    if (platformCloudEnvID.trim()) {
-      request.env_id = platformCloudEnvID.trim();
-    }
-    if (platformCloudQuery.trim()) {
-      request.query = platformCloudQuery.trim();
-    }
-    if (Number.isFinite(attempts) && attempts > 0) {
-      request.attempts = attempts;
-    }
-    if (platformCloudBranch.trim()) {
-      request.branch = platformCloudBranch.trim();
-    }
-    if (Number.isFinite(limit) && limit > 0) {
-      request.limit = limit;
-    }
-    if (platformCloudCursor.trim()) {
-      request.cursor = platformCloudCursor.trim();
-    }
-    if (Number.isFinite(attempt) && attempt > 0) {
-      request.attempt = attempt;
-    }
-
-    setPlatformBusySection("cloud");
-    setPlatformNotice(`Running cloud ${platformCloudAction} on ${platformHost?.name ?? hostID}...`);
-    try {
-      const result = await codexPlatformCloud(token, request);
-      setPlatformCloudResult(result);
-      setPlatformNotice(
-        `Cloud ${platformCloudAction} finished on ${result.host.name}.`,
-      );
-    } catch (error) {
-      setPlatformNotice(String(error));
-    } finally {
-      setPlatformBusySection("");
-    }
-  }
+  const { onRunPlatformLogin, onRunPlatformMCP, onRunPlatformCloud } =
+    createPlatformActions({
+      authPhase,
+      token,
+      platformHostID,
+      platformHostName: platformHost?.name ?? "",
+      platformMCPAction,
+      platformMCPName,
+      platformMCPURL,
+      platformMCPCommand,
+      platformMCPEnvCSV,
+      platformMCPBearerTokenEnvVar,
+      platformMCPScopeCSV,
+      platformCloudAction,
+      platformCloudTaskID,
+      platformCloudEnvID,
+      platformCloudQuery,
+      platformCloudAttempts,
+      platformCloudBranch,
+      platformCloudLimit,
+      platformCloudCursor,
+      platformCloudAttempt,
+      setPlatformBusySection,
+      setPlatformNotice,
+      setPlatformLoginResult,
+      setPlatformMCPResult,
+      setPlatformCloudResult,
+    });
 
   const {
     onAddHost,
