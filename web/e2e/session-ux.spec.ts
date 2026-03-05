@@ -1371,8 +1371,8 @@ test("session stream completion keeps a single assistant reply", async ({
   await expect(assistantWithMarker).toHaveCount(1);
   await page.waitForTimeout(1800);
   await expect(assistantWithMarker).toHaveCount(1);
-  await expect(page.getByText("Response Started")).toBeVisible();
-  await expect(page.getByText("Server Completed")).toBeVisible();
+  await expect(page.getByText("Response Started")).toHaveCount(0);
+  await expect(page.getByText("Server Completed")).toHaveCount(0);
   await expect(page.getByText(/run=/)).toHaveCount(0);
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
@@ -1492,16 +1492,16 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
   await expect(
     page.locator(".message.message-assistant pre", { hasText: marker }),
   ).toHaveCount(1);
-  await expect(page.getByText("Response Started")).toHaveCount(1);
-  await expect(page.getByText("Server Completed")).toHaveCount(1);
+  await expect(page.getByText("Response Started")).toHaveCount(0);
+  await expect(page.getByText("Server Completed")).toHaveCount(0);
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(
     page.locator(".message.message-assistant pre", { hasText: marker }),
   ).toHaveCount(1);
-  await expect(page.getByText("Response Started")).toHaveCount(1);
-  await expect(page.getByText("Server Completed")).toHaveCount(1);
+  await expect(page.getByText("Response Started")).toHaveCount(0);
+  await expect(page.getByText("Server Completed")).toHaveCount(0);
   await expect.poll(
     () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
   ).toBe(true);

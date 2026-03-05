@@ -3106,35 +3106,12 @@ export function App() {
         const id = runID || `run_${Date.now()}`;
         ensureSessionRunState(sessionID, id);
         setThreadJobState(sessionID, id, "running");
-        if (surfaceLifecycle) {
-          addTimelineEntry(
-            {
-              kind: "system",
-              state: "running",
-              title: "Response Started",
-              body: "Assistant is working on your request.",
-            },
-            sessionID,
-          );
-        }
         if (sessionID === activeThreadIDRef.current) {
           setActiveJobID(id);
         }
         return;
       }
       case "target.started": {
-        if (surfaceLifecycle) {
-          const host = sessionEventHostLabel(payload);
-          addTimelineEntry(
-            {
-              kind: "system",
-              state: "running",
-              title: "Server Processing",
-              body: host,
-            },
-            sessionID,
-          );
-        }
         return;
       }
       case "assistant.delta": {
@@ -3204,38 +3181,12 @@ export function App() {
           typeof payload.error === "string" && payload.error.trim()
             ? ` error=${payload.error.trim()}`
             : "";
-        if (surfaceLifecycle) {
-          addTimelineEntry(
-            {
-              kind: "system",
-              state: status && status !== "ok" ? "error" : "success",
-              title:
-                status && status !== "ok" ? "Server Failed" : "Server Completed",
-              body:
-                status && status !== "ok"
-                  ? `${host} failed${codeText}${errorText}`
-                  : `${host} completed${codeText}`,
-            },
-            sessionID,
-          );
-        }
         if (status && status !== "ok") {
           state.failureHints.push(`${host} failed${codeText}${errorText}`);
         }
         return;
       }
       case "job.cancel_requested": {
-        if (surfaceLifecycle) {
-          addTimelineEntry(
-            {
-              kind: "system",
-              state: "running",
-              title: "Stopping",
-              body: "Stopping current response...",
-            },
-            sessionID,
-          );
-        }
         return;
       }
       case "run.failed":
