@@ -68,6 +68,11 @@ import { SessionSidebar } from "./features/session/components/SessionSidebar";
 import { SessionTimeline } from "./features/session/components/SessionTimeline";
 import { TokenGate } from "./features/session/components/TokenGate";
 import {
+  buildSessionCommandPaletteActions,
+  normalizeSearchText,
+  type CommandPaletteAction,
+} from "./features/session/command-palette";
+import {
   clearSessionRuntimePersistence,
   loadPersistedCompletedRuns,
   loadPersistedSessionEventCursors,
@@ -142,14 +147,6 @@ type CodexRuntimeCard = {
   title: string;
   body: string;
   state: TimelineState;
-};
-
-type CommandPaletteAction = {
-  id: string;
-  label: string;
-  detail: string;
-  searchText: string;
-  run: () => void;
 };
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
@@ -636,14 +633,6 @@ function dataTransferHasImage(data: DataTransfer | null | undefined): boolean {
   );
   if (itemTypes.some((type) => type.startsWith("image/"))) return true;
   return Boolean(firstImageFile(data.files));
-}
-
-function normalizeSearchText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 type MessageSegment =
@@ -1187,142 +1176,44 @@ export function App() {
   const hasSessionModelChoices = sessionModelChoices.length > 0;
   const commandPaletteActions = useMemo<CommandPaletteAction[]>(() => {
     if (appMode !== "session") return [];
-    const actions: CommandPaletteAction[] = [];
-    const pushAction = (
-      id: string,
-      label: string,
-      detail: string,
-      extraSearch: string,
-      run: () => void,
-    ) => {
-      actions.push({
-        id,
-        label,
-        detail,
-        searchText: normalizeSearchText(`${label} ${detail} ${extraSearch}`),
-        run,
-      });
-    };
-
-    pushAction(
-      "composer:focus",
-      "Focus Prompt",
-      "Cursor to composer",
-      "focus prompt composer input",
-      () => {
+    return buildSessionCommandPaletteActions({
+      activeWorkspaceTitle: activeWorkspace?.title?.trim() || "",
+      threadsLength: threads.length,
+      activeThreadID,
+      activeThread,
+      activeThreadBusy,
+      workspaces,
+      sessionModelChoices,
+      sessionModelDefault,
+      onFocusComposer: () => {
         promptInputRef.current?.focus();
       },
-    );
-    pushAction(
-      "session:new",
-      "New Session",
-      activeWorkspace?.title?.trim() || "current project",
-      "create add session",
-      () => {
-        createThreadAndFocus();
+      onCreateSession: createThreadAndFocus,
+      onSwitchPrevSession: () => {
+        switchThreadByOffset(-1);
       },
-    );
-    if (threads.length > 1) {
-      pushAction(
-        "session:previous",
-        "Previous Session",
-        "Switch to previous",
-        "session prev",
-        () => {
-          switchThreadByOffset(-1);
-        },
-      );
-      pushAction(
-        "session:next",
-        "Next Session",
-        "Switch to next",
-        "session next",
-        () => {
-          switchThreadByOffset(1);
-        },
-      );
-    }
-    if (activeThreadID.trim()) {
-      pushAction(
-        "session:fork",
-        "Fork Session",
-        activeThread?.title || "current session",
-        "fork branch duplicate session",
-        () => {
-          void onForkActiveSession();
-        },
-      );
-      pushAction(
-        "session:pin",
-        activeThread?.pinned ? "Unpin Session" : "Pin Session",
-        activeThread?.title || "current session",
-        "pin favorite",
-        () => {
-          if (!activeThread) return;
-          setThreadPinned(activeThread.id, !activeThread.pinned);
-        },
-      );
-      if (!activeThreadBusy) {
-        pushAction(
-          "session:archive",
-          "Archive Session",
-          activeThread?.title || "current session",
-          "delete remove archive",
-          () => {
-            void onArchiveActiveSession();
-          },
-        );
-      }
-      pushAction(
-        "session:reconnect",
-        "Reconnect Stream",
-        activeThread?.title || "current session",
-        "stream reconnect",
-        () => {
-          onReconnectActiveStream();
-        },
-      );
-    }
-
-    for (const workspace of workspaces) {
-      const projectTitle = resolveProjectTitle(workspace.path, workspace.title);
-      pushAction(
-        `project:${workspace.id}`,
-        `Open Project: ${projectTitle}`,
-        `${workspace.hostName} · ${workspace.path}`,
-        "project workspace directory",
-        () => {
-          const preferredSession = workspace.activeSessionID.trim();
-          if (preferredSession) {
-            activateThread(preferredSession);
-            focusComposerSoon();
-            return;
-          }
-          setActiveWorkspaceID(workspace.id);
+      onSwitchNextSession: () => {
+        switchThreadByOffset(1);
+      },
+      onForkSession: () => {
+        void onForkActiveSession();
+      },
+      onTogglePinSession: setThreadPinned,
+      onArchiveSession: () => {
+        void onArchiveActiveSession();
+      },
+      onReconnectStream: onReconnectActiveStream,
+      onOpenProject: (workspaceID, preferredSessionID) => {
+        if (preferredSessionID) {
+          activateThread(preferredSessionID);
           focusComposerSoon();
-        },
-      );
-    }
-
-    if (activeThread) {
-      for (const modelName of sessionModelChoices) {
-        const modelDetail =
-          modelName === sessionModelDefault
-            ? `${modelName} (default)`
-            : modelName;
-        pushAction(
-          `model:${modelName}`,
-          `Model: ${modelName}`,
-          modelDetail,
-          "model llm codex",
-          () => {
-            setThreadModel(activeThread.id, modelName);
-          },
-        );
-      }
-    }
-
-    return actions;
+          return;
+        }
+        setActiveWorkspaceID(workspaceID);
+        focusComposerSoon();
+      },
+      onSetModel: setThreadModel,
+    });
   }, [
     appMode,
     activeWorkspace?.title,
@@ -1336,7 +1227,6 @@ export function App() {
     setActiveWorkspaceID,
     setThreadModel,
     setThreadPinned,
-    forkThread,
     switchThreadByOffset,
     activateThread,
   ]);
