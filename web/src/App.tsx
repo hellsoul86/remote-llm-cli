@@ -4426,13 +4426,42 @@ export function App() {
 
   async function onArchiveProject(
     projectID: string,
+    projectHostID: string,
     projectPath: string,
     sessionCount: number,
   ) {
     if (authPhase !== "ready" || !token.trim()) return;
-    const targetProjectID = projectID.trim();
-    if (!targetProjectID) return;
-    if (!sourceProjectIDSet.has(targetProjectID)) {
+    const sourceProjectID = projectID.trim();
+    const sourceHostID = projectHostID.trim();
+    const sourcePath = projectPath.trim();
+    let targetProjectID = sourceProjectID;
+    let remoteProjectResolved = sourceProjectIDSet.has(targetProjectID);
+
+    if (!remoteProjectResolved) {
+      try {
+        const remoteProjects = await listProjects(token, 600, { runtime: "codex" });
+        setSourceProjectIDs(
+          remoteProjects
+            .map((project) => project.id.trim())
+            .filter((id) => id !== ""),
+        );
+        const matched =
+          remoteProjects.find((project) => project.id.trim() === sourceProjectID) ??
+          remoteProjects.find(
+            (project) =>
+              project.host_id.trim() === sourceHostID &&
+              project.path.trim() === sourcePath,
+          );
+        if (matched?.id?.trim()) {
+          targetProjectID = matched.id.trim();
+          remoteProjectResolved = true;
+        }
+      } catch {
+        // no-op: keep fallback to local-only message below
+      }
+    }
+
+    if (!remoteProjectResolved || !targetProjectID) {
       addTimelineEntry(
         {
           kind: "system",
@@ -4444,13 +4473,28 @@ export function App() {
       );
       return;
     }
-    if (sessionCount > 0) {
+
+    let resolvedSessionCount = sessionCount;
+    try {
+      const remoteSessions = await listSessions(token, 200, {
+        project_id: targetProjectID,
+        runtime: "codex",
+      });
+      resolvedSessionCount = remoteSessions.length;
+    } catch {
+      // fallback to current UI count
+    }
+
+    if (resolvedSessionCount > 0) {
       addTimelineEntry(
         {
           kind: "system",
           state: "error",
           title: "Archive Blocked",
-          body: "Project is not empty. Archive its sessions first.",
+          body:
+            resolvedSessionCount === 1
+              ? "Project still has 1 session. Archive it first."
+              : `Project still has ${resolvedSessionCount} sessions. Archive them first.`,
         },
         activeThreadID,
       );
@@ -5463,36 +5507,30 @@ export function App() {
                                     ? "Saving..."
                                     : "Rename"}
                                 </button>
-                                {sourceProjectIDSet.has(projectNode.id) ? (
-                                  <button
-                                    type="button"
-                                    className="ghost danger-ghost project-archive-btn"
-                                    disabled={
-                                      authPhase !== "ready" ||
-                                      !token.trim() ||
-                                      upsertingProjectID !== "" ||
-                                      deletingProjectID === projectNode.id ||
-                                      deletingProjectID !== "" ||
-                                      projectNode.sessions.length > 0
-                                    }
-                                    title={
-                                      projectNode.sessions.length > 0
-                                        ? "Archive sessions first"
-                                        : "Archive empty project"
-                                    }
-                                    onClick={() =>
-                                      void onArchiveProject(
-                                        projectNode.id,
-                                        projectNode.path,
-                                        projectNode.sessions.length,
-                                      )
-                                    }
-                                  >
-                                    {deletingProjectID === projectNode.id
-                                      ? "Archiving..."
-                                      : "Archive"}
-                                  </button>
-                                ) : null}
+                                <button
+                                  type="button"
+                                  className="ghost danger-ghost project-archive-btn"
+                                  disabled={
+                                    authPhase !== "ready" ||
+                                    !token.trim() ||
+                                    upsertingProjectID !== "" ||
+                                    deletingProjectID === projectNode.id ||
+                                    deletingProjectID !== ""
+                                  }
+                                  title="Archive project (empty only)"
+                                  onClick={() =>
+                                    void onArchiveProject(
+                                      projectNode.id,
+                                      projectNode.hostID,
+                                      projectNode.path,
+                                      projectNode.sessions.length,
+                                    )
+                                  }
+                                >
+                                  {deletingProjectID === projectNode.id
+                                    ? "Archiving..."
+                                    : "Archive"}
+                                </button>
                               </div>
                               <div className="project-session-list">
                                 {projectNode.sessions.length === 0 ? (
