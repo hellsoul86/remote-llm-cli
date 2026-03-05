@@ -61,6 +61,7 @@ async function mockSessionApi(
   const sessions = [
     {
       id: "session_cli_1",
+      project_id: "project_local_1__srv_work",
       title: "Session 1",
       updated_at: nowISO,
       created_at: "2026-03-03T00:00:00Z",
@@ -69,6 +70,7 @@ async function mockSessionApi(
       ? [
           {
             id: "session_cli_2",
+            project_id: "project_local_1__srv_work",
             title: "Session 2",
             updated_at: nowISO,
             created_at: "2026-03-03T00:00:00Z",
@@ -408,15 +410,63 @@ async function mockSessionApi(
       });
       return;
     }
+    if (method === "DELETE") {
+      const url = new URL(request.url());
+      const parts = url.pathname.split("/");
+      const projectID = decodeURIComponent(parts[parts.length - 1] ?? "").trim();
+      if (!projectID) {
+        await route.fulfill({
+          status: 400,
+          json: { error: "missing project id" },
+        });
+        return;
+      }
+      const existingIndex = projectRecords.findIndex((item) => item.id === projectID);
+      if (existingIndex < 0) {
+        await route.fulfill({
+          status: 404,
+          json: { error: "project not found" },
+        });
+        return;
+      }
+      const attachedSessionCount = sessions.filter(
+        (sessionItem) => sessionItem.project_id === projectID,
+      ).length;
+      if (attachedSessionCount > 0) {
+        await route.fulfill({
+          status: 409,
+          json: {
+            error: "project has active sessions",
+            session_count: attachedSessionCount,
+          },
+        });
+        return;
+      }
+      const [deleted] = projectRecords.splice(existingIndex, 1);
+      await route.fulfill({
+        status: 200,
+        json: {
+          deleted: true,
+          project: deleted,
+        },
+      });
+      return;
+    }
     await route.fallback();
   });
-  await page.route("**/v1/sessions?**", async (route) => {
+  await page.route("**/v1/sessions?**", async (route, request) => {
+    const url = new URL(request.url());
+    const projectIDFilter = (url.searchParams.get("project_id") ?? "").trim();
+    const filteredSessions = sessions.filter((sessionItem) => {
+      if (!projectIDFilter) return true;
+      return sessionItem.project_id === projectIDFilter;
+    });
     await route.fulfill({
       status: 200,
       json: {
-        sessions: sessions.map((sessionItem) => ({
+        sessions: filteredSessions.map((sessionItem) => ({
           id: sessionItem.id,
-          project_id: "project_local_1__srv_work",
+          project_id: sessionItem.project_id,
           host_id: "local_1",
           path: "/srv/work",
           runtime: "codex",
@@ -1578,6 +1628,40 @@ test("project create and rename use project name as primary label", async ({
 
   await expect(
     page.locator(".project-chip-main strong", { hasText: "Demo App v2" }),
+  ).toBeVisible();
+});
+
+test("archiving an empty project removes it from the project list", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PROJECT_ARCHIVE_${Date.now()}`;
+  await mockSessionApi(page, `project archive ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByRole("button", { name: "New Project" }).click();
+  await page.getByPlaceholder("/path/to/project").fill("/srv/archive-demo");
+  await page.getByPlaceholder("My Project").fill("Archive Demo");
+  await page.getByRole("button", { name: "Create" }).click();
+
+  const archiveDemoNode = page.locator(".project-node", {
+    has: page.locator(".project-chip-main strong", { hasText: "Archive Demo" }),
+  }).first();
+  await expect(archiveDemoNode).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    await dialog.accept();
+  });
+  await archiveDemoNode
+    .locator(".project-node-actions .project-archive-btn")
+    .nth(1)
+    .click();
+
+  await expect(
+    page.locator(".project-chip-main strong", { hasText: "Archive Demo" }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".project-chip-main strong", { hasText: "work" }),
   ).toBeVisible();
 });
 
