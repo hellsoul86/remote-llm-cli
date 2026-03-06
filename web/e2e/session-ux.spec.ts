@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { parseCodexAssistantTextFromStdout } from "../src/features/session/codex-parsing";
+import { normalizeSessionEvent } from "../src/features/session/session-events";
 
 type MockHarness = {
   runRequests: () => number;
@@ -1761,6 +1762,37 @@ test("codex parser plain-text fallback returns empty when only noise exists", as
   ].join("\n");
   expect(parseCodexAssistantTextFromStdout(stdout, true)).toBe("");
 });
+
+test("normalizeSessionEvent maps codexrpc agent message deltas into assistant stream chunks", async () => {
+  const normalized = normalizeSessionEvent({
+    seq: 10,
+    session_id: "session_live_1",
+    run_id: "turn_live_1",
+    type: "codexrpc.item.agentMessage.delta",
+    payload: {
+      host_id: "host_live_1",
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "session_live_1",
+        turnId: "turn_live_1",
+        itemId: "msg_live_1",
+        delta: "hello live stream",
+      },
+    },
+    created_at: "2026-03-06T15:40:49.373255118Z",
+  });
+
+  expect(normalized).not.toBeNull();
+  expect(normalized?.eventType).toBe("assistant.delta");
+
+  const chunk = String(normalized?.payload.chunk ?? "");
+  expect(chunk).toContain('"type":"item.agent_message.delta"');
+  expect(chunk).toContain('"delta":"hello live stream"');
+  expect(parseCodexAssistantTextFromStdout(chunk, false)).toBe(
+    "hello live stream",
+  );
+});
+
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");

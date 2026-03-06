@@ -100,6 +100,24 @@ export function normalizeSessionEvent(
       eventType = "run.failed";
     } else if (method === "turn/canceled" || method === "turn/interrupted") {
       eventType = "run.canceled";
+    } else if (method === "item/agentmessage/delta") {
+      const delta =
+        typeof payload.delta === "string" ? payload.delta : "";
+      if (!delta) return null;
+      payload = {
+        ...payload,
+        chunk: `${JSON.stringify({
+          type: "item.agent_message.delta",
+          delta,
+          itemId:
+            typeof payload.itemId === "string" ? payload.itemId : undefined,
+          turnId:
+            typeof payload.turnId === "string" ? payload.turnId : undefined,
+          threadId:
+            typeof payload.threadId === "string" ? payload.threadId : undefined,
+        })}\n`,
+      };
+      eventType = "assistant.delta";
     } else if (
       method === "item/started" ||
       method === "item/updated" ||
