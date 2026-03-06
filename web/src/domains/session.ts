@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { isLegacySessionNoiseEntry } from "./timeline-noise";
 
 export type TimelineKind = "user" | "assistant" | "system";
@@ -389,9 +389,41 @@ export function useSessionDomain() {
   const [activeJobThreadID, setActiveJobThreadID] = useState(initialThread?.id ?? "");
 
   const completedJobsRef = useRef<Set<string>>(new Set());
+  const workspacesRef = useRef(initial.workspaces);
+  const activeWorkspaceIDRef = useRef(initial.activeWorkspaceID);
+  const activeJobThreadIDRef = useRef(initialThread?.id ?? "");
   const entryCounter = useRef(0);
   const sessionCounterRef = useRef(Math.max(1, initial.workspaces.reduce((sum, workspace) => sum + workspace.sessions.length, 0)));
   const workspaceCounterRef = useRef(Math.max(1, initial.workspaces.length));
+
+  function setWorkspacesState(next: SetStateAction<WorkspaceDirectory[]>) {
+    setWorkspaces((prev) => {
+      const resolved =
+        typeof next === "function"
+          ? (next as (value: WorkspaceDirectory[]) => WorkspaceDirectory[])(prev)
+          : next;
+      workspacesRef.current = resolved;
+      return resolved;
+    });
+  }
+
+  function setActiveWorkspaceIDState(next: SetStateAction<string>) {
+    const nextID =
+      typeof next === "function"
+        ? (next as (value: string) => string)(activeWorkspaceIDRef.current)
+        : next;
+    activeWorkspaceIDRef.current = nextID;
+    setActiveWorkspaceID(nextID);
+  }
+
+  function setActiveJobThreadIDState(next: SetStateAction<string>) {
+    const nextID =
+      typeof next === "function"
+        ? (next as (value: string) => string)(activeJobThreadIDRef.current)
+        : next;
+    activeJobThreadIDRef.current = nextID;
+    setActiveJobThreadID(nextID);
+  }
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceID) ?? workspaces[0] ?? null,
@@ -421,8 +453,20 @@ export function useSessionDomain() {
   }, [workspaces]);
 
   useEffect(() => {
+    workspacesRef.current = workspaces;
+  }, [workspaces]);
+
+  useEffect(() => {
+    activeWorkspaceIDRef.current = activeWorkspaceID;
+  }, [activeWorkspaceID]);
+
+  useEffect(() => {
+    activeJobThreadIDRef.current = activeJobThreadID;
+  }, [activeJobThreadID]);
+
+  useEffect(() => {
     if (!activeWorkspace && workspaces.length > 0) {
-      setActiveWorkspaceID(workspaces[0].id);
+      setActiveWorkspaceIDState(workspaces[0].id);
       return;
     }
     if (activeWorkspace) {
@@ -452,7 +496,7 @@ export function useSessionDomain() {
     threadID: string,
     updater: (thread: ConversationThread) => ConversationThread,
   ) {
-    setWorkspaces((prev) =>
+    setWorkspacesState((prev) =>
       prev.map((workspace) => {
         let touched = false;
         const nextSessions = workspace.sessions.map((thread) => {
@@ -472,9 +516,10 @@ export function useSessionDomain() {
   }
 
   function setActiveThreadID(threadID: string) {
-    setWorkspaces((prev) =>
+    const currentActiveWorkspaceID = activeWorkspaceIDRef.current;
+    setWorkspacesState((prev) =>
       prev.map((workspace) => {
-        if (workspace.id !== activeWorkspaceID) return workspace;
+        if (workspace.id !== currentActiveWorkspaceID) return workspace;
         if (!workspace.sessions.some((thread) => thread.id === threadID)) return workspace;
         return {
           ...workspace,
@@ -493,10 +538,12 @@ export function useSessionDomain() {
   }
 
   function activateThread(threadID: string) {
-    const workspace = workspaces.find((item) => item.sessions.some((thread) => thread.id === threadID));
+    const workspace = workspacesRef.current.find((item) =>
+      item.sessions.some((thread) => thread.id === threadID),
+    );
     if (!workspace) return;
-    setActiveWorkspaceID(workspace.id);
-    setWorkspaces((prev) =>
+    setActiveWorkspaceIDState(workspace.id);
+    setWorkspacesState((prev) =>
       prev.map((item) => {
         if (item.id !== workspace.id) return item;
         return {
@@ -625,13 +672,14 @@ export function useSessionDomain() {
   }
 
   function createThread() {
-    if (!activeWorkspaceID) return;
+    const currentActiveWorkspaceID = activeWorkspaceIDRef.current;
+    if (!currentActiveWorkspaceID) return;
     sessionCounterRef.current += 1;
     const idx = sessionCounterRef.current;
     const next = createSession(idx, `Session ${idx}`);
-    setWorkspaces((prev) =>
+    setWorkspacesState((prev) =>
       prev.map((workspace) => {
-        if (workspace.id !== activeWorkspaceID) return workspace;
+        if (workspace.id !== currentActiveWorkspaceID) return workspace;
         return {
           ...workspace,
           sessions: [...workspace.sessions, next],
@@ -646,7 +694,7 @@ export function useSessionDomain() {
   function forkThread(threadID: string) {
     const sourceID = threadID.trim();
     if (!sourceID) return;
-    const workspace = workspaces.find((item) =>
+    const workspace = workspacesRef.current.find((item) =>
       item.sessions.some((thread) => thread.id === sourceID),
     );
     if (!workspace) return;
@@ -657,7 +705,7 @@ export function useSessionDomain() {
     const idx = sessionCounterRef.current;
     const forked = createForkSession(source, idx);
 
-    setWorkspaces((prev) =>
+    setWorkspacesState((prev) =>
       prev.map((item) => {
         if (item.id !== workspace.id) return item;
         return {
@@ -668,7 +716,7 @@ export function useSessionDomain() {
         };
       })
     );
-    setActiveWorkspaceID(workspace.id);
+    setActiveWorkspaceIDState(workspace.id);
     setThreadRenameDraft(forked.title);
   }
 
@@ -676,9 +724,11 @@ export function useSessionDomain() {
     const targetID = threadID.trim();
     if (!targetID) return;
     let removed = false;
-    let nextActiveWorkspaceID = activeWorkspaceID;
+    const currentActiveWorkspaceID = activeWorkspaceIDRef.current;
+    const currentActiveJobThreadID = activeJobThreadIDRef.current;
+    let nextActiveWorkspaceID = currentActiveWorkspaceID;
     let fallbackThreadID = "";
-    setWorkspaces((prev) => {
+    setWorkspacesState((prev) => {
       const now = new Date().toISOString();
       const next = prev.map((workspace) => {
         const currentIndex = workspace.sessions.findIndex((thread) => thread.id === targetID);
@@ -714,11 +764,11 @@ export function useSessionDomain() {
       return next;
     });
     if (!removed) return;
-    if (nextActiveWorkspaceID !== activeWorkspaceID) {
-      setActiveWorkspaceID(nextActiveWorkspaceID);
+    if (nextActiveWorkspaceID !== currentActiveWorkspaceID) {
+      setActiveWorkspaceIDState(nextActiveWorkspaceID);
     }
-    if (activeJobThreadID === targetID) {
-      setActiveJobThreadID(fallbackThreadID);
+    if (currentActiveJobThreadID === targetID) {
+      setActiveJobThreadIDState(fallbackThreadID);
     }
   }
 
@@ -746,8 +796,8 @@ export function useSessionDomain() {
     workspaceCounterRef.current += 1;
     const idx = workspaceCounterRef.current;
     const workspace = createWorkspace(idx, trimmed);
-    setWorkspaces((prev) => [...prev, workspace]);
-    setActiveWorkspaceID(workspace.id);
+    setWorkspacesState((prev) => [...prev, workspace]);
+    setActiveWorkspaceIDState(workspace.id);
     setWorkspaceAddDraft("");
     setWorkspacePathDraft(trimmed);
     setThreadRenameDraft(workspace.sessions[0].title);
@@ -755,10 +805,11 @@ export function useSessionDomain() {
 
   function updateActiveWorkspacePath(path: string) {
     const trimmed = path.trim();
-    if (!activeWorkspaceID || !trimmed) return;
-    setWorkspaces((prev) =>
+    const currentActiveWorkspaceID = activeWorkspaceIDRef.current;
+    if (!currentActiveWorkspaceID || !trimmed) return;
+    setWorkspacesState((prev) =>
       prev.map((workspace) =>
-        workspace.id === activeWorkspaceID
+        workspace.id === currentActiveWorkspaceID
           ? {
               ...workspace,
               path: trimmed,
@@ -1053,16 +1104,19 @@ export function useSessionDomain() {
     }
 
     const now = new Date().toISOString();
-    const sourceWorkspace = workspaces.find((workspace) =>
+    const currentWorkspaces = workspacesRef.current;
+    const currentActiveWorkspaceID = activeWorkspaceIDRef.current;
+    const currentActiveJobThreadID = activeJobThreadIDRef.current;
+    const sourceWorkspace = currentWorkspaces.find((workspace) =>
       workspace.sessions.some((thread) => thread.id === sourceID),
     );
-    const targetWorkspace = workspaces.find((workspace) =>
+    const targetWorkspace = currentWorkspaces.find((workspace) =>
       workspace.sessions.some((thread) => thread.id === targetID),
     );
     const sourceWorkspaceID = sourceWorkspace?.id ?? "";
     const targetWorkspaceID = targetWorkspace?.id ?? sourceWorkspaceID;
 
-    setWorkspaces((prev) => {
+    setWorkspacesState((prev) => {
       type Located = {
         workspaceIndex: number;
         threadIndex: number;
@@ -1212,11 +1266,11 @@ export function useSessionDomain() {
       return next;
     });
 
-    if (activeWorkspaceID === sourceWorkspaceID && targetWorkspaceID) {
-      setActiveWorkspaceID(targetWorkspaceID);
+    if (currentActiveWorkspaceID === sourceWorkspaceID && targetWorkspaceID) {
+      setActiveWorkspaceIDState(targetWorkspaceID);
     }
-    if (activeJobThreadID === sourceID) {
-      setActiveJobThreadID(targetID);
+    if (currentActiveJobThreadID === sourceID) {
+      setActiveJobThreadIDState(targetID);
     }
     return targetID;
   }
@@ -1235,12 +1289,14 @@ export function useSessionDomain() {
     const preserveOnEmptyResult =
       options?.preserveOnEmptyResult ??
       (source === "discovery");
+    const currentWorkspaces = workspacesRef.current;
+    const currentActiveWorkspaceID = activeWorkspaceIDRef.current;
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
     const currentByHostPath = new Map<string, WorkspaceDirectory>();
     const incomingHostIDs = new Set<string>();
-    for (const workspace of workspaces) {
+    for (const workspace of currentWorkspaces) {
       currentByWorkspaceID.set(workspace.id, workspace);
       currentByHostPath.set(
         projectWorkspaceID(workspace.hostID, workspace.path),
@@ -1342,7 +1398,7 @@ export function useSessionDomain() {
       });
     }
 
-    for (const existing of workspaces) {
+    for (const existing of currentWorkspaces) {
       const hasLocalDrafts = workspaceHasLocalDraftSessions(existing);
       if (!preserveMissingProjects && !hasLocalDrafts) continue;
       if (nextWorkspaces.some((workspace) => workspace.id === existing.id)) continue;
@@ -1362,21 +1418,21 @@ export function useSessionDomain() {
     }
 
     if (nextWorkspaces.length === 0) {
-      if (preserveOnEmptyResult && workspaces.length > 0) {
+      if (preserveOnEmptyResult && currentWorkspaces.length > 0) {
         return;
       }
       const fallback = createWorkspace(1, DEFAULT_PROJECT_PATH);
-      setWorkspaces([fallback]);
-      setActiveWorkspaceID(fallback.id);
-      setActiveJobThreadID(fallback.sessions[0]?.id ?? "");
+      setWorkspacesState([fallback]);
+      setActiveWorkspaceIDState(fallback.id);
+      setActiveJobThreadIDState(fallback.sessions[0]?.id ?? "");
       return;
     }
 
-    const nextActiveWorkspaceID = nextWorkspaces.some((workspace) => workspace.id === activeWorkspaceID)
-      ? activeWorkspaceID
+    const nextActiveWorkspaceID = nextWorkspaces.some((workspace) => workspace.id === currentActiveWorkspaceID)
+      ? currentActiveWorkspaceID
       : (() => {
-          const previousActive = workspaces.find(
-            (workspace) => workspace.id === activeWorkspaceID,
+          const previousActive = currentWorkspaces.find(
+            (workspace) => workspace.id === currentActiveWorkspaceID,
           );
           if (previousActive) {
             const matched = nextWorkspaces.find(
@@ -1390,10 +1446,10 @@ export function useSessionDomain() {
           }
           return nextWorkspaces[0].id;
         })();
-    setWorkspaces(nextWorkspaces);
-    setActiveWorkspaceID(nextActiveWorkspaceID);
+    setWorkspacesState(nextWorkspaces);
+    setActiveWorkspaceIDState(nextActiveWorkspaceID);
     const activeProject = nextWorkspaces.find((workspace) => workspace.id === nextActiveWorkspaceID) ?? nextWorkspaces[0];
-    setActiveJobThreadID(activeProject?.activeSessionID ?? "");
+    setActiveJobThreadIDState(activeProject?.activeSessionID ?? "");
   }
 
   function syncProjectsFromServer(projects: DiscoveredProject[]) {
@@ -1407,9 +1463,9 @@ export function useSessionDomain() {
     completedJobsRef.current.clear();
     workspaceCounterRef.current = 1;
     sessionCounterRef.current = 1;
-    setWorkspaces([fresh]);
-    setActiveWorkspaceID(fresh.id);
-    setActiveJobThreadID(fresh.sessions[0].id);
+    setWorkspacesState([fresh]);
+    setActiveWorkspaceIDState(fresh.id);
+    setActiveJobThreadIDState(fresh.sessions[0].id);
     setThreadRenameDraft(fresh.sessions[0].title);
     setWorkspacePathDraft(fresh.path);
     setWorkspaceAddDraft("");
@@ -1422,7 +1478,7 @@ export function useSessionDomain() {
     workspaces,
     activeWorkspace,
     activeWorkspaceID,
-    setActiveWorkspaceID,
+    setActiveWorkspaceID: setActiveWorkspaceIDState,
     workspacePathDraft,
     setWorkspacePathDraft,
     workspaceAddDraft,
@@ -1436,7 +1492,7 @@ export function useSessionDomain() {
     threadRenameDraft,
     setThreadRenameDraft,
     activeJobThreadID,
-    setActiveJobThreadID,
+    setActiveJobThreadID: setActiveJobThreadIDState,
     completedJobsRef,
     activeThread,
     activeTimeline,
