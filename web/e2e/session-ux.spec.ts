@@ -26,6 +26,7 @@ type MockOptions = {
   runtimeCommandEvents?: boolean;
   assistantDeltaEvents?: number;
   ignoreStreamAfterCursor?: boolean;
+  sessionStartDelayMS?: number;
 };
 
 type MockSession = {
@@ -72,6 +73,7 @@ async function mockSessionApi(
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
   const ignoreStreamAfterCursor = options?.ignoreStreamAfterCursor ?? false;
+  const sessionStartDelayMS = Math.max(0, options?.sessionStartDelayMS ?? 0);
 
   let sessionOneStreamAttempts = 0;
   let sessionOneSSECalls = 0;
@@ -899,6 +901,9 @@ async function mockSessionApi(
     if (request.method() !== "POST") {
       await route.fallback();
       return;
+    }
+    if (sessionStartDelayMS > 0) {
+      await sleep(sessionStartDelayMS);
     }
     const bodyRaw = request.postData() ?? "{}";
     const body = JSON.parse(bodyRaw) as {
@@ -2989,6 +2994,55 @@ test("background completion shows one alert and unread badge", async ({ page }) 
   ).toHaveCount(0);
 });
 
+test("server sync deduplicates persisted project identity by host and path", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `DEDUPE_${Date.now()}`;
+  await mockSessionApi(page, `dedupe ${marker}`, marker);
+  await page.addInitScript(() => {
+    const now = new Date().toISOString();
+    const staleState = {
+      workspaces: [
+        {
+          id: "workspace_legacy_srv_work",
+          hostID: "local_1",
+          hostName: "local-default",
+          path: "/srv/work",
+          title: "work",
+          sessions: [
+            {
+              id: "session_1700000000000_2",
+              title: "Session 2",
+              draft: "",
+              timeline: [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+          activeSessionID: "session_1700000000000_2",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      activeWorkspaceID: "workspace_legacy_srv_work",
+    };
+    window.localStorage.setItem(
+      "remote_llm_session_state_v1",
+      JSON.stringify(staleState),
+    );
+  });
+  await unlock(page);
+
+  await expect(page.locator('.project-chip[title="/srv/work"]')).toHaveCount(1);
+  await expect(page.locator(".chat-head h1")).toHaveText("Session 2");
+  await expect(
+    page.locator(
+      '.session-chip-tree[data-session-id="session_1700000000000_2"]',
+    ),
+  ).toHaveClass(/active/);
+});
+
 test("server sync keeps active local draft session", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `SYNC_LOCAL_${Date.now()}`;
@@ -3028,6 +3082,47 @@ test("server sync keeps active local draft session", async ({ page }) => {
 
   await page.getByRole("button", { name: "Sync", exact: true }).click();
 
+  await expect(retainedDraft).toHaveCount(1, { timeout: 30_000 });
+  await expect(retainedDraft).toHaveClass(/active/, { timeout: 30_000 });
+  await expect(page.locator(".chat-head h1")).toHaveText("Session 2");
+});
+
+test("delayed remote bind keeps active local draft session", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SYNC_BIND_${Date.now()}`;
+  await mockSessionApi(page, `local draft ${marker}`, marker, {
+    jobRunningPolls: 4,
+    sessionStartDelayMS: 350,
+  });
+  await unlock(page);
+
+  await page.getByRole("button", { name: "New Session", exact: true }).click();
+  const retainedDraftID =
+    (await page
+      .locator(".session-chip-tree.active")
+      .first()
+      .getAttribute("data-session-id")) ?? "";
+  expect(retainedDraftID).toMatch(/^session_\d+_\d+$/);
+
+  await page.getByRole("button", { name: "New Session", exact: true }).click();
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(
+    `Reply with one short sentence containing marker ${marker} exactly once.`,
+  );
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+
+  const retainedDraft = page.locator(
+    `.session-chip-tree[data-session-id="${retainedDraftID}"]`,
+  );
+  await retainedDraft.click();
+  await expect(retainedDraft).toHaveClass(/active/);
+
+  await expect(
+    page.locator('.session-chip-tree[data-session-id^="session_cli_new_"]'),
+  ).toHaveCount(1, { timeout: 30_000 });
   await expect(retainedDraft).toHaveCount(1, { timeout: 30_000 });
   await expect(retainedDraft).toHaveClass(/active/, { timeout: 30_000 });
   await expect(page.locator(".chat-head h1")).toHaveText("Session 2");

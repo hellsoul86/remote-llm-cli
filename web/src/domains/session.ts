@@ -226,6 +226,20 @@ function workspaceHasLocalDraftSessions(workspace: WorkspaceDirectory): boolean 
   return workspace.sessions.some((thread) => isLocalDraftSessionID(thread.id));
 }
 
+function findWorkspaceByIdentity(
+  workspaces: WorkspaceDirectory[],
+  candidate: Pick<WorkspaceDirectory, "id" | "hostID" | "path">,
+): WorkspaceDirectory | undefined {
+  const candidateKey = projectWorkspaceID(candidate.hostID, candidate.path);
+  return (
+    workspaces.find((workspace) => workspace.id === candidate.id) ??
+    workspaces.find(
+      (workspace) =>
+        projectWorkspaceID(workspace.hostID, workspace.path) === candidateKey,
+    )
+  );
+}
+
 function normalizeSession(raw: unknown, index: number): ConversationThread {
   const fallback = createSession(index);
   if (!raw || typeof raw !== "object") return fallback;
@@ -1294,14 +1308,14 @@ export function useSessionDomain() {
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
-    const currentByHostPath = new Map<string, WorkspaceDirectory>();
+    const currentByHostPath = new Map<string, WorkspaceDirectory[]>();
     const incomingHostIDs = new Set<string>();
     for (const workspace of currentWorkspaces) {
       currentByWorkspaceID.set(workspace.id, workspace);
-      currentByHostPath.set(
-        projectWorkspaceID(workspace.hostID, workspace.path),
-        workspace,
-      );
+      const hostPathKey = projectWorkspaceID(workspace.hostID, workspace.path);
+      const related = currentByHostPath.get(hostPathKey) ?? [];
+      related.push(workspace);
+      currentByHostPath.set(hostPathKey, related);
       for (const thread of workspace.sessions) {
         currentByThreadID.set(thread.id, thread);
       }
@@ -1316,15 +1330,19 @@ export function useSessionDomain() {
 
       const stableHostPathID = projectWorkspaceID(hostID, path);
       const projectID = project.id?.trim() ?? "";
-      const existing =
-        (projectID ? currentByWorkspaceID.get(projectID) : undefined) ??
-        currentByHostPath.get(stableHostPathID);
-      const id = projectID || existing?.id || stableHostPathID;
+      const related = currentByHostPath.get(stableHostPathID) ?? [];
+      const existingByID = projectID ? currentByWorkspaceID.get(projectID) : undefined;
+      const existingGroup = [
+        ...(existingByID ? [existingByID] : []),
+        ...related.filter((workspace) => workspace.id !== existingByID?.id),
+      ];
+      const primaryExisting = existingByID ?? related[0];
+      const id = projectID || primaryExisting?.id || stableHostPathID;
       const seen = new Set<string>();
       const sessions: ConversationThread[] = [];
       const projectTitle =
         project.title?.trim() ||
-        existing?.title?.trim() ||
+        primaryExisting?.title?.trim() ||
         projectTitleFromPath(path);
 
       for (const discovered of project.sessions) {
@@ -1369,7 +1387,7 @@ export function useSessionDomain() {
         });
       }
 
-      if (existing) {
+      for (const existing of existingGroup) {
         for (const prior of existing.sessions) {
           if (seen.has(prior.id)) continue;
           if (!preserveMissingSessions && !isLocalDraftSessionID(prior.id)) {
@@ -1380,20 +1398,28 @@ export function useSessionDomain() {
         }
       }
 
+      const preferredActiveSessionID =
+        existingGroup.find((workspace) => workspace.id === currentActiveWorkspaceID)
+          ?.activeSessionID ?? "";
       const activeSessionID =
-        existing && sessions.some((thread) => thread.id === existing.activeSessionID)
-          ? existing.activeSessionID
-          : sessions[0]?.id ?? "";
+        (preferredActiveSessionID &&
+        sessions.some((thread) => thread.id === preferredActiveSessionID)
+          ? preferredActiveSessionID
+          : existingGroup.find((workspace) =>
+                sessions.some((thread) => thread.id === workspace.activeSessionID),
+              )?.activeSessionID) ||
+        sessions[0]?.id ||
+        "";
 
       nextWorkspaces.push({
         id,
         hostID,
-        hostName: project.hostName.trim() || existing?.hostName || hostID,
+        hostName: project.hostName.trim() || primaryExisting?.hostName || hostID,
         path,
         title: projectTitle,
         sessions,
         activeSessionID,
-        createdAt: existing?.createdAt ?? now,
+        createdAt: primaryExisting?.createdAt ?? now,
         updatedAt: now
       });
     }
@@ -1401,7 +1427,7 @@ export function useSessionDomain() {
     for (const existing of currentWorkspaces) {
       const hasLocalDrafts = workspaceHasLocalDraftSessions(existing);
       if (!preserveMissingProjects && !hasLocalDrafts) continue;
-      if (nextWorkspaces.some((workspace) => workspace.id === existing.id)) continue;
+      if (findWorkspaceByIdentity(nextWorkspaces, existing)) continue;
       const hostID = existing.hostID.trim();
       if (
         incomingHostIDs.size > 0 &&
