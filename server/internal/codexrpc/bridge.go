@@ -73,6 +73,7 @@ type Notification struct {
 type ServerRequest struct {
 	HostID     string          `json:"host_id"`
 	ID         string          `json:"id"`
+	RawID      json.RawMessage `json:"raw_id,omitempty"`
 	Method     string          `json:"method"`
 	Params     json.RawMessage `json:"params,omitempty"`
 	ReceivedAt time.Time       `json:"received_at"`
@@ -412,6 +413,54 @@ func (b *Bridge) Notify(ctx context.Context, method string, params any) error {
 	return b.notifyConnected(notifyCtx, method, params)
 }
 
+func (b *Bridge) Respond(ctx context.Context, rawID json.RawMessage, result json.RawMessage, rpcErr *RPCError) error {
+	if len(rawID) == 0 {
+		return errors.New("request id is required")
+	}
+	if err := b.ensureConnected(ctx); err != nil {
+		return err
+	}
+	respondCtx, cancel := b.withRequestTimeout(ctx)
+	defer cancel()
+
+	payload := struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result,omitempty"`
+		Error  *RPCError       `json:"error,omitempty"`
+	}{
+		ID: append(json.RawMessage(nil), rawID...),
+	}
+	if rpcErr != nil {
+		payload.Error = rpcErr
+	} else {
+		if len(result) == 0 {
+			result = json.RawMessage(`{}`)
+		}
+		payload.Result = result
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	proc, connID, err := b.currentProcess()
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- b.writeLine(proc, raw)
+	}()
+	select {
+	case <-respondCtx.Done():
+		return respondCtx.Err()
+	case err := <-done:
+		if err != nil {
+			b.handleProcessDrop(connID, fmt.Errorf("write response: %w", err))
+		}
+		return err
+	}
+}
+
 func (b *Bridge) callConnected(ctx context.Context, method string, params any, out any) error {
 	id := fmt.Sprintf("req_%d", atomic.AddUint64(&b.nextReqID, 1))
 	envelope := map[string]any{
@@ -582,6 +631,7 @@ func (b *Bridge) dispatchEnvelope(envelope rpcEnvelope) {
 			b.publishServerRequest(ServerRequest{
 				HostID:     b.hostID(),
 				ID:         id,
+				RawID:      append(json.RawMessage(nil), envelope.ID...),
 				Method:     strings.TrimSpace(envelope.Method),
 				Params:     envelope.Params,
 				ReceivedAt: now,

@@ -46,6 +46,7 @@ type Server struct {
 	streamSubs     map[string]map[int64]chan model.SessionEvent
 	codexBridge    *codexrpc.Manager
 	codexBridgeSub map[string]func()
+	codexPending   map[string]map[string]codexPendingRequest
 }
 
 type authIdentity struct {
@@ -119,6 +120,7 @@ func NewWithOptions(st *store.Store, rt *runtime.Registry, opts ServerOptions) *
 			},
 		}),
 		codexBridgeSub: map[string]func(){},
+		codexPending:   map[string]map[string]codexPendingRequest{},
 		runViaSSH:      executor.RunViaSSH,
 		runRsyncViaSSH: executor.RunRsyncViaSSH,
 	}
@@ -169,6 +171,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/start", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnStart)))
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/interrupt", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnInterrupt)))
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/steer", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnSteer)))
+	mux.Handle("GET /v2/codex/sessions/{id}/requests/pending", s.withAuth(http.HandlerFunc(s.handleCodexV2PendingRequests)))
+	mux.Handle("POST /v2/codex/sessions/{id}/requests/{request_id}/resolve", s.withAuth(http.HandlerFunc(s.handleCodexV2ResolveRequest)))
 	mux.Handle("POST /v1/files/images", s.withAuth(http.HandlerFunc(s.handleUploadImage)))
 	mux.Handle("GET /v1/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
 	mux.Handle("GET /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleGetRetentionPolicy)))
@@ -3829,6 +3833,10 @@ func inferAction(method string, path string) string {
 		return "codex.v2.turn.interrupt"
 	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.Contains(path, "/turns/") && strings.HasSuffix(path, "/steer"):
 		return "codex.v2.turn.steer"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/requests/pending"):
+		return "codex.v2.request.pending.list"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.Contains(path, "/requests/") && strings.HasSuffix(path, "/resolve"):
+		return "codex.v2.request.resolve"
 	case method == http.MethodPost && path == "/v1/files/images":
 		return "files.image.upload"
 	case method == http.MethodGet && path == "/v1/metrics":
