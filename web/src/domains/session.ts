@@ -218,6 +218,14 @@ function projectWorkspaceID(hostID: string, path: string): string {
   return `project_${hostID.trim()}::${path.trim()}`;
 }
 
+function isLocalDraftSessionID(sessionID: string): boolean {
+  return /^session_\d+_\d+$/.test(sessionID.trim());
+}
+
+function workspaceHasLocalDraftSessions(workspace: WorkspaceDirectory): boolean {
+  return workspace.sessions.some((thread) => isLocalDraftSessionID(thread.id));
+}
+
 function normalizeSession(raw: unknown, index: number): ConversationThread {
   const fallback = createSession(index);
   if (!raw || typeof raw !== "object") return fallback;
@@ -1305,9 +1313,12 @@ export function useSessionDomain() {
         });
       }
 
-      if (existing && preserveMissingSessions) {
+      if (existing) {
         for (const prior of existing.sessions) {
           if (seen.has(prior.id)) continue;
+          if (!preserveMissingSessions && !isLocalDraftSessionID(prior.id)) {
+            continue;
+          }
           sessions.push(prior);
           seen.add(prior.id);
         }
@@ -1332,10 +1343,18 @@ export function useSessionDomain() {
     }
 
     for (const existing of workspaces) {
-      if (!preserveMissingProjects) continue;
+      const hasLocalDrafts = workspaceHasLocalDraftSessions(existing);
+      if (!preserveMissingProjects && !hasLocalDrafts) continue;
       if (nextWorkspaces.some((workspace) => workspace.id === existing.id)) continue;
       const hostID = existing.hostID.trim();
-      if (incomingHostIDs.size > 0 && hostID && !incomingHostIDs.has(hostID)) continue;
+      if (
+        incomingHostIDs.size > 0 &&
+        hostID &&
+        !incomingHostIDs.has(hostID) &&
+        !hasLocalDrafts
+      ) {
+        continue;
+      }
       nextWorkspaces.push({
         ...existing,
         updatedAt: now

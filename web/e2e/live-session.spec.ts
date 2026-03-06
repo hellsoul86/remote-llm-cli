@@ -279,8 +279,6 @@ test.describe.serial("live headless session flow (real API, no route mocking)", 
     await page.getByRole("button", { name: "New Session", exact: true }).click();
     const session2Chip = page.locator(".session-chip-tree.active").first();
     await expect(session2Chip).toBeVisible({ timeout: 30_000 });
-    const session2ID = (await session2Chip.getAttribute("data-session-id")) ?? "";
-    expect(session2ID).not.toBe("");
     const alertBefore = await page.locator(".session-alert").count();
 
     const marker = `LIVE_BG_${Date.now()}`;
@@ -297,7 +295,9 @@ test.describe.serial("live headless session flow (real API, no route mocking)", 
       )
       .toBeGreaterThan(alertBefore);
 
-    await page.locator(`.session-chip-tree[data-session-id="${session2ID}"]`).first().click();
+    const alert = page.locator(".session-alert").last();
+    await expect(alert).toBeVisible({ timeout: 30_000 });
+    await alert.click();
     const latestAssistant = page.locator(".message.message-assistant pre").last();
     await expect
       .poll(

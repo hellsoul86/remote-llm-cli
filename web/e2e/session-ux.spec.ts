@@ -2989,6 +2989,50 @@ test("background completion shows one alert and unread badge", async ({ page }) 
   ).toHaveCount(0);
 });
 
+test("server sync keeps active local draft session", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SYNC_LOCAL_${Date.now()}`;
+  await mockSessionApi(page, `local draft ${marker}`, marker, {
+    jobRunningPolls: 4,
+  });
+  await unlock(page);
+
+  await page.getByRole("button", { name: "New Session", exact: true }).click();
+  const retainedDraftChip = page.locator(".session-chip-tree.active").first();
+  const retainedDraftID =
+    (await retainedDraftChip.getAttribute("data-session-id")) ?? "";
+  expect(retainedDraftID).toMatch(/^session_\d+_\d+$/);
+
+  await page.getByRole("button", { name: "New Session", exact: true }).click();
+  const runningDraftID =
+    (await page
+      .locator(".session-chip-tree.active")
+      .first()
+      .getAttribute("data-session-id")) ?? "";
+  expect(runningDraftID).toMatch(/^session_\d+_\d+$/);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(
+    `Reply with one short sentence containing marker ${marker} exactly once.`,
+  );
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+
+  const retainedDraft = page.locator(
+    `.session-chip-tree[data-session-id="${retainedDraftID}"]`,
+  );
+  await retainedDraft.click();
+  await expect(retainedDraft).toHaveClass(/active/);
+
+  await page.getByRole("button", { name: "Sync", exact: true }).click();
+
+  await expect(retainedDraft).toHaveCount(1, { timeout: 30_000 });
+  await expect(retainedDraft).toHaveClass(/active/, { timeout: 30_000 });
+  await expect(page.locator(".chat-head h1")).toHaveText("Session 2");
+});
+
 test("generic session title is auto-derived from first prompt", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `TITLE_${Date.now()}`;
