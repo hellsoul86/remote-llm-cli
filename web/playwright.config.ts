@@ -17,8 +17,9 @@ export default defineConfig({
   },
   webServer: useLocalDevServer
     ? {
-        command: "npm run dev -- --host 127.0.0.1 --port 4173",
+        command: "npm run build && npm run preview:e2e",
         port: 4173,
+        timeout: 120_000,
         reuseExistingServer: !process.env.CI
       }
     : undefined
