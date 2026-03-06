@@ -173,6 +173,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/steer", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnSteer)))
 	mux.Handle("GET /v2/codex/sessions/{id}/requests/pending", s.withAuth(http.HandlerFunc(s.handleCodexV2PendingRequests)))
 	mux.Handle("POST /v2/codex/sessions/{id}/requests/{request_id}/resolve", s.withAuth(http.HandlerFunc(s.handleCodexV2ResolveRequest)))
+	mux.Handle("GET /v2/codex/sessions/{id}/events", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionEvents)))
+	mux.Handle("GET /v2/codex/sessions/{id}/stream", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionStream)))
+	mux.Handle("GET /v2/codex/sessions/{id}/ws", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionWS)))
 	mux.Handle("POST /v1/files/images", s.withAuth(http.HandlerFunc(s.handleUploadImage)))
 	mux.Handle("GET /v1/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
 	mux.Handle("GET /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleGetRetentionPolicy)))
@@ -254,8 +257,12 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
 		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing bearer token"})
-			return
+			queryToken := strings.TrimSpace(r.URL.Query().Get("access_token"))
+			if queryToken == "" {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing bearer token"})
+				return
+			}
+			token = queryToken
 		}
 		prefix, secret, ok := accesskey.ParseFullKey(token)
 		if !ok {
@@ -3837,6 +3844,12 @@ func inferAction(method string, path string) string {
 		return "codex.v2.request.pending.list"
 	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.Contains(path, "/requests/") && strings.HasSuffix(path, "/resolve"):
 		return "codex.v2.request.resolve"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/events"):
+		return "codex.v2.session.events.list"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/stream"):
+		return "codex.v2.session.stream.open"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/ws"):
+		return "codex.v2.session.ws.open"
 	case method == http.MethodPost && path == "/v1/files/images":
 		return "files.image.upload"
 	case method == http.MethodGet && path == "/v1/metrics":
