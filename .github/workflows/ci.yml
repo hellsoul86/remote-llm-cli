@@ -2,18 +2,23 @@ name: CI
 
 on:
   pull_request:
-    branches:
-      - staging
-      - main
   push:
     branches:
       - staging
       - main
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   server-test:
     name: Server Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: server
@@ -33,6 +38,7 @@ jobs:
   web-build:
     name: Web Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web
@@ -56,6 +62,7 @@ jobs:
   web-e2e-smoke:
     name: Web E2E Smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: web

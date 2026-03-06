@@ -82,8 +82,14 @@ Private key content for SSH login to all hosts in `DEPLOY_TARGETS`.
 - `VITE_API_BASE`: API base URL injected at web build time (required)
   - example: `https://webcli-api-staging.royding.ai`
 - `CF_PAGES_BRANCH`: Pages branch override (optional; default `github.ref_name`)
+- `SMOKE_API_BASE`: optional override for post-deploy API smoke target; falls back to `VITE_API_BASE`
+- `SMOKE_WEB_BASE`: optional URL for post-deploy web shell smoke
 
 The deploy workflow will auto-create the Pages project on first deploy if it does not exist.
+
+### 2.3 Environment secrets
+
+- `SMOKE_ACCESS_TOKEN`: optional access token for authenticated post-deploy smoke (`GET /v1/projects`)
 
 ## 3. Workflow behavior
 
@@ -95,6 +101,10 @@ Per run:
 4. Build web (`web/dist`)
 5. Ensure Pages project exists (auto-create when missing)
 6. Deploy web to Cloudflare Pages (`wrangler pages deploy`)
+7. Run post-deploy smoke:
+   - `GET {SMOKE_API_BASE or VITE_API_BASE}/v1/healthz`
+   - optional authenticated `GET /v1/projects`
+   - optional web shell fetch against `SMOKE_WEB_BASE`
 
 ## 4. Manual redeploy
 
