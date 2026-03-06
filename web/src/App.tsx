@@ -24,6 +24,7 @@ import { TokenGate } from "./features/session/components/TokenGate";
 import { buildOpsStageProps } from "./features/session/ops-stage-props";
 import { buildSessionComposerProps } from "./features/session/session-composer-props";
 import { buildSessionSidebarProps } from "./features/session/session-sidebar-props";
+import { buildSessionStageProps } from "./features/session/session-stage-props";
 import { useAppMode } from "./features/session/use-app-mode";
 import { useComposerAutoResize } from "./features/session/use-composer-autosize";
 import { useCompletedRuns } from "./features/session/use-completed-runs";
@@ -1344,6 +1345,32 @@ export function App() {
     onSubmit: onAddHost,
     onCancelEdit: onCancelHostEdit,
   });
+  const sessionStageProps = buildSessionStageProps({
+    sidebarProps: sessionSidebarProps,
+    composerProps: sessionComposerProps,
+    headerTitle: activeThread?.title ?? "Session",
+    headerContext:
+      (activeWorkspace?.hostName?.trim() || "local-default") +
+      " · " +
+      (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH),
+    streamTone: activeStreamTone,
+    streamCopy: activeStreamCopy,
+    streamLastError: activeStreamLastError,
+    canArchive: Boolean(activeThread) && !activeThreadBusy,
+    archiving: Boolean(activeThread && deletingThreadID === activeThread.id),
+    onArchive: onArchiveActiveSession,
+    canReconnect: canReconnectActiveStream,
+    onReconnect: onReconnectActiveStream,
+    timeline: activeTimeline,
+    isRefreshing,
+    renderTimelineEntryBody,
+    formatClock,
+    timelineViewportRef,
+    timelineBottomRef,
+    onTimelineScroll,
+    timelineUnreadCount,
+    onJumpTimelineToLatest: jumpTimelineToLatest,
+  });
 
   return (
     <div className="workspace-shell">
@@ -1359,38 +1386,7 @@ export function App() {
       />
 
       {appMode === "session" ? (
-        <SessionStage
-          sidebarProps={sessionSidebarProps}
-          headerProps={{
-            title: activeThread?.title ?? "Session",
-            context:
-              (activeWorkspace?.hostName?.trim() || "local-default") +
-              " · " +
-              (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH),
-            streamTone: activeStreamTone,
-            streamCopy: activeStreamCopy,
-            streamLastError: activeStreamLastError,
-            canArchive: Boolean(activeThread) && !activeThreadBusy,
-            archiving: Boolean(activeThread && deletingThreadID === activeThread.id),
-            onArchive: () => {
-              void onArchiveActiveSession();
-            },
-            canReconnect: canReconnectActiveStream,
-            onReconnect: onReconnectActiveStream,
-          }}
-          timelineProps={{
-            timeline: activeTimeline,
-            isRefreshing,
-            renderTimelineEntryBody,
-            formatClock,
-            timelineViewportRef,
-            timelineBottomRef,
-            onTimelineScroll,
-            timelineUnreadCount,
-            onJumpTimelineToLatest: jumpTimelineToLatest,
-          }}
-          composerProps={sessionComposerProps}
-        />
+        <SessionStage {...sessionStageProps} />
       ) : (
         <OpsStage {...opsStageProps} />
       )}
