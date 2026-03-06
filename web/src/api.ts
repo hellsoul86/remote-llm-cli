@@ -1066,6 +1066,9 @@ export async function streamSessionEvents(token: string, sessionID: string, opti
     params.set("after", String(options.after));
   }
   const query = params.toString();
+  const fallbackURL = query
+    ? `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream?${query}`
+    : `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream`;
   const wsError = await streamSessionEventsViaWS(token, sessionID, options);
   if (!wsError) {
     return;
@@ -1073,7 +1076,12 @@ export async function streamSessionEvents(token: string, sessionID: string, opti
   const v2URL = query
     ? `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/stream?${query}`
     : `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/stream`;
-  await streamSessionEventsViaSSE(v2URL, token, options);
+  try {
+    await streamSessionEventsViaSSE(v2URL, token, options);
+  } catch (err) {
+    void err;
+    await streamSessionEventsViaSSE(fallbackURL, token, options);
+  }
 }
 
 async function streamSessionEventsViaWS(

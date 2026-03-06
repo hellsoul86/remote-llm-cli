@@ -207,7 +207,41 @@ async function mockSessionApi(
     },
   );
 
-  await page.route("**/v2/codex/sessions/session_cli_1/stream**", async (route) => {
+  await page.route(
+    "**/v2/codex/sessions/session_cli_1/requests/pending",
+    async (route, request) => {
+      if (request.method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        json: {
+          requests: [],
+        },
+      });
+    },
+  );
+
+  await page.route(
+    "**/v2/codex/sessions/session_cli_1/requests/*/resolve",
+    async (route, request) => {
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        json: {
+          resolved: true,
+          session_id: "session_cli_1",
+          request_id: "req_1",
+        },
+      });
+    },
+  );
+
+  const fulfillSessionStream = async (route: Parameters<Page["route"]>[1] extends (route: infer T, ...args: infer _R) => any ? T : never) => {
     const url = new URL(route.request().url());
     const afterRaw = url.searchParams.get("after") ?? "0";
     const after = Number.parseInt(afterRaw, 10);
@@ -355,6 +389,14 @@ async function mockSessionApi(
       headers: { "content-type": "text/event-stream" },
       body: streamLines.join("\n"),
     });
+  };
+
+  await page.route("**/v2/codex/sessions/session_cli_1/stream**", async (route) => {
+    await fulfillSessionStream(route);
+  });
+
+  await page.route("**/v1/sessions/session_cli_1/stream**", async (route) => {
+    await fulfillSessionStream(route);
   });
 
   return {

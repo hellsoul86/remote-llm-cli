@@ -10,6 +10,21 @@
 
 -
 
+## DB Change
+
+<!-- choose one: none | schema | data | config -->
+-
+
+## Migration Plan
+
+<!-- fill when DB Change is not none; otherwise use "Not needed" -->
+-
+
+## Rollback Plan
+
+<!-- describe exact revert or mitigation path -->
+-
+
 ## Verification
 
 - [ ] `go test ./...` (server)
@@ -23,8 +38,9 @@
 - [ ] `Web Build`
 - [ ] `Web E2E Smoke`
 - [ ] `Target Branch Rules`
+- [ ] `PR Contract`
 
 ## Risk
 
-- Low / Medium / High:
-- Rollback:
+<!-- choose one: Low | Medium | High -->
+-

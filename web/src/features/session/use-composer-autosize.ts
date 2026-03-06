@@ -1,4 +1,4 @@
-import { type MutableRefObject, useEffect } from "react";
+import { type MutableRefObject, useLayoutEffect } from "react";
 
 type UseComposerAutoResizeOptions = {
   inputRef: MutableRefObject<HTMLTextAreaElement | null>;
@@ -15,7 +15,7 @@ export function useComposerAutoResize({
   minHeight,
   maxHeight,
 }: UseComposerAutoResizeOptions) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = inputRef.current;
     if (!node) return;
     node.style.height = "0px";

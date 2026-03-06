@@ -23,6 +23,9 @@ concurrency:
   group: deploy-${{ github.event_name == 'workflow_dispatch' && inputs.environment || github.ref_name }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   build-release:
     name: Build Release Artifact
@@ -251,3 +254,85 @@ jobs:
             pages deploy web/dist
             --project-name=${{ secrets.CF_PAGES_PROJECT }}
             --branch=${{ vars.CF_PAGES_BRANCH != '' && vars.CF_PAGES_BRANCH || github.ref_name }}
+
+  post-deploy-smoke:
+    name: Post-Deploy Smoke
+    runs-on: ubuntu-latest
+    needs:
+      - deploy-api
+      - deploy-web-pages
+    if: ${{ needs.deploy-api.result == 'success' && needs.deploy-web-pages.result == 'success' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
+    steps:
+      - name: Resolve smoke targets
+        env:
+          SMOKE_API_BASE: ${{ vars.SMOKE_API_BASE }}
+          SMOKE_WEB_BASE: ${{ vars.SMOKE_WEB_BASE }}
+          VITE_API_BASE: ${{ vars.VITE_API_BASE }}
+          SMOKE_ACCESS_TOKEN: ${{ secrets.SMOKE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          api_base="${SMOKE_API_BASE:-${VITE_API_BASE:-}}"
+          if [ -z "${api_base}" ]; then
+            echo "::error::missing environment variable SMOKE_API_BASE or VITE_API_BASE"
+            exit 1
+          fi
+          echo "SMOKE_API_BASE_EFFECTIVE=${api_base}" >> "${GITHUB_ENV}"
+          if [ -n "${SMOKE_WEB_BASE:-}" ]; then
+            echo "SMOKE_WEB_BASE_EFFECTIVE=${SMOKE_WEB_BASE}" >> "${GITHUB_ENV}"
+          fi
+          if [ -n "${SMOKE_ACCESS_TOKEN:-}" ]; then
+            echo "::add-mask::${SMOKE_ACCESS_TOKEN}"
+          fi
+
+      - name: Smoke API health
+        env:
+          API_BASE: ${{ env.SMOKE_API_BASE_EFFECTIVE }}
+        run: |
+          set -euo pipefail
+          url="${API_BASE%/}/v1/healthz"
+          for attempt in $(seq 1 12); do
+            if curl -fsS "${url}" | tee /tmp/healthz.json; then
+              exit 0
+            fi
+            echo "health check retry ${attempt}/12"
+            sleep 5
+          done
+          echo "::error::API health check failed: ${url}"
+          exit 1
+
+      - name: Smoke authenticated API
+        env:
+          API_BASE: ${{ env.SMOKE_API_BASE_EFFECTIVE }}
+          SMOKE_ACCESS_TOKEN: ${{ secrets.SMOKE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SMOKE_ACCESS_TOKEN:-}" ]; then
+            echo "SMOKE_ACCESS_TOKEN not set; skip authenticated smoke"
+            exit 0
+          fi
+          curl -fsS \
+            -H "Authorization: Bearer ${SMOKE_ACCESS_TOKEN}" \
+            "${API_BASE%/}/v1/projects" | jq -e 'type == "array"' >/dev/null
+
+      - name: Smoke web shell
+        env:
+          WEB_BASE: ${{ env.SMOKE_WEB_BASE_EFFECTIVE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEB_BASE:-}" ]; then
+            echo "SMOKE_WEB_BASE not set; skip web shell smoke"
+            exit 0
+          fi
+          body="$(mktemp)"
+          status="$(curl -sS -L -o "${body}" -w "%{http_code}" "${WEB_BASE}")"
+          if [ "${status}" != "200" ]; then
+            echo "::error::unexpected web status ${status} for ${WEB_BASE}"
+            cat "${body}"
+            exit 1
+          fi
+          if ! grep -Eq '<div id="root"|<main' "${body}"; then
+            echo "::error::web smoke response does not look like app shell"
+            cat "${body}"
+            exit 1
+          fi

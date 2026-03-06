@@ -53,6 +53,14 @@ export function isLegacySessionNoiseEntry(
   if (title === "server completed" || title === "response started") {
     return true;
   }
+  if (
+    title === "failed" ||
+    title === "interrupted" ||
+    title === "canceled" ||
+    title === "warning"
+  ) {
+    return false;
+  }
   if (!body) return false;
   return allBodyLinesAreNoise(body);
 }
