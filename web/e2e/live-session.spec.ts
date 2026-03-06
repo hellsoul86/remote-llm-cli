@@ -50,18 +50,32 @@ async function unlockSessionPage(page: Page, token: string): Promise<void> {
     await page.getByRole("button", { name: "Unlock Workspace" }).click();
   }
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible({ timeout: 120_000 });
+  await expect
+    .poll(
+      async () => {
+        return page.locator(".project-node").count();
+      },
+      { timeout: 120_000 },
+    )
+    .toBeGreaterThan(0);
   await expect(composerInput(page)).toBeVisible({ timeout: 120_000 });
 }
 
 async function selectStableProject(page: Page, projectPath: string): Promise<void> {
-  const project = page
-    .locator(".project-chip", {
-      has: page.locator(".project-chip-main em", { hasText: projectPath }),
-    })
-    .first();
-  if (await project.isVisible().catch(() => false)) {
-    await project.click();
-  }
+  const filter = page.getByPlaceholder("Filter projects or sessions");
+  await filter.fill(projectPath);
+  const projectNode = page.locator(".project-node", {
+    has: page.locator(".project-chip-main em", { hasText: projectPath }),
+  }).first();
+  await expect(projectNode).toBeVisible({ timeout: 120_000 });
+  const projectChip = projectNode.locator(".project-chip").first();
+  await projectChip.scrollIntoViewIfNeeded();
+  await projectChip.click();
+  await expect(projectChip).toHaveClass(/active/, { timeout: 120_000 });
+  await expect(page.locator(".chat-context")).toContainText(projectPath, {
+    timeout: 120_000,
+  });
+  await filter.fill("");
 }
 
 async function createFreshSession(page: Page, projectPath: string): Promise<string> {
@@ -79,6 +93,9 @@ async function createFreshSession(page: Page, projectPath: string): Promise<stri
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled({ timeout: 120_000 });
   const activeSession = page.locator(".session-chip-tree.active").first();
   await expect(activeSession).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".chat-context")).toContainText(projectPath, {
+    timeout: 120_000,
+  });
   const sessionID = (await activeSession.getAttribute("data-session-id")) ?? "";
   expect(sessionID).not.toBe("");
   return sessionID;
