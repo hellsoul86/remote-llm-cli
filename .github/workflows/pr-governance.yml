@@ -2,9 +2,20 @@ name: PR Governance
 
 on:
   pull_request:
-    branches:
-      - staging
-      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+
+concurrency:
+  group: pr-governance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   target-rules:
@@ -45,3 +56,108 @@ jobs:
           fi
 
           echo "No rule for base branch $BASE_REF, pass"
+
+  pr-contract:
+    name: PR Contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR body contract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = (pr.body || "").replace(/\r\n/g, "\n");
+            const failures = [];
+
+            function getSection(title) {
+              const pattern = new RegExp(`## ${title}\\s*\\n([\\s\\S]*?)(?=\\n## |$)`, "i");
+              const match = body.match(pattern);
+              return match ? match[1].trim() : "";
+            }
+
+            function normalize(value) {
+              return (value || "")
+                .replace(/<!--[\s\S]*?-->/g, "")
+                .replace(/`/g, "")
+                .replace(/^- \[[ xX]\]\s*/gm, "")
+                .replace(/^[*-]\s*/gm, "")
+                .replace(/\s+/g, " ")
+                .trim();
+            }
+
+            function hasMeaningfulContent(value) {
+              const normalized = normalize(value);
+              if (!normalized) {
+                return false;
+              }
+              return !/^(tbd|n\/a|none yet|unknown|pending|not needed)$/i.test(normalized);
+            }
+
+            const summary = getSection("Summary");
+            if (!hasMeaningfulContent(summary)) {
+              failures.push("`Summary` must describe the intent of the PR.");
+            }
+
+            const linkedIssue = getSection("Linked Issue");
+            const issuePattern = /(?:(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|relate[sd]? to|part of)\s+)?(?:#\d+|https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+)/i;
+            if (!issuePattern.test(linkedIssue)) {
+              failures.push("`Linked Issue` must reference at least one issue number or issue URL.");
+            }
+
+            const changes = getSection("Changes");
+            if (!hasMeaningfulContent(changes)) {
+              failures.push("`Changes` must summarize the concrete implementation slice.");
+            }
+
+            const verification = getSection("Verification");
+            if (!/- \[[xX]\]/.test(verification)) {
+              failures.push("`Verification` must record at least one completed validation item.");
+            }
+
+            const risk = getSection("Risk");
+            if (!/\b(low|medium|high)\b/i.test(risk)) {
+              failures.push("`Risk` must declare Low, Medium, or High.");
+            }
+
+            const rollbackPlan = getSection("Rollback Plan");
+            if (!hasMeaningfulContent(rollbackPlan)) {
+              failures.push("`Rollback Plan` must be explicit.");
+            }
+
+            const dbChange = getSection("DB Change");
+            const dbChangeMatch = normalize(dbChange).match(/\b(none|schema|data|config)\b/i);
+            const dbChangeValue = dbChangeMatch ? dbChangeMatch[1].toLowerCase() : "";
+            if (!dbChangeValue) {
+              failures.push("`DB Change` must declare one of: none, schema, data, config.");
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            const changedFiles = files.map((file) => file.filename);
+            const dbTouchedFiles = changedFiles.filter((file) =>
+              [
+                /^server\/migrations\//i,
+                /(^|\/)(db|database|schema|migrations?)\//i,
+                /\.sql$/i,
+                /(sqlite|postgres|mysql)/i,
+              ].some((pattern) => pattern.test(file)),
+            );
+
+            const migrationPlan = getSection("Migration Plan");
+            if (dbTouchedFiles.length > 0 && dbChangeValue === "none") {
+              failures.push(`DB-related files changed but \`DB Change\` is set to none: ${dbTouchedFiles.join(", ")}`);
+            }
+
+            if (dbChangeValue && dbChangeValue !== "none" && !hasMeaningfulContent(migrationPlan)) {
+              failures.push("`Migration Plan` must be filled when `DB Change` is not `none`.");
+            }
+
+            if (failures.length > 0) {
+              core.setFailed(failures.join("\n"));
+            } else {
+              core.info("PR contract validation passed.");
+            }
