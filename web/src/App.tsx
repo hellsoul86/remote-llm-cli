@@ -19,10 +19,13 @@ import {
 } from "./domains/session";
 import { CommandPalette } from "./features/session/components/CommandPalette";
 import { SessionComposer } from "./features/session/components/SessionComposer";
+import { OpsAuditTimelinePanel } from "./features/session/components/OpsAuditTimelinePanel";
 import { SessionHeader } from "./features/session/components/SessionHeader";
 import { OpsActiveJobPanel } from "./features/session/components/OpsActiveJobPanel";
 import { OpsCodexPlatformPanel } from "./features/session/components/OpsCodexPlatformPanel";
+import { OpsHostFormPanel } from "./features/session/components/OpsHostFormPanel";
 import { OpsRecentJobsPanel } from "./features/session/components/OpsRecentJobsPanel";
+import { OpsRecentRunsPanel } from "./features/session/components/OpsRecentRunsPanel";
 import { SessionSidebar } from "./features/session/components/SessionSidebar";
 import { SessionTimeline } from "./features/session/components/SessionTimeline";
 import { TokenGate } from "./features/session/components/TokenGate";
@@ -1737,188 +1740,28 @@ export function App() {
               onCancelJob={onCancelJob}
             />
 
-            <section className="inspect-block">
-              <h3>Recent Runs</h3>
-              <div className="ops-filter-row">
-                <label>
-                  status
-                  <select
-                    value={opsRunStatusFilter}
-                    onChange={(event) =>
-                      setOpsRunStatusFilter(
-                        event.target.value as "all" | "ok" | "error",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="ok">ok</option>
-                    <option value="error">error</option>
-                  </select>
-                </label>
-              </div>
-              {filteredOpsRuns.length === 0 ? (
-                <p className="pane-subtle-light">No run results yet.</p>
-              ) : (
-                <ul className="history-list history-runs">
-                  {filteredOpsRuns.slice(0, 8).map((run) => (
-                    <li key={run.id}>
-                      <span>{run.id}</span>
-                      <span
-                        className={`tone-${run.status_code < 400 ? "ok" : "err"}`}
-                      >
-                        {run.status_code < 400
-                          ? "ok"
-                          : `http_${run.status_code}`}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+            <OpsRecentRunsPanel
+              opsRunStatusFilter={opsRunStatusFilter}
+              onOpsRunStatusFilterChange={setOpsRunStatusFilter}
+              filteredOpsRuns={filteredOpsRuns}
+            />
 
-            <section className="inspect-block">
-              <h3>Audit Timeline</h3>
-              <div className="ops-filter-row">
-                <label>
-                  method
-                  <select
-                    value={opsAuditMethodFilter}
-                    onChange={(event) =>
-                      setOpsAuditMethodFilter(
-                        event.target.value as "all" | "GET" | "POST" | "DELETE",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="GET">GET</option>
-                    <option value="POST">POST</option>
-                    <option value="DELETE">DELETE</option>
-                  </select>
-                </label>
-                <label>
-                  status
-                  <select
-                    value={opsAuditStatusFilter}
-                    onChange={(event) =>
-                      setOpsAuditStatusFilter(
-                        event.target.value as "all" | "2xx" | "4xx" | "5xx",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="2xx">2xx</option>
-                    <option value="4xx">4xx</option>
-                    <option value="5xx">5xx</option>
-                  </select>
-                </label>
-              </div>
-              {filteredAuditEvents.length === 0 ? (
-                <p className="pane-subtle-light">
-                  No audit events with current filters.
-                </p>
-              ) : (
-                <ul className="history-list">
-                  {filteredAuditEvents.slice(0, 12).map((evt) => (
-                    <li key={evt.id}>
-                      <div className="history-item-main">
-                        <span>{evt.action}</span>
-                        <span>
-                          {evt.method} {evt.path}
-                        </span>
-                      </div>
-                      <span
-                        className={`tone-${evt.status_code < 400 ? "ok" : "err"}`}
-                      >
-                        {evt.status_code}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+            <OpsAuditTimelinePanel
+              opsAuditMethodFilter={opsAuditMethodFilter}
+              onOpsAuditMethodFilterChange={setOpsAuditMethodFilter}
+              opsAuditStatusFilter={opsAuditStatusFilter}
+              onOpsAuditStatusFilterChange={setOpsAuditStatusFilter}
+              filteredAuditEvents={filteredAuditEvents}
+            />
 
-            <section className="inspect-block">
-              <h3>{editingHostID ? "Edit Host" : "Add Host"}</h3>
-              <form className="host-form" onSubmit={onAddHost}>
-                <input
-                  placeholder="name"
-                  value={hostForm.name}
-                  onChange={(event) =>
-                    setHostForm((prev) => ({
-                      ...prev,
-                      name: event.target.value,
-                    }))
-                  }
-                />
-                <label>
-                  connection mode
-                  <select
-                    value={hostForm.connectionMode}
-                    onChange={(event) =>
-                      setHostForm((prev) => ({
-                        ...prev,
-                        connectionMode: event.target.value as "ssh" | "local",
-                      }))
-                    }
-                  >
-                    <option value="ssh">ssh</option>
-                    <option value="local">local</option>
-                  </select>
-                </label>
-                <input
-                  placeholder={
-                    hostForm.connectionMode === "local"
-                      ? "host (optional for local mode)"
-                      : "host"
-                  }
-                  value={hostForm.host}
-                  onChange={(event) =>
-                    setHostForm((prev) => ({
-                      ...prev,
-                      host: event.target.value,
-                    }))
-                  }
-                />
-                <input
-                  placeholder="user"
-                  value={hostForm.user}
-                  onChange={(event) =>
-                    setHostForm((prev) => ({
-                      ...prev,
-                      user: event.target.value,
-                    }))
-                  }
-                />
-                <input
-                  placeholder="workspace"
-                  value={hostForm.workspace}
-                  onChange={(event) =>
-                    setHostForm((prev) => ({
-                      ...prev,
-                      workspace: event.target.value,
-                    }))
-                  }
-                />
-                <div className="ops-actions-row">
-                  <button type="submit" disabled={addingHost}>
-                    {addingHost
-                      ? "Saving..."
-                      : editingHostID
-                        ? "Update Host"
-                        : "Save Host"}
-                  </button>
-                  {editingHostID ? (
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={onCancelHostEdit}
-                    >
-                      Cancel Edit
-                    </button>
-                  ) : null}
-                </div>
-              </form>
-            </section>
+            <OpsHostFormPanel
+              editingHostID={editingHostID}
+              hostForm={hostForm}
+              onHostFormChange={setHostForm}
+              addingHost={addingHost}
+              onSubmit={onAddHost}
+              onCancelEdit={onCancelHostEdit}
+            />
           </aside>
         </div>
       )}
