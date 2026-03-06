@@ -132,3 +132,23 @@ Planned PR order:
 7. PR-P -> #159
 8. PR-Q -> #160
 9. PR-R -> #161
+
+## Breaking Refactor Wave (Codex SDK + app-server Only)
+
+Epic:
+
+- [#168](https://github.com/hellsoul86/remote-llm-cli/issues/168) Breaking Refactor: Codex SDK + app-server mode only
+
+Issue queue:
+
+1. [#169](https://github.com/hellsoul86/remote-llm-cli/issues/169) Contract: strict codex session/turn API (job-decoupled)
+2. [#170](https://github.com/hellsoul86/remote-llm-cli/issues/170) Web: codex session mode only (remove legacy jobs fallback)
+3. [#171](https://github.com/hellsoul86/remote-llm-cli/issues/171) Server: codexrpc normalization + durable cursor stream
+4. [#172](https://github.com/hellsoul86/remote-llm-cli/issues/172) Cutover: migration + CI gate for codex-only session architecture
+
+Planned PR order:
+
+1. PR-J -> #169
+2. PR-K -> #170
+3. PR-L -> #171
+4. PR-M -> #172

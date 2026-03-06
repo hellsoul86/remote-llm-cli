@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "preview:e2e": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "test:e2e": "playwright test",
     "test:e2e:smoke": "playwright test e2e/async-jobs.spec.ts e2e/session-ux.spec.ts --reporter=line",
     "test:e2e:ux": "playwright test e2e/session-ux.spec.ts --reporter=line",

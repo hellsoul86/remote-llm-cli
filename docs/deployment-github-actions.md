@@ -82,8 +82,14 @@ Private key content for SSH login to all hosts in `DEPLOY_TARGETS`.
 - `VITE_API_BASE`: API base URL injected at web build time (required)
   - example: `https://webcli-api-staging.royding.ai`
 - `CF_PAGES_BRANCH`: Pages branch override (optional; default `github.ref_name`)
+- `SMOKE_API_BASE`: optional override for post-deploy API smoke target; falls back to `VITE_API_BASE`
+- `SMOKE_WEB_BASE`: optional URL for post-deploy web shell smoke
 
 The deploy workflow will auto-create the Pages project on first deploy if it does not exist.
+
+### 2.3 Environment secrets
+
+- `SMOKE_ACCESS_TOKEN`: optional access token for authenticated post-deploy smoke (`GET /v1/projects`)
 
 ## 3. Workflow behavior
 
@@ -95,6 +101,10 @@ Per run:
 4. Build web (`web/dist`)
 5. Ensure Pages project exists (auto-create when missing)
 6. Deploy web to Cloudflare Pages (`wrangler pages deploy`)
+7. Run post-deploy smoke:
+   - `GET {SMOKE_API_BASE or VITE_API_BASE}/v1/healthz`
+   - optional authenticated `GET /v1/projects`
+   - optional web shell fetch against `SMOKE_WEB_BASE`
 
 ## 4. Manual redeploy
 
@@ -102,3 +112,34 @@ Per run:
 
 1. `environment`: `staging` or `production`
 2. `ref` (optional): branch/tag/sha to deploy
+
+## 5. Staging soak workflow
+
+`Staging Soak` workflow (`.github/workflows/staging-soak.yml`) is used to collect codex v2 reconnect/cursor continuity evidence.
+
+### 5.1 Environment configuration (`staging`)
+
+Secrets:
+
+- `SOAK_ACCESS_TOKEN`: staging access key for API calls
+
+Variables:
+
+- `SOAK_API_BASE`: staging API base URL (falls back to `VITE_API_BASE` when empty)
+- `SOAK_HOST_ID`: host id used for soak session start
+- `SOAK_PROJECT_PATH`: project path used for soak session start
+
+### 5.2 Trigger
+
+Run manually with `workflow_dispatch` inputs:
+
+- `duration` (default `2h`)
+- `reconnect_window` (default `30s`)
+- `prompt_interval` (default `2m`)
+- `model` (optional)
+- `archive_on_exit` (default `true`)
+
+### 5.3 Output
+
+- Uploads `codex-v2-staging-soak-report` artifact (JSON).
+- Publishes summary (`session_id`, `stream`, `turns`, terminal run counts) in workflow step summary.

@@ -38,12 +38,21 @@ npm run test:e2e:live
 
 ## CI checks
 
-PRs to `staging`/`main` run:
+All PRs run:
 
 1. `Server Test`
 2. `Web Build`
 3. `Web E2E Smoke`
 4. `Target Branch Rules`
+5. `PR Contract`
+
+Protected branches (`staging`, `main`) must require at least:
+
+1. `Server Test`
+2. `Web Build`
+3. `Web E2E Smoke`
+4. `Target Branch Rules`
+5. `PR Contract`
 
 Post-merge push to `staging`/`main` runs deployment workflow (`Deploy`) when environment deploy config is present.
 

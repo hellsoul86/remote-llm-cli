@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isLegacySessionNoiseEntry } from "./timeline-noise";
 
 export type TimelineKind = "user" | "assistant" | "system";
 export type TimelineState = "running" | "success" | "error";
@@ -217,19 +218,6 @@ function projectWorkspaceID(hostID: string, path: string): string {
   return `project_${hostID.trim()}::${path.trim()}`;
 }
 
-function isLegacyConnectionNoiseEntry(entry: TimelineEntry): boolean {
-  if (entry.kind !== "system") return false;
-  const title = entry.title.trim().toLowerCase();
-  const body = entry.body.trim();
-  if (title === "connected" && body.startsWith("Connected. hosts=")) {
-    return true;
-  }
-  if (title === "connection failed") {
-    return true;
-  }
-  return false;
-}
-
 function normalizeSession(raw: unknown, index: number): ConversationThread {
   const fallback = createSession(index);
   if (!raw || typeof raw !== "object") return fallback;
@@ -246,7 +234,7 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
           ...entry,
           createdAt: typeof entry.createdAt === "string" ? entry.createdAt : now
         }))
-        .filter((entry) => !isLegacyConnectionNoiseEntry(entry))
+        .filter((entry) => !isLegacySessionNoiseEntry(entry))
     : [];
   const sandbox = candidate.sandbox;
   const safeSandbox =
@@ -528,6 +516,9 @@ export function useSessionDomain() {
   }
 
   function addTimelineEntry(entry: Omit<TimelineEntry, "id" | "createdAt">, threadID = activeThreadID) {
+    if (isLegacySessionNoiseEntry(entry)) {
+      return;
+    }
     const createdAt = new Date().toISOString();
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
@@ -1036,6 +1027,191 @@ export function useSessionDomain() {
     });
   }
 
+  function bindThreadID(
+    currentThreadID: string,
+    remoteThreadID: string,
+    options?: { title?: string },
+  ): string {
+    const sourceID = currentThreadID.trim();
+    const targetID = remoteThreadID.trim();
+    const nextTitle = options?.title?.trim() ?? "";
+    if (!sourceID || !targetID) return sourceID || targetID;
+
+    if (sourceID === targetID) {
+      if (nextTitle) {
+        setThreadTitle(targetID, nextTitle);
+      }
+      return targetID;
+    }
+
+    const now = new Date().toISOString();
+    const sourceWorkspace = workspaces.find((workspace) =>
+      workspace.sessions.some((thread) => thread.id === sourceID),
+    );
+    const targetWorkspace = workspaces.find((workspace) =>
+      workspace.sessions.some((thread) => thread.id === targetID),
+    );
+    const sourceWorkspaceID = sourceWorkspace?.id ?? "";
+    const targetWorkspaceID = targetWorkspace?.id ?? sourceWorkspaceID;
+
+    setWorkspaces((prev) => {
+      type Located = {
+        workspaceIndex: number;
+        threadIndex: number;
+        thread: ConversationThread;
+      };
+      let source: Located | null = null;
+      let target: Located | null = null;
+      for (let workspaceIndex = 0; workspaceIndex < prev.length; workspaceIndex += 1) {
+        const workspace = prev[workspaceIndex];
+        for (let threadIndex = 0; threadIndex < workspace.sessions.length; threadIndex += 1) {
+          const thread = workspace.sessions[threadIndex];
+          if (thread.id === sourceID) {
+            source = { workspaceIndex, threadIndex, thread };
+          }
+          if (thread.id === targetID) {
+            target = { workspaceIndex, threadIndex, thread };
+          }
+        }
+      }
+
+      if (!source) {
+        if (!target || !nextTitle) {
+          return prev;
+        }
+        const next = [...prev];
+        const workspace = next[target.workspaceIndex];
+        const sessions = [...workspace.sessions];
+        const thread = sessions[target.threadIndex];
+        if (thread.title.trim() === nextTitle) {
+          return prev;
+        }
+        sessions[target.threadIndex] = {
+          ...thread,
+          title: nextTitle,
+          updatedAt: now,
+        };
+        next[target.workspaceIndex] = {
+          ...workspace,
+          sessions,
+          updatedAt: now,
+        };
+        return next;
+      }
+
+      const next = prev.map((workspace) => ({
+        ...workspace,
+        sessions: [...workspace.sessions],
+      }));
+
+      const sourceWorkspace = next[source.workspaceIndex];
+      const sourceThread = sourceWorkspace.sessions[source.threadIndex];
+
+      if (target) {
+        const targetWorkspace = next[target.workspaceIndex];
+        const targetThread = targetWorkspace.sessions[target.threadIndex];
+        const merged: ConversationThread = {
+          ...targetThread,
+          title:
+            nextTitle ||
+            targetThread.title ||
+            sourceThread.title,
+          draft: sourceThread.draft || targetThread.draft,
+          timeline:
+            targetThread.timeline.length > 0
+              ? targetThread.timeline
+              : sourceThread.timeline,
+          model: sourceThread.model || targetThread.model,
+          codexMode: sourceThread.codexMode || targetThread.codexMode,
+          resumeLast: sourceThread.resumeLast,
+          resumeSessionID: sourceThread.resumeSessionID || targetThread.resumeSessionID,
+          reviewUncommitted: sourceThread.reviewUncommitted,
+          reviewBase: sourceThread.reviewBase || targetThread.reviewBase,
+          reviewCommit: sourceThread.reviewCommit || targetThread.reviewCommit,
+          reviewTitle: sourceThread.reviewTitle || targetThread.reviewTitle,
+          sandbox: sourceThread.sandbox || targetThread.sandbox,
+          approvalPolicy: sourceThread.approvalPolicy || targetThread.approvalPolicy,
+          webSearch: sourceThread.webSearch || targetThread.webSearch,
+          profile: sourceThread.profile || targetThread.profile,
+          configFlags:
+            sourceThread.configFlags.length > 0
+              ? sourceThread.configFlags
+              : targetThread.configFlags,
+          enableFlags:
+            sourceThread.enableFlags.length > 0
+              ? sourceThread.enableFlags
+              : targetThread.enableFlags,
+          disableFlags:
+            sourceThread.disableFlags.length > 0
+              ? sourceThread.disableFlags
+              : targetThread.disableFlags,
+          addDirs:
+            sourceThread.addDirs.length > 0
+              ? sourceThread.addDirs
+              : targetThread.addDirs,
+          skipGitRepoCheck: sourceThread.skipGitRepoCheck,
+          ephemeral: sourceThread.ephemeral,
+          jsonOutput: sourceThread.jsonOutput,
+          imagePaths:
+            sourceThread.imagePaths.length > 0
+              ? sourceThread.imagePaths
+              : targetThread.imagePaths,
+          activeJobID: sourceThread.activeJobID || targetThread.activeJobID,
+          lastJobStatus:
+            sourceThread.lastJobStatus !== "idle"
+              ? sourceThread.lastJobStatus
+              : targetThread.lastJobStatus,
+          unreadDone: sourceThread.unreadDone || targetThread.unreadDone,
+          pinned: sourceThread.pinned || targetThread.pinned,
+          updatedAt: now,
+        };
+        targetWorkspace.sessions[target.threadIndex] = merged;
+      } else {
+        sourceWorkspace.sessions[source.threadIndex] = {
+          ...sourceThread,
+          id: targetID,
+          title: nextTitle || sourceThread.title,
+          updatedAt: now,
+        };
+      }
+
+      if (
+        !target ||
+        target.workspaceIndex !== source.workspaceIndex ||
+        target.threadIndex !== source.threadIndex
+      ) {
+        sourceWorkspace.sessions.splice(source.threadIndex, 1);
+        if (sourceWorkspace.activeSessionID === sourceID) {
+          const fallback = sourceWorkspace.sessions[0]?.id ?? "";
+          sourceWorkspace.activeSessionID = fallback;
+        }
+      }
+
+      for (let workspaceIndex = 0; workspaceIndex < next.length; workspaceIndex += 1) {
+        const workspace = next[workspaceIndex];
+        if (workspace.activeSessionID === sourceID) {
+          workspace.activeSessionID = targetID;
+        }
+        const hasDup = new Set<string>();
+        workspace.sessions = workspace.sessions.filter((thread) => {
+          if (hasDup.has(thread.id)) return false;
+          hasDup.add(thread.id);
+          return true;
+        });
+        workspace.updatedAt = now;
+      }
+      return next;
+    });
+
+    if (activeWorkspaceID === sourceWorkspaceID && targetWorkspaceID) {
+      setActiveWorkspaceID(targetWorkspaceID);
+    }
+    if (activeJobThreadID === sourceID) {
+      setActiveJobThreadID(targetID);
+    }
+    return targetID;
+  }
+
   function syncProjectsFromDiscovery(
     projects: DiscoveredProject[],
     options?: SyncProjectsOptions,
@@ -1284,6 +1460,7 @@ export function useSessionDomain() {
     setThreadUnread,
     setThreadTitle,
     setThreadPinned,
+    bindThreadID,
     syncProjectsFromDiscovery,
     syncProjectsFromServer,
     resetSessionDomain

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hellsoul86/remote-llm-cli/server/internal/accesskey"
+	"github.com/hellsoul86/remote-llm-cli/server/internal/codexrpc"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/executor"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/runtime"
@@ -43,6 +45,10 @@ type Server struct {
 	eventBuffers   map[string][]runJobEvent
 	streamSubID    int64
 	streamSubs     map[string]map[int64]chan model.SessionEvent
+	codexBridge    *codexrpc.Manager
+	codexBridgeSub map[string]func()
+	codexPending   map[string]map[string]codexPendingRequest
+	codexNotifSeen map[string]map[string]time.Time
 }
 
 type authIdentity struct {
@@ -70,6 +76,9 @@ const (
 	sessionStreamBuffer   = 256
 	sessionStreamHB       = 12 * time.Second
 	sessionStreamBatch    = 1000
+	codexNotifDedupTTL    = 8 * time.Minute
+	codexNotifDedupMax    = 2048
+	codexPendingTTL       = 45 * time.Minute
 	auditQueueSize        = 4096
 	auditBatchSize        = 64
 	auditFlushInterval    = 400 * time.Millisecond
@@ -96,16 +105,28 @@ func New(st *store.Store, rt *runtime.Registry) *Server {
 func NewWithOptions(st *store.Store, rt *runtime.Registry, opts ServerOptions) *Server {
 	corsAllowAll, corsOrigins := normalizeCORSAllowedOrigins(opts.CORSAllowedOrigins)
 	s := &Server{
-		store:          st,
-		runtimes:       rt,
-		runJobs:        make(chan string, runJobQueueSize),
-		auditEvents:    make(chan model.AuditEvent, auditQueueSize),
-		corsAllowAll:   corsAllowAll,
-		corsOrigins:    corsOrigins,
-		cancels:        map[string]context.CancelFunc{},
-		cancelRq:       map[string]bool{},
-		eventBuffers:   map[string][]runJobEvent{},
-		streamSubs:     map[string]map[int64]chan model.SessionEvent{},
+		store:        st,
+		runtimes:     rt,
+		runJobs:      make(chan string, runJobQueueSize),
+		auditEvents:  make(chan model.AuditEvent, auditQueueSize),
+		corsAllowAll: corsAllowAll,
+		corsOrigins:  corsOrigins,
+		cancels:      map[string]context.CancelFunc{},
+		cancelRq:     map[string]bool{},
+		eventBuffers: map[string][]runJobEvent{},
+		streamSubs:   map[string]map[int64]chan model.SessionEvent{},
+		codexBridge: codexrpc.NewManager(codexrpc.BridgeOptions{
+			StartupTimeout: 12 * time.Second,
+			RequestTimeout: 45 * time.Second,
+			ClientInfo: codexrpc.ClientInfo{
+				Name:    "remote_llm_cli",
+				Title:   "remote-llm-cli",
+				Version: "v1",
+			},
+		}),
+		codexBridgeSub: map[string]func(){},
+		codexPending:   map[string]map[string]codexPendingRequest{},
+		codexNotifSeen: map[string]map[string]time.Time{},
 		runViaSSH:      executor.RunViaSSH,
 		runRsyncViaSSH: executor.RunRsyncViaSSH,
 	}
@@ -147,6 +168,20 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/codex/platform/login", s.withAuth(http.HandlerFunc(s.handleCodexPlatformLogin)))
 	mux.Handle("POST /v1/codex/platform/mcp", s.withAuth(http.HandlerFunc(s.handleCodexPlatformMCP)))
 	mux.Handle("POST /v1/codex/platform/cloud", s.withAuth(http.HandlerFunc(s.handleCodexPlatformCloud)))
+	mux.Handle("POST /v2/codex/sessions/start", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionStart)))
+	mux.Handle("POST /v2/codex/sessions/{id}/resume", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionResume)))
+	mux.Handle("POST /v2/codex/sessions/{id}/fork", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionFork)))
+	mux.Handle("POST /v2/codex/sessions/{id}/archive", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionArchive)))
+	mux.Handle("POST /v2/codex/sessions/{id}/unarchive", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionUnarchive)))
+	mux.Handle("POST /v2/codex/sessions/{id}/name", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionSetName)))
+	mux.Handle("POST /v2/codex/sessions/{id}/turns/start", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnStart)))
+	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/interrupt", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnInterrupt)))
+	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/steer", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnSteer)))
+	mux.Handle("GET /v2/codex/sessions/{id}/requests/pending", s.withAuth(http.HandlerFunc(s.handleCodexV2PendingRequests)))
+	mux.Handle("POST /v2/codex/sessions/{id}/requests/{request_id}/resolve", s.withAuth(http.HandlerFunc(s.handleCodexV2ResolveRequest)))
+	mux.Handle("GET /v2/codex/sessions/{id}/events", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionEvents)))
+	mux.Handle("GET /v2/codex/sessions/{id}/stream", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionStream)))
+	mux.Handle("GET /v2/codex/sessions/{id}/ws", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionWS)))
 	mux.Handle("POST /v1/files/images", s.withAuth(http.HandlerFunc(s.handleUploadImage)))
 	mux.Handle("GET /v1/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
 	mux.Handle("GET /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleGetRetentionPolicy)))
@@ -228,8 +263,12 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
 		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing bearer token"})
-			return
+			queryToken := strings.TrimSpace(r.URL.Query().Get("access_token"))
+			if queryToken == "" {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing bearer token"})
+				return
+			}
+			token = queryToken
 		}
 		prefix, secret, ok := accesskey.ParseFullKey(token)
 		if !ok {
@@ -3672,6 +3711,14 @@ func (rw *responseCapture) Flush() {
 	}
 }
 
+func (rw *responseCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
 func (s *Server) startAuditWriter() {
 	go func() {
 		ticker := time.NewTicker(auditFlushInterval)
@@ -3789,6 +3836,34 @@ func inferAction(method string, path string) string {
 		return "codex.platform.mcp"
 	case method == http.MethodPost && path == "/v1/codex/platform/cloud":
 		return "codex.platform.cloud"
+	case method == http.MethodPost && path == "/v2/codex/sessions/start":
+		return "codex.v2.session.start"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/resume"):
+		return "codex.v2.session.resume"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/fork"):
+		return "codex.v2.session.fork"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/archive"):
+		return "codex.v2.session.archive"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/unarchive"):
+		return "codex.v2.session.unarchive"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/name"):
+		return "codex.v2.session.name"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/turns/start"):
+		return "codex.v2.turn.start"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.Contains(path, "/turns/") && strings.HasSuffix(path, "/interrupt"):
+		return "codex.v2.turn.interrupt"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.Contains(path, "/turns/") && strings.HasSuffix(path, "/steer"):
+		return "codex.v2.turn.steer"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/requests/pending"):
+		return "codex.v2.request.pending.list"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.Contains(path, "/requests/") && strings.HasSuffix(path, "/resolve"):
+		return "codex.v2.request.resolve"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/events"):
+		return "codex.v2.session.events.list"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/stream"):
+		return "codex.v2.session.stream.open"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/ws"):
+		return "codex.v2.session.ws.open"
 	case method == http.MethodPost && path == "/v1/files/images":
 		return "files.image.upload"
 	case method == http.MethodGet && path == "/v1/metrics":

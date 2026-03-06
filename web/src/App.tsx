@@ -1,8 +1,5 @@
 import {
-  type ClipboardEvent as ReactClipboardEvent,
-  type DragEvent as ReactDragEvent,
   FormEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
   useMemo,
   useRef,
@@ -10,1103 +7,103 @@ import {
 } from "react";
 import {
   API_BASE,
-  cancelRunJob,
-  codexPlatformCloud,
-  codexPlatformLogin,
-  codexPlatformMCP,
-  discoverCodexSessions,
-  discoverCodexModels,
-  archiveSession,
-  deleteProject,
-  deleteHost,
-  enqueueRunJob,
-  getMetrics,
-  getRunJob,
-  healthz,
-  listAudit,
-  listHosts,
-  listProjects,
-  listRunJobEvents,
-  listRunJobs,
-  listRuns,
-  listRuntimes,
-  listSessions,
-  probeHost,
-  runFanout,
-  streamSessionEvents,
-  uploadImage,
-  upsertHost,
-  upsertProject,
-  type Host,
-  type ProjectRecord,
-  type SessionEventRecord,
-  type SessionRecord,
-  type SessionStreamFrame,
-  type RunJobEvent,
-  type RunJobRecord,
-  type RunRequest,
-  type RunResponse,
-  type CodexPlatformResult,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
 import {
   clearStoredToken,
   loadStoredToken,
-  storeToken,
 } from "./domains/auth-token";
-import { summarizeJobEventLine } from "./domains/job-events";
 import {
-  type CodexApprovalPolicy,
-  type TimelineEntry,
-  type TimelineState,
   useSessionDomain,
 } from "./domains/session";
-const SESSION_TREE_PREFS_KEY = "remote_llm_session_tree_prefs_v1";
-const SESSION_EVENT_CURSOR_KEY = "remote_llm_session_event_cursor_v1";
-const COMPLETED_RUNS_KEY = "remote_llm_completed_runs_v1";
-const MAX_PERSISTED_SESSION_CURSORS = 1200;
-const MAX_PERSISTED_COMPLETED_RUNS = 2400;
-const DEFAULT_WORKSPACE_PATH = "/";
-
+import { AppChrome } from "./features/session/components/AppChrome";
+import { CommandPalette } from "./features/session/components/CommandPalette";
+import { OpsStage } from "./features/session/components/OpsStage";
+import { SessionStage } from "./features/session/components/SessionStage";
+import { TokenGate } from "./features/session/components/TokenGate";
+import { buildOpsStageProps } from "./features/session/ops-stage-props";
+import { buildSessionComposerProps } from "./features/session/session-composer-props";
+import { buildSessionSidebarProps } from "./features/session/session-sidebar-props";
+import { buildSessionStageProps } from "./features/session/session-stage-props";
+import { useAppMode } from "./features/session/use-app-mode";
+import { useComposerAutoResize } from "./features/session/use-composer-autosize";
+import { useCompletedRuns } from "./features/session/use-completed-runs";
+import { useCommandPaletteController } from "./features/session/use-command-palette";
+import { useCodexPlatformController } from "./features/session/use-codex-platform-controller";
+import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
+import { useSessionAlerts } from "./features/session/use-session-alerts";
+import { useSessionEventCursor } from "./features/session/use-session-event-cursor";
+import { useOpsPolling } from "./features/session/use-ops-polling";
+import { useSessionJobPolling } from "./features/session/use-session-job-polling";
+import { useSessionRuntimeEffects } from "./features/session/use-session-runtime-effects";
+import { useSessionStreamHealth } from "./features/session/use-session-stream-health";
+import { useTimelineEntryBody } from "./features/session/use-timeline-entry-body";
+import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
+import { useCodexPendingRequests } from "./features/session/use-codex-pending-requests";
+import { createProjectSourceActions } from "./features/session/project-source-actions";
+import { createHostActions } from "./features/session/host-actions";
+import { createOpsJobActions } from "./features/session/ops-job-actions";
+import { createProjectActions } from "./features/session/project-actions";
+import { createComposerImageActions } from "./features/session/composer-image-actions";
+import { createSessionControlActions } from "./features/session/session-control-actions";
+import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
+import { createSessionSubmitAction } from "./features/session/session-submit-action";
+import { createSessionUIActions } from "./features/session/session-ui-actions";
+import { createWorkspaceAuthActions } from "./features/session/workspace-auth-actions";
+import {
+  buildSessionCommandPaletteActions,
+  normalizeSearchText,
+  type CommandPaletteAction,
+} from "./features/session/command-palette";
+import {
+  APPROVAL_POLICY_OPTIONS,
+  COMPOSER_MAX_HEIGHT,
+  COMPOSER_MIN_HEIGHT,
+  DEFAULT_WORKSPACE_PATH,
+  MAX_COMPLETED_RUN_CACHE_SIZE,
+  MAX_SESSION_STREAMS,
+  TIMELINE_JUMP_COUNT_CAP,
+  TIMELINE_STICK_GAP_PX,
+} from "./features/session/config";
+import {
+  clearSessionRuntimePersistence,
+  loadSessionTreePrefs,
+  persistSessionTreePrefs,
+} from "./features/session/persistence";
+import {
+  type SessionTreeHost,
+} from "./features/session/types";
+import {
+  collectVisibleTreeSessionIDs,
+  filterSessionTreeHosts,
+  buildSessionTreeHosts,
+} from "./features/session/tree";
+import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
+import {
+  createSessionRunEventHandlers,
+} from "./features/session/session-run-events";
+import {
+  createSessionStreamController,
+  type SessionStreamRuntimeState,
+} from "./features/session/session-stream-controller";
+import type {
+  SessionRunStreamState,
+  SessionStreamHealthState,
+} from "./features/session/stream-types";
+import {
+  formatClock,
+  isJobActive,
+  lastUserPromptFromTimeline,
+} from "./features/session/runtime-utils";
+import { pendingRequestsStatusCopy } from "./features/session/pending-request-utils";
+import {
+  streamHealthCopy,
+  streamHealthTone,
+} from "./features/session/view-helpers";
 type AuthPhase = "checking" | "locked" | "ready";
-type AppMode = "session" | "ops";
 
-type SessionAlert = {
-  id: string;
-  threadID: string;
-  title: string;
-  body: string;
-};
-
-type SessionTreeProject = {
-  id: string;
-  hostID: string;
-  title: string;
-  path: string;
-  updatedAt: string;
-  sessions: Array<{
-    id: string;
-    title: string;
-    pinned: boolean;
-    activeJobID: string;
-    unreadDone: boolean;
-    lastJobStatus: "idle" | "running" | "succeeded" | "failed" | "canceled";
-    updatedAt: string;
-  }>;
-};
-
-type SessionTreeHost = {
-  hostID: string;
-  hostName: string;
-  hostAddress: string;
-  projects: SessionTreeProject[];
-};
-
-type SessionRunStreamState = {
-  runID: string;
-  stdout: string;
-  streamSeen: boolean;
-  assistantFinalized: boolean;
-  failureHints: string[];
-  eventParseOffset: number;
-  surfacedEventKeys: Set<string>;
-};
-
-type SessionStreamHealthState =
-  | "offline"
-  | "connecting"
-  | "live"
-  | "reconnecting"
-  | "error";
-
-type SessionStreamHealth = {
-  state: SessionStreamHealthState;
-  retries: number;
-  lastEventAt: number;
-  updatedAt: number;
-  lastError: string;
-};
-
-type SessionEventHandleOptions = {
-  surfaceCompletions?: boolean;
-  surfaceLifecycle?: boolean;
-};
-
-type CodexRuntimeCard = {
-  key: string;
-  title: string;
-  body: string;
-  state: TimelineState;
-};
-
-type CommandPaletteAction = {
-  id: string;
-  label: string;
-  detail: string;
-  searchText: string;
-  run: () => void;
-};
-
-const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
-const MESSAGE_COLLAPSE_LINE_LIMIT = 42;
-const MAX_SESSION_STREAMS = 0;
-const COMPOSER_MIN_HEIGHT = 52;
-const COMPOSER_MAX_HEIGHT = 260;
-const TIMELINE_STICK_GAP_PX = 72;
-const TIMELINE_JUMP_COUNT_CAP = 99;
-const APPROVAL_POLICY_OPTIONS: Array<{
-  value: CodexApprovalPolicy;
-  label: string;
-}> = [
-  { value: "", label: "default" },
-  { value: "untrusted", label: "untrusted" },
-  { value: "on-request", label: "on-request" },
-  { value: "never", label: "never" },
-  { value: "on-failure", label: "on-failure (legacy)" },
-];
-type CodexPlatformMCPAction =
-  | "list"
-  | "get"
-  | "add"
-  | "remove"
-  | "login"
-  | "logout";
-type CodexPlatformCloudAction =
-  | "list"
-  | "status"
-  | "exec"
-  | "diff"
-  | "apply";
-const CODEX_PLATFORM_MCP_ACTIONS: Array<{
-  value: CodexPlatformMCPAction;
-  label: string;
-}> = [
-  { value: "list", label: "list" },
-  { value: "get", label: "get" },
-  { value: "add", label: "add" },
-  { value: "remove", label: "remove" },
-  { value: "login", label: "login" },
-  { value: "logout", label: "logout" },
-];
-const CODEX_PLATFORM_CLOUD_ACTIONS: Array<{
-  value: CodexPlatformCloudAction;
-  label: string;
-}> = [
-  { value: "list", label: "list" },
-  { value: "status", label: "status" },
-  { value: "exec", label: "exec" },
-  { value: "diff", label: "diff" },
-  { value: "apply", label: "apply" },
-];
-
-type SessionTreePrefs = {
-  projectFilter: string;
-  collapsedHostIDs: string[];
-};
-
-type SessionLastStatus =
-  | "idle"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "canceled";
-
-function loadPersistedSessionEventCursors(): Map<string, number> {
-  if (typeof window === "undefined") {
-    return new Map();
-  }
-  const raw = window.localStorage.getItem(SESSION_EVENT_CURSOR_KEY);
-  if (!raw) return new Map();
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const entries = Object.entries(parsed)
-      .map(([sessionID, cursor]) => {
-        const normalizedID = sessionID.trim();
-        const normalizedCursor =
-          typeof cursor === "number" ? cursor : Number(cursor);
-        return [normalizedID, normalizedCursor] as const;
-      })
-      .filter(
-        ([sessionID, cursor]) =>
-          sessionID !== "" && Number.isFinite(cursor) && cursor > 0,
-      )
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, MAX_PERSISTED_SESSION_CURSORS);
-    return new Map(entries);
-  } catch {
-    return new Map();
-  }
-}
-
-function persistSessionEventCursors(map: Map<string, number>) {
-  if (typeof window === "undefined") return;
-  const entries = Array.from(map.entries())
-    .filter(
-      ([sessionID, cursor]) =>
-        sessionID.trim() !== "" && Number.isFinite(cursor) && cursor > 0,
-    )
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, MAX_PERSISTED_SESSION_CURSORS);
-  const payload: Record<string, number> = {};
-  for (const [sessionID, cursor] of entries) {
-    payload[sessionID] = cursor;
-  }
-  window.localStorage.setItem(SESSION_EVENT_CURSOR_KEY, JSON.stringify(payload));
-}
-
-function loadPersistedCompletedRuns(): Set<string> {
-  if (typeof window === "undefined") {
-    return new Set();
-  }
-  const raw = window.localStorage.getItem(COMPLETED_RUNS_KEY);
-  if (!raw) return new Set();
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return new Set();
-    const out = new Set<string>();
-    for (const value of parsed) {
-      if (typeof value !== "string") continue;
-      const normalized = value.trim();
-      if (!normalized) continue;
-      out.add(normalized);
-      if (out.size >= MAX_PERSISTED_COMPLETED_RUNS) break;
-    }
-    return out;
-  } catch {
-    return new Set();
-  }
-}
-
-function persistCompletedRuns(set: Set<string>) {
-  if (typeof window === "undefined") return;
-  const values = Array.from(set).filter((runID) => runID.trim() !== "");
-  const trimmed =
-    values.length > MAX_PERSISTED_COMPLETED_RUNS
-      ? values.slice(values.length - MAX_PERSISTED_COMPLETED_RUNS)
-      : values;
-  window.localStorage.setItem(COMPLETED_RUNS_KEY, JSON.stringify(trimmed));
-}
-
-function loadSessionTreePrefs(): SessionTreePrefs {
-  if (typeof window === "undefined") {
-    return { projectFilter: "", collapsedHostIDs: [] };
-  }
-  const raw = window.localStorage.getItem(SESSION_TREE_PREFS_KEY);
-  if (!raw) return { projectFilter: "", collapsedHostIDs: [] };
-  try {
-    const parsed = JSON.parse(raw) as Partial<SessionTreePrefs>;
-    const projectFilter =
-      typeof parsed.projectFilter === "string" ? parsed.projectFilter : "";
-    const collapsedHostIDs = Array.isArray(parsed.collapsedHostIDs)
-      ? parsed.collapsedHostIDs.filter(
-          (item): item is string => typeof item === "string" && item.trim() !== "",
-        )
-      : [];
-    return { projectFilter, collapsedHostIDs };
-  } catch {
-    return { projectFilter: "", collapsedHostIDs: [] };
-  }
-}
-
-function isJobActive(job: RunJobRecord | null | undefined): boolean {
-  if (!job) return false;
-  return job.status === "pending" || job.status === "running";
-}
-
-function summarizeRunResponse(response: RunResponse): string {
-  const lines = [
-    `runtime=${response.runtime}`,
-    `total=${response.summary.total} succeeded=${response.summary.succeeded} failed=${response.summary.failed}`,
-    `fanout=${response.summary.fanout} duration=${response.summary.duration_ms}ms`,
-  ];
-  for (const target of response.targets) {
-    const status = target.ok ? "ok" : "failed";
-    const exit = target.result.exit_code ?? "n/a";
-    const hint = target.error_hint ? ` hint=${target.error_hint}` : "";
-    const err = target.error ? ` error=${target.error}` : "";
-    lines.push(`${target.host.name}: ${status} exit=${exit}${hint}${err}`);
-  }
-  return lines.join("\n");
-}
-
-function sessionEventHostLabel(payload: Record<string, unknown>): string {
-  const hostName =
-    typeof payload.host_name === "string" ? payload.host_name.trim() : "";
-  if (hostName) return hostName;
-  const hostID = typeof payload.host_id === "string" ? payload.host_id.trim() : "";
-  if (hostID) return hostID;
-  return "target";
-}
-
-function lastUserPromptFromTimeline(timeline: TimelineEntry[]): string {
-  for (let index = timeline.length - 1; index >= 0; index -= 1) {
-    const entry = timeline[index];
-    if (entry.kind !== "user") continue;
-    const body = entry.body.trim();
-    if (body) return body;
-  }
-  return "";
-}
-
-function sessionCompletionCopy(status: "succeeded" | "failed" | "canceled"): {
-  suffix: string;
-  body: string;
-} {
-  switch (status) {
-    case "succeeded":
-      return { suffix: "completed", body: "New response is ready." };
-    case "failed":
-      return {
-        suffix: "failed",
-        body: "Response failed. Open this session for details.",
-      };
-    case "canceled":
-      return { suffix: "canceled", body: "Response was canceled." };
-    default:
-      return { suffix: "updated", body: "Session status changed." };
-  }
-}
-
-function normalizeSessionTitle(raw: string): string {
-  const collapsed = raw.replace(/\s+/g, " ").trim();
-  if (!collapsed) return "";
-  if (/^session(\s+\d+)?$/i.test(collapsed)) return "";
-  if (collapsed.length <= 72) return collapsed;
-  return `${collapsed.slice(0, 69).trimEnd()}...`;
-}
-
-function isGenericSessionTitle(title: string): boolean {
-  return /^session(\s+\d+)?$/i.test(title.trim());
-}
-
-function deriveSessionTitleFromPrompt(prompt: string): string {
-  const normalized = prompt
-    .replace(/[`*_#>\[\]\(\){}]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) return "";
-  const sentenceMatch = normalized.match(/^(.{1,88}?)([.!?。！？]|$)/);
-  const sentence = (sentenceMatch?.[1] ?? normalized).trim();
-  const words = sentence.split(" ").filter((word) => word.trim() !== "");
-  const compact = words.slice(0, 10).join(" ");
-  return normalizeSessionTitle(compact);
-}
-
-function clipStreamText(raw: string, maxChars = 3600): string {
-  if (raw.length <= maxChars) return raw;
-  return `${raw.slice(raw.length - maxChars)}\n...[stream truncated for UI]...`;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object") return null;
-  return value as Record<string, unknown>;
-}
-
-function gatherMessageText(value: unknown, depth = 0): string[] {
-  if (depth > 4) return [];
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed ? [trimmed] : [];
-  }
-  if (Array.isArray(value)) {
-    const out: string[] = [];
-    for (const item of value) {
-      out.push(...gatherMessageText(item, depth + 1));
-    }
-    return out;
-  }
-
-  const record = asRecord(value);
-  if (!record) return [];
-  const out: string[] = [];
-  const keys = ["text", "message", "content", "parts", "output_text"];
-  for (const key of keys) {
-    if (!(key in record)) continue;
-    out.push(...gatherMessageText(record[key], depth + 1));
-  }
-  return out;
-}
-
-function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
-  const eventType = typeof event.type === "string" ? event.type : "";
-  if (eventType === "item.completed") {
-    const item = asRecord(event.item);
-    if (!item) return "";
-    const itemType = typeof item.type === "string" ? item.type : "";
-    const itemRole = typeof item.role === "string" ? item.role : "";
-    if (
-      itemType !== "" &&
-      itemType !== "agent_message" &&
-      itemType !== "assistant_message" &&
-      itemType !== "message" &&
-      itemRole !== "assistant"
-    ) {
-      return "";
-    }
-    return gatherMessageText(item).join("\n").trim();
-  }
-
-  if (eventType === "response.completed") {
-    const response = asRecord(event.response);
-    if (!response) return "";
-    return gatherMessageText(response).join("\n").trim();
-  }
-
-  return "";
-}
-
-function isProtocolNoiseLine(line: string): boolean {
-  const normalized = line.trim();
-  if (!normalized) return true;
-  if (/^done\.?$/i.test(normalized)) return true;
-  if (normalized.includes(`"type":"thread.started"`)) return true;
-  if (normalized.includes(`"type":"turn.started"`)) return true;
-  if (normalized.includes(`"type":"turn.completed"`)) return true;
-  if (normalized.includes(`"type":"response.started"`)) return true;
-  return false;
-}
-
-function parseCodexAssistantTextFromStdout(
-  stdout: string,
-  allowPlainTextFallback = true,
-): string {
-  if (!stdout.trim()) return "";
-  const lines = stdout.split(/\r?\n/);
-  const messages: string[] = [];
-  const deltas: string[] = [];
-  const plainLines: string[] = [];
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      if (!isProtocolNoiseLine(line)) {
-        plainLines.push(line);
-      }
-      continue;
-    }
-    const event = asRecord(parsed);
-    if (!event) continue;
-    const eventType = typeof event.type === "string" ? event.type : "";
-    if (eventType.endsWith(".delta")) {
-      const deltaText = gatherMessageText(event.delta ?? event).join("");
-      if (deltaText.trim()) {
-        deltas.push(deltaText);
-      }
-    }
-    const text = pickAssistantTextFromEvent(event);
-    if (!text) continue;
-    if (!messages.includes(text)) {
-      messages.push(text);
-    }
-  }
-  if (messages.length > 0) {
-    return messages[messages.length - 1] ?? "";
-  }
-  if (deltas.length > 0) {
-    return deltas.join("").trim();
-  }
-  if (allowPlainTextFallback && plainLines.length > 0) {
-    return plainLines.join("\n").trim();
-  }
-  return "";
-}
-
-function pickSessionTitleFromEvent(event: Record<string, unknown>): string {
-  const direct = normalizeSessionTitle(
-    typeof event.title === "string" ? event.title : "",
-  );
-  if (direct) return direct;
-  const nestedKeys = ["thread", "session", "payload", "item", "data", "meta"];
-  for (const key of nestedKeys) {
-    const record = asRecord(event[key]);
-    if (!record) continue;
-    const title = normalizeSessionTitle(
-      typeof record.title === "string" ? record.title : "",
-    );
-    if (title) return title;
-  }
-  return "";
-}
-
-function parseCodexSessionTitleFromStdout(stdout: string): string {
-  if (!stdout.trim()) return "";
-  const lines = stdout.split(/\r?\n/);
-  let latest = "";
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const event = asRecord(parsed);
-    if (!event) continue;
-    const eventType =
-      typeof event.type === "string" ? event.type.toLowerCase() : "";
-    if (eventType.includes("title")) {
-      const titled = pickSessionTitleFromEvent(event);
-      if (titled) latest = titled;
-      continue;
-    }
-    if (eventType === "thread.started" || eventType === "session.started") {
-      const titled = pickSessionTitleFromEvent(event);
-      if (titled) latest = titled;
-    }
-  }
-  return latest;
-}
-
-function runtimeStateFromStatus(status: string): TimelineState {
-  const normalized = status.trim().toLowerCase();
-  if (
-    normalized === "failed" ||
-    normalized === "error" ||
-    normalized === "declined"
-  ) {
-    return "error";
-  }
-  if (normalized === "completed" || normalized === "succeeded") {
-    return "success";
-  }
-  return "running";
-}
-
-function codexEventIncludesApproval(text: string): boolean {
-  return /(approval|declined|rejected by user|approval settings)/i.test(text);
-}
-
-function summarizeCodexFileChanges(raw: unknown): string {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return "No file changes were reported.";
-  }
-  const lines: string[] = [];
-  for (const value of raw) {
-    const change = asRecord(value);
-    if (!change) continue;
-    const kind =
-      typeof change.kind === "string" && change.kind.trim() !== ""
-        ? change.kind.trim()
-        : "update";
-    const path =
-      typeof change.path === "string" && change.path.trim() !== ""
-        ? change.path.trim()
-        : "(unknown path)";
-    lines.push(`${kind} ${path}`);
-    if (lines.length >= 5) break;
-  }
-  if (lines.length === 0) {
-    return "No file changes were reported.";
-  }
-  if (Array.isArray(raw) && raw.length > lines.length) {
-    lines.push(`...and ${raw.length - lines.length} more`);
-  }
-  return lines.join("\n");
-}
-
-function buildCodexRuntimeCardFromEvent(
-  event: Record<string, unknown>,
-  runID: string,
-): CodexRuntimeCard | null {
-  const eventType =
-    typeof event.type === "string" ? event.type.trim().toLowerCase() : "";
-  if (!eventType) return null;
-
-  if (eventType === "error") {
-    const message =
-      typeof event.message === "string" ? event.message.trim() : "";
-    if (!message || !codexEventIncludesApproval(message)) {
-      return null;
-    }
-    return {
-      key: `${runID}:approval:error:${message}`,
-      title: "Approval Required",
-      body: message,
-      state: "error",
-    };
-  }
-
-  if (eventType === "turn.failed") {
-    const error = asRecord(event.error);
-    const message =
-      error && typeof error.message === "string"
-        ? error.message.trim()
-        : typeof event.message === "string"
-          ? event.message.trim()
-          : "";
-    if (!message || !codexEventIncludesApproval(message)) {
-      return null;
-    }
-    return {
-      key: `${runID}:approval:turn_failed:${message}`,
-      title: "Approval Required",
-      body: message,
-      state: "error",
-    };
-  }
-
-  if (
-    eventType !== "item.started" &&
-    eventType !== "item.updated" &&
-    eventType !== "item.completed"
-  ) {
-    return null;
-  }
-
-  const item = asRecord(event.item);
-  if (!item) return null;
-  const itemID =
-    typeof item.id === "string" && item.id.trim() !== ""
-      ? item.id.trim()
-      : "item";
-  const itemType =
-    typeof item.type === "string" ? item.type.trim().toLowerCase() : "";
-  if (!itemType) return null;
-
-  if (itemType === "command_execution") {
-    const command =
-      typeof item.command === "string" && item.command.trim() !== ""
-        ? item.command.trim()
-        : "command";
-    const status =
-      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
-    const effectiveStatus =
-      status || (eventType === "item.completed" ? "completed" : "in_progress");
-    const exitCode =
-      typeof item.exit_code === "number" ? ` exit=${item.exit_code}` : "";
-    const output =
-      typeof item.aggregated_output === "string"
-        ? item.aggregated_output.trim()
-        : "";
-    if (effectiveStatus === "declined") {
-      return {
-        key: `${runID}:approval:${itemID}:${effectiveStatus}`,
-        title: "Approval Required",
-        body: `Command was declined: ${command}`,
-        state: "error",
-      };
-    }
-    const title =
-      effectiveStatus === "failed"
-        ? "Command Failed"
-        : effectiveStatus === "completed"
-          ? "Command Completed"
-          : "Command Started";
-    const bodyParts = [`${command}${exitCode}`.trim()];
-    if (output) {
-      bodyParts.push(clipStreamText(output, 1200));
-    }
-    return {
-      key: `${runID}:command:${itemID}:${effectiveStatus}`,
-      title,
-      body: bodyParts.join("\n"),
-      state: runtimeStateFromStatus(effectiveStatus),
-    };
-  }
-
-  if (itemType === "file_change") {
-    const status =
-      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
-    const effectiveStatus =
-      status || (eventType === "item.completed" ? "completed" : "in_progress");
-    return {
-      key: `${runID}:patch:${itemID}:${effectiveStatus}`,
-      title:
-        effectiveStatus === "failed"
-          ? "Patch Failed"
-          : effectiveStatus === "completed"
-            ? "Patch Applied"
-            : "Patch Started",
-      body: summarizeCodexFileChanges(item.changes),
-      state: runtimeStateFromStatus(effectiveStatus),
-    };
-  }
-
-  if (itemType === "mcp_tool_call") {
-    const server =
-      typeof item.server === "string" && item.server.trim() !== ""
-        ? item.server.trim()
-        : "server";
-    const tool =
-      typeof item.tool === "string" && item.tool.trim() !== ""
-        ? item.tool.trim()
-        : "tool";
-    const status =
-      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
-    const effectiveStatus =
-      status || (eventType === "item.completed" ? "completed" : "in_progress");
-    const errorRecord = asRecord(item.error);
-    const errorMessage =
-      errorRecord && typeof errorRecord.message === "string"
-        ? errorRecord.message.trim()
-        : "";
-    const body = [`${server}.${tool}`];
-    if (errorMessage) body.push(errorMessage);
-    return {
-      key: `${runID}:tool:${itemID}:${effectiveStatus}`,
-      title:
-        effectiveStatus === "failed"
-          ? "Tool Failed"
-          : effectiveStatus === "completed"
-            ? "Tool Completed"
-            : "Tool Started",
-      body: body.join("\n"),
-      state: runtimeStateFromStatus(effectiveStatus),
-    };
-  }
-
-  if (itemType === "web_search") {
-    const status =
-      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
-    const effectiveStatus =
-      status || (eventType === "item.completed" ? "completed" : "in_progress");
-    const query =
-      typeof item.query === "string" && item.query.trim() !== ""
-        ? item.query.trim()
-        : "(empty query)";
-    return {
-      key: `${runID}:tool:${itemID}:web_search:${effectiveStatus}`,
-      title:
-        effectiveStatus === "completed" ? "Tool Completed" : "Tool Started",
-      body: `web_search\n${query}`,
-      state: runtimeStateFromStatus(effectiveStatus),
-    };
-  }
-
-  if (itemType === "collab_tool_call") {
-    const status =
-      typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
-    const effectiveStatus =
-      status || (eventType === "item.completed" ? "completed" : "in_progress");
-    const tool =
-      typeof item.tool === "string" && item.tool.trim() !== ""
-        ? item.tool.trim()
-        : "collab_tool";
-    return {
-      key: `${runID}:tool:${itemID}:collab:${effectiveStatus}`,
-      title:
-        effectiveStatus === "failed"
-          ? "Tool Failed"
-          : effectiveStatus === "completed"
-            ? "Tool Completed"
-            : "Tool Started",
-      body: tool,
-      state: runtimeStateFromStatus(effectiveStatus),
-    };
-  }
-
-  if (itemType === "error") {
-    const message =
-      typeof item.message === "string" ? item.message.trim() : "";
-    if (!message || !codexEventIncludesApproval(message)) {
-      return null;
-    }
-    return {
-      key: `${runID}:approval:${itemID}:item_error`,
-      title: "Approval Required",
-      body: message,
-      state: "error",
-    };
-  }
-
-  return null;
-}
-
-function parseCodexEventsIncremental(
-  stdout: string,
-  offset: number,
-): { nextOffset: number; events: Array<Record<string, unknown>> } {
-  if (!stdout) return { nextOffset: 0, events: [] };
-  let cursor = Math.max(0, Math.min(offset, stdout.length));
-  if (cursor > 0 && stdout[cursor - 1] !== "\n") {
-    const nextBreak = stdout.indexOf("\n", cursor);
-    if (nextBreak < 0) {
-      return { nextOffset: cursor, events: [] };
-    }
-    cursor = nextBreak + 1;
-  }
-  const events: Array<Record<string, unknown>> = [];
-  let scan = cursor;
-  while (scan < stdout.length) {
-    const nextBreak = stdout.indexOf("\n", scan);
-    if (nextBreak < 0) break;
-    const line = stdout.slice(scan, nextBreak).trim();
-    scan = nextBreak + 1;
-    if (!line) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const event = asRecord(parsed);
-    if (event) events.push(event);
-  }
-  return { nextOffset: scan, events };
-}
-
-function appendCodexStdoutChunk(state: SessionRunStreamState, chunk: string) {
-  if (!chunk) return;
-  state.stdout = `${state.stdout}${chunk}`;
-  if (state.stdout.length > 220000) {
-    const trim = state.stdout.length - 220000;
-    state.stdout = state.stdout.slice(trim);
-    state.eventParseOffset = Math.max(0, state.eventParseOffset - trim);
-  }
-}
-
-function extractAssistantTextFromJob(job: RunJobRecord): string {
-  const response = job.response;
-  if (
-    !response ||
-    !("targets" in response) ||
-    !Array.isArray(response.targets) ||
-    response.targets.length === 0
-  ) {
-    return "";
-  }
-  const targetMessages: string[] = [];
-  const multiTarget = response.targets.length > 1;
-  for (const target of response.targets) {
-    const stdout = target?.result?.stdout;
-    if (typeof stdout !== "string" || !stdout.trim()) continue;
-    const assistantText =
-      parseCodexAssistantTextFromStdout(stdout, false) ||
-      parseCodexAssistantTextFromStdout(stdout, true);
-    if (!assistantText) continue;
-    if (multiTarget) {
-      const hostName = target.host?.name?.trim() || target.host?.id || "target";
-      targetMessages.push(`[${hostName}] ${assistantText}`);
-    } else {
-      targetMessages.push(assistantText);
-    }
-  }
-  return targetMessages.join("\n\n").trim();
-}
-
-function jobHasTargetFailures(job: RunJobRecord): boolean {
-  const response = job.response;
-  if (!response || !("summary" in response) || !("targets" in response))
-    return false;
-  const failedCount =
-    typeof response.summary?.failed === "number" ? response.summary.failed : 0;
-  if (failedCount > 0) return true;
-  if (!Array.isArray(response.targets)) return false;
-  return response.targets.some((target) => target?.ok === false);
-}
-
-function summarizeTargetFailures(job: RunJobRecord): string {
-  const response = job.response;
-  if (!response || !("targets" in response) || !Array.isArray(response.targets))
-    return "";
-  const lines: string[] = [];
-  for (const target of response.targets) {
-    if (target?.ok !== false) continue;
-    const hostName = target.host?.name?.trim() || target.host?.id || "target";
-    const parts = [`${hostName} failed`];
-    if (target.error) parts.push(`error=${target.error}`);
-    if (target.error_hint) parts.push(`hint=${target.error_hint}`);
-    if (
-      typeof target.result?.stderr === "string" &&
-      target.result.stderr.trim()
-    ) {
-      parts.push(`stderr=${clipStreamText(target.result.stderr.trim(), 1000)}`);
-    }
-    lines.push(parts.join(" "));
-  }
-  return lines.join("\n");
-}
-
-function formatClock(ts: string): string {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function formatDateTime(ts: string | undefined): string {
-  if (!ts) return "-";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleString();
-}
-
-function projectTitleFromPath(path: string): string {
-  const trimmed = path.trim();
-  if (!trimmed) return "Untitled Project";
-  const segments = trimmed.split("/").filter((part) => part.trim() !== "");
-  const tail = segments[segments.length - 1];
-  return tail?.trim() || trimmed;
-}
-
-function resolveProjectTitle(path: string, title?: string): string {
-  const explicit = title?.trim() ?? "";
-  if (explicit) return explicit;
-  return projectTitleFromPath(path);
-}
-
-function firstImageFile(
-  source: FileList | File[] | null | undefined,
-): File | null {
-  if (!source) return null;
-  const files = Array.from(source);
-  for (const file of files) {
-    if (file.type.toLowerCase().startsWith("image/")) {
-      return file;
-    }
-  }
-  return null;
-}
-
-function dataTransferHasImage(data: DataTransfer | null | undefined): boolean {
-  if (!data) return false;
-  const itemTypes = Array.from(data.items ?? []).map((item) =>
-    item.type.toLowerCase(),
-  );
-  if (itemTypes.some((type) => type.startsWith("image/"))) return true;
-  return Boolean(firstImageFile(data.files));
-}
-
-function normalizeSearchText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-type MessageSegment =
-  | {
-      kind: "text";
-      content: string;
-    }
-  | {
-      kind: "code";
-      lang: string;
-      content: string;
-    };
-
-function parseMessageSegments(raw: string): MessageSegment[] {
-  const body = raw ?? "";
-  if (!body.trim()) {
-    return [{ kind: "text", content: "" }];
-  }
-  const fencePattern = /```([^\n`]*)\n([\s\S]*?)```/g;
-  const segments: MessageSegment[] = [];
-  let cursor = 0;
-  for (const match of body.matchAll(fencePattern)) {
-    const start = match.index ?? 0;
-    if (start > cursor) {
-      const text = body.slice(cursor, start);
-      if (text.length > 0) {
-        segments.push({ kind: "text", content: text });
-      }
-    }
-    const lang = (match[1] ?? "").trim();
-    const code = (match[2] ?? "").replace(/\n$/, "");
-    segments.push({ kind: "code", lang, content: code });
-    cursor = start + match[0].length;
-  }
-  if (cursor < body.length) {
-    const tail = body.slice(cursor);
-    if (tail.length > 0) {
-      segments.push({ kind: "text", content: tail });
-    }
-  }
-  if (segments.length === 0) {
-    segments.push({ kind: "text", content: body });
-  }
-  return segments;
-}
-
-function shouldCollapseMessageBody(raw: string): boolean {
-  if (!raw.trim()) return false;
-  const lines = raw.split(/\r?\n/);
-  if (lines.length > MESSAGE_COLLAPSE_LINE_LIMIT) return true;
-  return raw.length > 7000;
-}
-
-function statusTone(status: string): "ok" | "warn" | "err" {
-  if (status === "succeeded") return "ok";
-  if (status === "failed" || status === "canceled") return "err";
-  return "warn";
-}
-
-function modeFromHash(hash: string): AppMode {
-  return hash === "#/ops" ? "ops" : "session";
-}
-
-function modeToHash(mode: AppMode): string {
-  return mode === "ops" ? "#/ops" : "#/session";
-}
-
-function streamHealthTone(
-  state: SessionStreamHealthState,
-): "ok" | "warn" | "error" {
-  if (state === "live") return "ok";
-  if (state === "error") return "error";
-  if (state === "offline") return "warn";
-  return "warn";
-}
-
-function streamHealthCopy(
-  state: SessionStreamHealthState,
-  retries: number,
-): string {
-  if (state === "live") return "live";
-  if (state === "connecting") return "connecting";
-  if (state === "reconnecting")
-    return retries > 0 ? `reconnecting (${retries})` : "reconnecting";
-  if (state === "error")
-    return retries > 0 ? `stream error (${retries})` : "stream error";
-  return "offline";
-}
-
-function splitCSVValues(raw: string): string[] {
-  return raw
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item !== "");
-}
-
-function formatCodexPlatformResult(result: CodexPlatformResult | null): string {
-  if (!result) return "No command executed yet.";
-  const lines: string[] = [];
-  lines.push(`operation: ${result.operation}`);
-  lines.push(`status: ${result.ok ? "ok" : "error"}`);
-  const command = Array.isArray(result.command)
-    ? result.command.join(" ")
-    : "";
-  if (command) lines.push(`command: ${command}`);
-  if (result.workdir) lines.push(`workdir: ${result.workdir}`);
-  if (result.error) lines.push(`error: ${result.error}`);
-  if (result.error_hint) lines.push(`hint: ${result.error_hint}`);
-
-  const stdout = result.result?.stdout?.trim() ?? "";
-  const stderr = result.result?.stderr?.trim() ?? "";
-  if (stdout) {
-    lines.push("");
-    lines.push("[stdout]");
-    lines.push(stdout);
-  }
-  if (stderr) {
-    lines.push("");
-    lines.push("[stderr]");
-    lines.push(stderr);
-  }
-  if (typeof result.json !== "undefined") {
-    lines.push("");
-    lines.push("[json]");
-    try {
-      lines.push(JSON.stringify(result.json, null, 2));
-    } catch {
-      lines.push(String(result.json));
-    }
-  }
-  return lines.join("\n").trim();
+function isLocalDraftSessionID(sessionID: string): boolean {
+  return /^session_\d+_\d+$/.test(sessionID.trim());
 }
 
 export function App() {
@@ -1116,41 +113,7 @@ export function App() {
     () => loadStoredToken(),
   );
   const [authError, setAuthError] = useState("");
-  const [appMode, setAppMode] = useState<AppMode>(() =>
-    typeof window === "undefined"
-      ? "session"
-      : modeFromHash(window.location.hash),
-  );
-  const [platformHostID, setPlatformHostID] = useState("");
-  const [platformBusySection, setPlatformBusySection] = useState<
-    "" | "login" | "mcp" | "cloud"
-  >("");
-  const [platformNotice, setPlatformNotice] = useState("");
-  const [platformLoginResult, setPlatformLoginResult] =
-    useState<CodexPlatformResult | null>(null);
-  const [platformMCPAction, setPlatformMCPAction] =
-    useState<CodexPlatformMCPAction>("list");
-  const [platformMCPName, setPlatformMCPName] = useState("");
-  const [platformMCPURL, setPlatformMCPURL] = useState("");
-  const [platformMCPCommand, setPlatformMCPCommand] = useState("");
-  const [platformMCPEnvCSV, setPlatformMCPEnvCSV] = useState("");
-  const [platformMCPBearerTokenEnvVar, setPlatformMCPBearerTokenEnvVar] =
-    useState("");
-  const [platformMCPScopeCSV, setPlatformMCPScopeCSV] = useState("");
-  const [platformMCPResult, setPlatformMCPResult] =
-    useState<CodexPlatformResult | null>(null);
-  const [platformCloudAction, setPlatformCloudAction] =
-    useState<CodexPlatformCloudAction>("list");
-  const [platformCloudTaskID, setPlatformCloudTaskID] = useState("");
-  const [platformCloudEnvID, setPlatformCloudEnvID] = useState("");
-  const [platformCloudQuery, setPlatformCloudQuery] = useState("");
-  const [platformCloudAttempts, setPlatformCloudAttempts] = useState("1");
-  const [platformCloudBranch, setPlatformCloudBranch] = useState("");
-  const [platformCloudLimit, setPlatformCloudLimit] = useState("20");
-  const [platformCloudCursor, setPlatformCloudCursor] = useState("");
-  const [platformCloudAttempt, setPlatformCloudAttempt] = useState("1");
-  const [platformCloudResult, setPlatformCloudResult] =
-    useState<CodexPlatformResult | null>(null);
+  const { appMode, switchMode } = useAppMode();
 
   const ops = useOpsDomain();
   const session = useSessionDomain();
@@ -1180,8 +143,6 @@ export function App() {
     setRunSandbox,
     runAsyncMode,
     setRunAsyncMode,
-    fanoutValue,
-    maxOutputKB,
     isRefreshing,
     setIsRefreshing,
     activeJobID,
@@ -1257,21 +218,42 @@ export function App() {
     setThreadUnread,
     setThreadTitle,
     setThreadPinned,
+    bindThreadID,
     runningThreadJobs,
     syncProjectsFromDiscovery,
     syncProjectsFromServer,
     resetSessionDomain,
   } = session;
 
-  const [notificationPermission, setNotificationPermission] =
-    useState<NotificationPermission>(
-      typeof Notification === "undefined" ? "denied" : Notification.permission,
-    );
-  const [sessionAlerts, setSessionAlerts] = useState<SessionAlert[]>([]);
-  const [sessionAlertsExpanded, setSessionAlertsExpanded] = useState(true);
-  const [sessionStreamHealthByID, setSessionStreamHealthByID] = useState<
-    Record<string, SessionStreamHealth>
-  >({});
+  const {
+    notificationPermission,
+    sessionAlerts,
+    sessionAlertsExpanded,
+    setSessionAlertsExpanded,
+    pushSessionAlert,
+    dismissSessionAlert,
+    clearSessionAlerts,
+    onEnableNotifications,
+    notifySessionDone,
+  } = useSessionAlerts();
+  const {
+    sessionEventCursorRef,
+    setSessionEventCursor,
+    deleteSessionEventCursor,
+    pruneSessionEventCursors,
+  } = useSessionEventCursor();
+  const {
+    sessionStreamHealthByID,
+    updateSessionStreamHealth,
+    clearSessionStreamHealth,
+    clearAllSessionStreamHealth,
+  } = useSessionStreamHealth();
+  const {
+    hydrateCompletedRuns,
+    hasCompletedRun,
+    markRunCompleted,
+    clearCompletedRuns,
+  } = useCompletedRuns(completedJobsRef, MAX_COMPLETED_RUN_CACHE_SIZE);
   const [submittingThreadID, setSubmittingThreadID] = useState("");
   const [cancelingThreadID, setCancelingThreadID] = useState("");
   const [deletingThreadID, setDeletingThreadID] = useState("");
@@ -1292,64 +274,36 @@ export function App() {
   const [enableFlagDraft, setEnableFlagDraft] = useState("");
   const [disableFlagDraft, setDisableFlagDraft] = useState("");
   const [composerDropActive, setComposerDropActive] = useState(false);
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
-  const [commandPaletteCursor, setCommandPaletteCursor] = useState(0);
   const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
   const [projectFilter, setProjectFilter] = useState(sessionTreePrefs.projectFilter);
   const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
     sessionTreePrefs.collapsedHostIDs,
   );
   const [treeCursorSessionID, setTreeCursorSessionID] = useState("");
-  const [expandedMessageIDs, setExpandedMessageIDs] = useState<string[]>([]);
-  const [copiedCodeKey, setCopiedCodeKey] = useState("");
-  const [timelineUnreadCount, setTimelineUnreadCount] = useState(0);
-
-  const timelineViewportRef = useRef<HTMLElement | null>(null);
-  const timelineBottomRef = useRef<HTMLDivElement | null>(null);
-  const timelineStickToBottomRef = useRef(true);
-  const timelineForceStickRef = useRef(false);
-  const timelineLastSignatureRef = useRef("");
-  const timelineLastCountRef = useRef(0);
-  const timelineLastTailIDRef = useRef("");
-  const timelineLastTailStateRef = useRef("");
-  const lastTimelineThreadIDRef = useRef("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
-  const commandPaletteInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const composerDragDepthRef = useRef(0);
-  const copyResetTimerRef = useRef<number | null>(null);
   const jobEventCursorRef = useRef<Map<string, number>>(new Map());
   const jobStreamSeenRef = useRef<Map<string, boolean>>(new Map());
   const jobNoTextFinalizeRetriesRef = useRef<Map<string, number>>(new Map());
-  const sessionEventCursorRef = useRef<Map<string, number>>(
-    loadPersistedSessionEventCursors(),
+  const sessionStreamStateRef = useRef<Map<string, SessionStreamRuntimeState>>(
+    new Map(),
   );
-  const sessionStreamStateRef = useRef<
-    Map<
-      string,
-      {
-        controller: AbortController;
-        ready: boolean;
-        lastEventAt: number;
-        suppressReplaySurface: boolean;
-      }
-    >
-  >(new Map());
   const sessionEventQueueRef = useRef<Map<string, Promise<void>>>(new Map());
   const sessionRunStateRef = useRef<Map<string, SessionRunStreamState>>(
     new Map(),
   );
   const streamAuthTokenRef = useRef("");
   const completionAlertCutoffMSRef = useRef<number>(Date.now());
-  const completedRunsHydratedRef = useRef(false);
   const activeThreadIDRef = useRef(activeThreadID);
   const threadTitleMapRef = useRef<Map<string, string>>(new Map());
   const threadWorkspaceMapRef = useRef<Map<string, string>>(new Map());
   const runningSessionIDsRef = useRef<Set<string>>(new Set());
-  const previousAlertCountRef = useRef(0);
   const tokenRef = useRef(token);
+  const archiveSessionActionRef = useRef<() => Promise<void>>(async () => {});
+  const reconnectStreamActionRef = useRef<() => void>(() => {});
+  const forkSessionActionRef = useRef<() => Promise<void>>(async () => {});
 
   const activeRuntime = useMemo(
     () =>
@@ -1380,161 +334,22 @@ export function App() {
     }
     return out;
   }, [workspaces]);
-  const sessionStreamTargetIDs = useMemo(() => {
-    type StreamTarget = {
-      id: string;
-      priority: number;
-      updatedAtMS: number;
-    };
-    const byID = new Map<string, StreamTarget>();
-    const touch = (idRaw: string, priority: number, updatedAtRaw: string) => {
-      const id = idRaw.trim();
-      if (!id) return;
-      const parsed = Date.parse(updatedAtRaw);
-      const updatedAtMS = Number.isFinite(parsed) ? parsed : 0;
-      const existing = byID.get(id);
-      if (
-        !existing ||
-        priority < existing.priority ||
-        (priority === existing.priority && updatedAtMS > existing.updatedAtMS)
-      ) {
-        byID.set(id, { id, priority, updatedAtMS });
-      }
-    };
-
-    for (const workspace of workspaces) {
-      for (const thread of workspace.sessions) {
-        const priority = thread.id === activeThreadID
-          ? 0
-          : thread.activeJobID.trim()
-            ? 1
-            : thread.pinned
-              ? 2
-              : thread.unreadDone
-                ? 3
-                : 9;
-        touch(thread.id, priority, thread.updatedAt);
-      }
-    }
-
-    const ordered = Array.from(byID.values()).sort((left, right) => {
-      if (left.priority !== right.priority) {
-        return left.priority - right.priority;
-      }
-      if (left.updatedAtMS !== right.updatedAtMS) {
-        return right.updatedAtMS - left.updatedAtMS;
-      }
-      return left.id.localeCompare(right.id);
-    });
-
-    if (MAX_SESSION_STREAMS <= 0) {
-      return ordered.map((item) => item.id);
-    }
-
-    const pinned = ordered.filter((item) => item.priority <= 3);
-    if (pinned.length >= MAX_SESSION_STREAMS) {
-      return pinned.slice(0, MAX_SESSION_STREAMS).map((item) => item.id);
-    }
-
-    const chosen = [...pinned];
-    const chosenIDs = new Set(chosen.map((item) => item.id));
-    for (const item of ordered) {
-      if (chosenIDs.has(item.id)) continue;
-      chosen.push(item);
-      chosenIDs.add(item.id);
-      if (chosen.length >= MAX_SESSION_STREAMS) break;
-    }
-    return chosen.map((item) => item.id);
-  }, [workspaces, activeThreadID]);
+  const sessionStreamTargetIDs = useMemo(
+    () =>
+      buildSessionStreamTargetIDs(
+        workspaces,
+        activeThreadID,
+        MAX_SESSION_STREAMS,
+      ),
+    [workspaces, activeThreadID],
+  );
   const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
-  const sessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
-    const hostLookup = new Map<string, Host>();
-    for (const host of hosts) {
-      hostLookup.set(host.id, host);
-    }
-
-    const groups = new Map<string, SessionTreeHost>();
-    for (const workspace of workspaces) {
-      const hostID = workspace.hostID?.trim() || "unknown";
-      const host = hostLookup.get(hostID);
-      const group = groups.get(hostID) ?? {
-        hostID,
-        hostName: workspace.hostName || host?.name || hostID,
-        hostAddress: host
-          ? `${host.user ? `${host.user}@` : ""}${host.host}:${host.port}`
-          : "",
-        projects: [],
-      };
-
-      const project: SessionTreeProject = {
-        id: workspace.id,
-        hostID,
-        title: resolveProjectTitle(workspace.path, workspace.title),
-        path: workspace.path,
-        updatedAt: workspace.updatedAt,
-        sessions: [...workspace.sessions]
-          .sort((a, b) => {
-            if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-            if (a.unreadDone !== b.unreadDone) return a.unreadDone ? -1 : 1;
-            const aRunning = a.activeJobID.trim() !== "";
-            const bRunning = b.activeJobID.trim() !== "";
-            if (aRunning !== bRunning) return aRunning ? -1 : 1;
-            const aTS = Date.parse(a.updatedAt);
-            const bTS = Date.parse(b.updatedAt);
-            const safeA = Number.isFinite(aTS) ? aTS : 0;
-            const safeB = Number.isFinite(bTS) ? bTS : 0;
-            if (safeA !== safeB) return safeB - safeA;
-            return a.title.localeCompare(b.title);
-          })
-          .map((sessionItem) => ({
-            id: sessionItem.id,
-            title: sessionItem.title,
-            pinned: Boolean(sessionItem.pinned),
-            activeJobID: sessionItem.activeJobID,
-            unreadDone: sessionItem.unreadDone,
-            lastJobStatus: sessionItem.lastJobStatus,
-            updatedAt: sessionItem.updatedAt,
-          })),
-      };
-
-      group.projects.push(project);
-      groups.set(hostID, group);
-    }
-
-    return Array.from(groups.values()).map((group) => ({
-      ...group,
-      projects: group.projects.sort((a, b) => {
-        const projectPriority = (project: SessionTreeProject): number => {
-          if (project.id === activeWorkspaceID) return 0;
-          if (project.sessions.some((sessionItem) => sessionItem.activeJobID.trim() !== "")) return 1;
-          if (project.sessions.some((sessionItem) => sessionItem.unreadDone)) return 2;
-          return 3;
-        };
-        const aPriority = projectPriority(a);
-        const bPriority = projectPriority(b);
-        if (aPriority !== bPriority) return aPriority - bPriority;
-
-        const projectUpdatedAtMS = (project: SessionTreeProject): number => {
-          const parsedProjectTS = Date.parse(project.updatedAt);
-          let latest = Number.isFinite(parsedProjectTS) ? parsedProjectTS : 0;
-          for (const sessionItem of project.sessions) {
-            const parsedSessionTS = Date.parse(sessionItem.updatedAt);
-            if (Number.isFinite(parsedSessionTS)) {
-              latest = Math.max(latest, parsedSessionTS);
-            }
-          }
-          return latest;
-        };
-        const aUpdatedAtMS = projectUpdatedAtMS(a);
-        const bUpdatedAtMS = projectUpdatedAtMS(b);
-        if (aUpdatedAtMS !== bUpdatedAtMS) return bUpdatedAtMS - aUpdatedAtMS;
-
-        const titleDiff = a.title.localeCompare(b.title);
-        if (titleDiff !== 0) return titleDiff;
-        return a.path.localeCompare(b.path);
-      }),
-    }));
-  }, [hosts, workspaces, activeWorkspaceID]);
+  const activeWorkspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
+  const activeWorkspacePath = activeWorkspace?.path?.trim() ?? "";
+  const sessionTreeHosts = useMemo<SessionTreeHost[]>(
+    () => buildSessionTreeHosts(hosts, workspaces, activeWorkspaceID),
+    [hosts, workspaces, activeWorkspaceID],
+  );
   const sourceProjectIDSet = useMemo(
     () =>
       new Set(
@@ -1544,69 +359,46 @@ export function App() {
       ),
     [sourceProjectIDs],
   );
-  const filteredSessionTreeHosts = useMemo<SessionTreeHost[]>(() => {
-    const query = projectFilter.trim().toLowerCase();
-    if (!query) return sessionTreeHosts;
-    const nextHosts: SessionTreeHost[] = [];
-    for (const host of sessionTreeHosts) {
-      const hostText = `${host.hostName} ${host.hostAddress}`.toLowerCase();
-      if (hostText.includes(query)) {
-        nextHosts.push(host);
-        continue;
-      }
-      const projects: SessionTreeProject[] = [];
-      for (const project of host.projects) {
-        const projectText = `${project.title} ${project.path}`.toLowerCase();
-        if (projectText.includes(query)) {
-          projects.push(project);
-          continue;
-        }
-        const sessions = project.sessions.filter((sessionItem) => {
-          const text = `${sessionItem.title} ${sessionItem.id}`.toLowerCase();
-          return text.includes(query);
-        });
-        if (sessions.length === 0) continue;
-        projects.push({
-          ...project,
-          sessions,
-        });
-      }
-      if (projects.length === 0) continue;
-      nextHosts.push({
-        ...host,
-        projects,
-      });
-    }
-    return nextHosts;
-  }, [projectFilter, sessionTreeHosts]);
-  const visibleTreeSessionIDs = useMemo(() => {
-    const out: string[] = [];
-    for (const hostNode of filteredSessionTreeHosts) {
-      if (collapsedHostIDs.includes(hostNode.hostID)) continue;
-      for (const projectNode of hostNode.projects) {
-        for (const sessionNode of projectNode.sessions) {
-          out.push(sessionNode.id);
-        }
-      }
-    }
-    return out;
-  }, [collapsedHostIDs, filteredSessionTreeHosts]);
+  const filteredSessionTreeHosts = useMemo<SessionTreeHost[]>(
+    () => filterSessionTreeHosts(sessionTreeHosts, projectFilter),
+    [projectFilter, sessionTreeHosts],
+  );
+  const visibleTreeSessionIDs = useMemo(
+    () => collectVisibleTreeSessionIDs(filteredSessionTreeHosts, collapsedHostIDs),
+    [collapsedHostIDs, filteredSessionTreeHosts],
+  );
   const activeThreadBusy =
     Boolean(activeThread?.activeJobID) ||
     (activeThread ? submittingThreadID === activeThread.id : false) ||
     (activeThread ? deletingThreadID === activeThread.id : false) ||
     (activeThread ? cancelingThreadID === activeThread.id : false);
+  const {
+    activeRequests: activePendingRequests,
+    loading: pendingRequestsLoading,
+    error: pendingRequestsError,
+    resolvingRequestID: resolvingPendingRequestID,
+    refreshPendingRequests,
+    resolvePendingRequest,
+  } = useCodexPendingRequests({
+    authReady: authPhase === "ready",
+    token,
+    sessionID: activeThreadID,
+    watchFast: activeThreadBusy,
+  });
   const activeThreadRunID = activeThread?.activeJobID.trim() ?? "";
   const hasRegeneratePrompt =
     activeThread !== null &&
     lastUserPromptFromTimeline(activeThread.timeline).trim() !== "";
-  const activeThreadStatusCopy = activeThreadBusy
-    ? "Codex is thinking..."
-    : activeThread?.lastJobStatus === "failed"
-      ? "Last response failed."
-      : activeThread?.lastJobStatus === "canceled"
-        ? "Last response interrupted."
-        : "";
+  const pendingRequestCopy = pendingRequestsStatusCopy(activePendingRequests);
+  const activeThreadStatusCopy = pendingRequestCopy
+    ? pendingRequestCopy
+    : activeThreadBusy
+      ? "Codex is thinking..."
+      : activeThread?.lastJobStatus === "failed"
+        ? "Last response failed."
+        : activeThread?.lastJobStatus === "canceled"
+          ? "Last response interrupted."
+          : "";
   const activeStreamState: SessionStreamHealthState = activeSessionStreamHealth
     ? activeSessionStreamHealth.state
     : activeThreadID
@@ -1640,145 +432,95 @@ export function App() {
     return out;
   }, [sessionModelDefault, sessionModelOptions, activeThreadModelValue]);
   const hasSessionModelChoices = sessionModelChoices.length > 0;
+  const {
+    createThreadAndFocus,
+    focusComposerSoon,
+    onAddDirDraftSubmit,
+    onConfigFlagDraftSubmit,
+    onEnableFlagDraftSubmit,
+    onDisableFlagDraftSubmit,
+    openProjectComposer,
+    closeProjectComposer,
+    registerSessionButtonRef,
+    onSessionTreeKeyDown,
+    toggleHostCollapsed,
+    openSessionFromAlert,
+  } = createSessionUIActions({
+    createThread,
+    promptInputRef,
+    activeThread,
+    addDirDraft,
+    setAddDirDraft,
+    addThreadAddDir,
+    configFlagDraft,
+    setConfigFlagDraft,
+    addThreadConfigFlag,
+    enableFlagDraft,
+    setEnableFlagDraft,
+    addThreadEnableFlag,
+    disableFlagDraft,
+    setDisableFlagDraft,
+    addThreadDisableFlag,
+    activeWorkspaceHostID,
+    activeWorkspacePath,
+    hosts,
+    setProjectComposerOpen,
+    setProjectFormHostID,
+    setProjectFormPath,
+    setProjectFormTitle,
+    sessionButtonRefs,
+    visibleTreeSessionIDs,
+    treeCursorSessionID,
+    setTreeCursorSessionID,
+    activateThread,
+    setThreadPinned,
+    setCollapsedHostIDs,
+    threadWorkspaceMap,
+    switchMode,
+    dismissSessionAlert,
+  });
   const commandPaletteActions = useMemo<CommandPaletteAction[]>(() => {
     if (appMode !== "session") return [];
-    const actions: CommandPaletteAction[] = [];
-    const pushAction = (
-      id: string,
-      label: string,
-      detail: string,
-      extraSearch: string,
-      run: () => void,
-    ) => {
-      actions.push({
-        id,
-        label,
-        detail,
-        searchText: normalizeSearchText(`${label} ${detail} ${extraSearch}`),
-        run,
-      });
-    };
-
-    pushAction(
-      "composer:focus",
-      "Focus Prompt",
-      "Cursor to composer",
-      "focus prompt composer input",
-      () => {
+    return buildSessionCommandPaletteActions({
+      activeWorkspaceTitle: activeWorkspace?.title?.trim() || "",
+      threadsLength: threads.length,
+      activeThreadID,
+      activeThread,
+      activeThreadBusy,
+      workspaces,
+      sessionModelChoices,
+      sessionModelDefault,
+      onFocusComposer: () => {
         promptInputRef.current?.focus();
       },
-    );
-    pushAction(
-      "session:new",
-      "New Session",
-      activeWorkspace?.title?.trim() || "current project",
-      "create add session",
-      () => {
-        createThreadAndFocus();
+      onCreateSession: createThreadAndFocus,
+      onSwitchPrevSession: () => {
+        switchThreadByOffset(-1);
       },
-    );
-    if (threads.length > 1) {
-      pushAction(
-        "session:previous",
-        "Previous Session",
-        "Switch to previous",
-        "session prev",
-        () => {
-          switchThreadByOffset(-1);
-        },
-      );
-      pushAction(
-        "session:next",
-        "Next Session",
-        "Switch to next",
-        "session next",
-        () => {
-          switchThreadByOffset(1);
-        },
-      );
-    }
-    if (activeThreadID.trim()) {
-      pushAction(
-        "session:fork",
-        "Fork Session",
-        activeThread?.title || "current session",
-        "fork branch duplicate session",
-        () => {
-          if (!activeThread) return;
-          forkThread(activeThread.id);
-        },
-      );
-      pushAction(
-        "session:pin",
-        activeThread?.pinned ? "Unpin Session" : "Pin Session",
-        activeThread?.title || "current session",
-        "pin favorite",
-        () => {
-          if (!activeThread) return;
-          setThreadPinned(activeThread.id, !activeThread.pinned);
-        },
-      );
-      if (!activeThreadBusy) {
-        pushAction(
-          "session:archive",
-          "Archive Session",
-          activeThread?.title || "current session",
-          "delete remove archive",
-          () => {
-            void onArchiveActiveSession();
-          },
-        );
-      }
-      pushAction(
-        "session:reconnect",
-        "Reconnect Stream",
-        activeThread?.title || "current session",
-        "stream reconnect",
-        () => {
-          onReconnectActiveStream();
-        },
-      );
-    }
-
-    for (const workspace of workspaces) {
-      const projectTitle = resolveProjectTitle(workspace.path, workspace.title);
-      pushAction(
-        `project:${workspace.id}`,
-        `Open Project: ${projectTitle}`,
-        `${workspace.hostName} · ${workspace.path}`,
-        "project workspace directory",
-        () => {
-          const preferredSession = workspace.activeSessionID.trim();
-          if (preferredSession) {
-            activateThread(preferredSession);
-            focusComposerSoon();
-            return;
-          }
-          setActiveWorkspaceID(workspace.id);
+      onSwitchNextSession: () => {
+        switchThreadByOffset(1);
+      },
+      onForkSession: () => {
+        void forkSessionActionRef.current();
+      },
+      onTogglePinSession: setThreadPinned,
+      onArchiveSession: () => {
+        void archiveSessionActionRef.current();
+      },
+      onReconnectStream: () => {
+        reconnectStreamActionRef.current();
+      },
+      onOpenProject: (workspaceID, preferredSessionID) => {
+        if (preferredSessionID) {
+          activateThread(preferredSessionID);
           focusComposerSoon();
-        },
-      );
-    }
-
-    if (activeThread) {
-      for (const modelName of sessionModelChoices) {
-        const modelDetail =
-          modelName === sessionModelDefault
-            ? `${modelName} (default)`
-            : modelName;
-        pushAction(
-          `model:${modelName}`,
-          `Model: ${modelName}`,
-          modelDetail,
-          "model llm codex",
-          () => {
-            setThreadModel(activeThread.id, modelName);
-          },
-        );
-      }
-    }
-
-    return actions;
+          return;
+        }
+        setActiveWorkspaceID(workspaceID);
+        focusComposerSoon();
+      },
+      onSetModel: setThreadModel,
+    });
   }, [
     appMode,
     activeWorkspace?.title,
@@ -1792,10 +534,30 @@ export function App() {
     setActiveWorkspaceID,
     setThreadModel,
     setThreadPinned,
-    forkThread,
     switchThreadByOffset,
     activateThread,
   ]);
+  const {
+    commandPaletteOpen,
+    commandPaletteQuery,
+    commandPaletteCursor,
+    commandPaletteInputRef,
+    setCommandPaletteCursor,
+    openCommandPalette,
+    closeCommandPalette,
+    runCommandPaletteAction,
+    onCommandPaletteKeyDown,
+    onCommandPaletteQueryChange,
+  } = useCommandPaletteController({
+    sessionModeActive: appMode === "session",
+    getFilteredActionsLength: () => filteredCommandPaletteActions.length,
+    onRunActionAt: (index) => {
+      const action = filteredCommandPaletteActions[index];
+      if (!action) return;
+      action.run();
+    },
+    onFocusComposer: focusComposerSoon,
+  });
   const filteredCommandPaletteActions = useMemo(() => {
     const query = normalizeSearchText(commandPaletteQuery);
     if (!query) return commandPaletteActions.slice(0, 48);
@@ -1804,6 +566,38 @@ export function App() {
       .slice(0, 48);
   }, [commandPaletteActions, commandPaletteQuery]);
   const activeTimelineTail = activeTimeline[activeTimeline.length - 1];
+  const {
+    timelineUnreadCount,
+    timelineViewportRef,
+    timelineBottomRef,
+    onTimelineScroll,
+    jumpTimelineToLatest,
+    forceStickToBottom,
+  } = useTimelineScrollController({
+    activeThreadID,
+    timelineLength: activeTimeline.length,
+    timelineTailID: activeTimelineTail?.id ?? "",
+    timelineTailState: activeTimelineTail?.state ?? "",
+    timelineTailBody: activeTimelineTail?.body ?? "",
+    stickGapPx: TIMELINE_STICK_GAP_PX,
+    jumpCountCap: TIMELINE_JUMP_COUNT_CAP,
+  });
+  useComposerAutoResize({
+    inputRef: promptInputRef,
+    value: activeDraft,
+    activeThreadID,
+    minHeight: COMPOSER_MIN_HEIGHT,
+    maxHeight: COMPOSER_MAX_HEIGHT,
+  });
+  useGlobalShortcuts({
+    authReady: authPhase === "ready",
+    appMode,
+    commandPaletteOpen,
+    onOpenCommandPalette: () => openCommandPalette(),
+    onCloseCommandPalette: () => closeCommandPalette(),
+    onCreateThreadAndFocus: createThreadAndFocus,
+    onSwitchThreadByOffset: switchThreadByOffset,
+  });
 
   const activeProgress = useMemo(() => {
     if (!activeJob) return 0;
@@ -1823,6 +617,20 @@ export function App() {
     if (opsJobTypeFilter === "all") return byStatus;
     return byStatus.filter((job) => job.type === opsJobTypeFilter);
   }, [jobs, opsJobStatusFilter, opsJobTypeFilter]);
+  const knownJobIDSet = useMemo(
+    () =>
+      new Set(
+        jobs
+          .map((job) => job.id.trim())
+          .filter((id) => id !== ""),
+      ),
+    [jobs],
+  );
+  const runningJobPollTargets = useMemo(
+    () =>
+      runningThreadJobs.filter((item) => knownJobIDSet.has(item.jobID.trim())),
+    [runningThreadJobs, knownJobIDSet],
+  );
 
   const filteredHosts = useMemo(() => {
     const query = hostFilter.trim().toLowerCase();
@@ -1833,10 +641,6 @@ export function App() {
       return text.includes(query);
     });
   }, [hosts, hostFilter]);
-  const platformHost = useMemo(
-    () => hosts.find((host) => host.id === platformHostID) ?? null,
-    [hosts, platformHostID],
-  );
 
   const filteredOpsRuns = useMemo(() => {
     if (opsRunStatusFilter === "all") return runs;
@@ -1872,38 +676,12 @@ export function App() {
   const syncLabel = isRefreshing ? "syncing" : "live";
 
   useEffect(() => {
-    if (hosts.length === 0) {
-      if (platformHostID) {
-        setPlatformHostID("");
-      }
-      return;
-    }
-    if (platformHostID && hosts.some((host) => host.id === platformHostID)) {
-      return;
-    }
-    const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
-    if (workspaceHostID && hosts.some((host) => host.id === workspaceHostID)) {
-      setPlatformHostID(workspaceHostID);
-      return;
-    }
-    setPlatformHostID(hosts[0].id);
-  }, [hosts, activeWorkspace?.hostID, platformHostID]);
-
-  useEffect(() => {
     tokenRef.current = token;
   }, [token]);
 
   useEffect(() => {
-    if (completedRunsHydratedRef.current) return;
-    completedRunsHydratedRef.current = true;
-    const persisted = loadPersistedCompletedRuns();
-    if (persisted.size === 0) return;
-    for (const runID of persisted) {
-      completedJobsRef.current.add(runID);
-    }
-    trimCompletedRunsStore();
-    persistCompletedRuns(completedJobsRef.current);
-  }, [completedJobsRef]);
+    hydrateCompletedRuns();
+  }, [hydrateCompletedRuns]);
 
   useEffect(() => {
     activeThreadIDRef.current = activeThreadID;
@@ -1928,28 +706,13 @@ export function App() {
         }
       }
     }
-    let cursorChanged = false;
-    for (const sessionID of Array.from(sessionEventCursorRef.current.keys())) {
-      if (validSessionIDs.has(sessionID)) continue;
-      sessionEventCursorRef.current.delete(sessionID);
-      cursorChanged = true;
-    }
+    pruneSessionEventCursors(validSessionIDs);
     for (const sessionID of Array.from(sessionEventQueueRef.current.keys())) {
       if (validSessionIDs.has(sessionID)) continue;
       sessionEventQueueRef.current.delete(sessionID);
     }
-    if (cursorChanged) {
-      persistSessionEventCursors(sessionEventCursorRef.current);
-    }
     runningSessionIDsRef.current = running;
-  }, [workspaces]);
-
-  useEffect(() => {
-    if (sessionAlerts.length > previousAlertCountRef.current) {
-      setSessionAlertsExpanded(true);
-    }
-    previousAlertCountRef.current = sessionAlerts.length;
-  }, [sessionAlerts.length]);
+  }, [workspaces, pruneSessionEventCursors]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -1983,12 +746,10 @@ export function App() {
   }, [workspaces]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const payload: SessionTreePrefs = {
+    persistSessionTreePrefs({
       projectFilter,
       collapsedHostIDs,
-    };
-    window.localStorage.setItem(SESSION_TREE_PREFS_KEY, JSON.stringify(payload));
+    });
   }, [projectFilter, collapsedHostIDs]);
 
   useEffect(() => {
@@ -2044,316 +805,6 @@ export function App() {
     );
   }, [visibleTreeSessionIDs]);
 
-  useEffect(() => {
-    return () => {
-      if (copyResetTimerRef.current !== null) {
-        window.clearTimeout(copyResetTimerRef.current);
-      }
-    };
-  }, []);
-
-  function createThreadAndFocus() {
-    createThread();
-    focusComposerSoon();
-  }
-
-  function focusComposerSoon() {
-    window.requestAnimationFrame(() => {
-      promptInputRef.current?.focus();
-    });
-  }
-
-  function openCommandPalette(initialQuery = "") {
-    if (appMode !== "session") return;
-    setCommandPaletteQuery(initialQuery);
-    setCommandPaletteCursor(0);
-    setCommandPaletteOpen(true);
-  }
-
-  function closeCommandPalette(options?: { focusComposer?: boolean }) {
-    setCommandPaletteOpen(false);
-    setCommandPaletteQuery("");
-    setCommandPaletteCursor(0);
-    if (options?.focusComposer === false) return;
-    focusComposerSoon();
-  }
-
-  function runCommandPaletteAction(index: number) {
-    const action = filteredCommandPaletteActions[index];
-    if (!action) return;
-    action.run();
-    closeCommandPalette({ focusComposer: false });
-  }
-
-  function onCommandPaletteKeyDown(
-    event: ReactKeyboardEvent<HTMLInputElement>,
-  ) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeCommandPalette();
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setCommandPaletteCursor((prev) => {
-        if (filteredCommandPaletteActions.length === 0) return 0;
-        return (prev + 1) % filteredCommandPaletteActions.length;
-      });
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setCommandPaletteCursor((prev) => {
-        if (filteredCommandPaletteActions.length === 0) return 0;
-        return (
-          (prev - 1 + filteredCommandPaletteActions.length) %
-          filteredCommandPaletteActions.length
-        );
-      });
-      return;
-    }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      runCommandPaletteAction(commandPaletteCursor);
-    }
-  }
-
-  function onAddDirDraftSubmit() {
-    if (!activeThread) return;
-    const trimmed = addDirDraft.trim();
-    if (!trimmed) return;
-    addThreadAddDir(activeThread.id, trimmed);
-    setAddDirDraft("");
-  }
-
-  function onConfigFlagDraftSubmit() {
-    if (!activeThread) return;
-    const trimmed = configFlagDraft.trim();
-    if (!trimmed) return;
-    addThreadConfigFlag(activeThread.id, trimmed);
-    setConfigFlagDraft("");
-  }
-
-  function onEnableFlagDraftSubmit() {
-    if (!activeThread) return;
-    const trimmed = enableFlagDraft.trim();
-    if (!trimmed) return;
-    addThreadEnableFlag(activeThread.id, trimmed);
-    setEnableFlagDraft("");
-  }
-
-  function onDisableFlagDraftSubmit() {
-    if (!activeThread) return;
-    const trimmed = disableFlagDraft.trim();
-    if (!trimmed) return;
-    addThreadDisableFlag(activeThread.id, trimmed);
-    setDisableFlagDraft("");
-  }
-
-  function openProjectComposer() {
-    const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
-    const fallbackPath = activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH;
-    setProjectComposerOpen(true);
-    setProjectFormHostID(fallbackHostID);
-    setProjectFormPath(fallbackPath);
-    setProjectFormTitle("");
-  }
-
-  function closeProjectComposer() {
-    setProjectComposerOpen(false);
-    setProjectFormTitle("");
-  }
-
-  function registerSessionButtonRef(
-    sessionID: string,
-    node: HTMLButtonElement | null,
-  ) {
-    if (!sessionID) return;
-    if (node) {
-      sessionButtonRefs.current.set(sessionID, node);
-      return;
-    }
-    sessionButtonRefs.current.delete(sessionID);
-  }
-
-  function moveTreeCursor(step: number) {
-    if (visibleTreeSessionIDs.length === 0) return;
-    const currentIndex = Math.max(
-      0,
-      visibleTreeSessionIDs.findIndex((id) => id === treeCursorSessionID),
-    );
-    const nextIndex =
-      (currentIndex + step + visibleTreeSessionIDs.length) %
-      visibleTreeSessionIDs.length;
-    const nextID = visibleTreeSessionIDs[nextIndex];
-    setTreeCursorSessionID(nextID);
-    const node = sessionButtonRefs.current.get(nextID);
-    node?.focus();
-  }
-
-  function onSessionTreeKeyDown(
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-    sessionID: string,
-    pinned: boolean,
-  ) {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      moveTreeCursor(1);
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      moveTreeCursor(-1);
-      return;
-    }
-    if (event.key === "Home") {
-      event.preventDefault();
-      const nextID = visibleTreeSessionIDs[0];
-      if (!nextID) return;
-      setTreeCursorSessionID(nextID);
-      sessionButtonRefs.current.get(nextID)?.focus();
-      return;
-    }
-    if (event.key === "End") {
-      event.preventDefault();
-      const nextID = visibleTreeSessionIDs[visibleTreeSessionIDs.length - 1];
-      if (!nextID) return;
-      setTreeCursorSessionID(nextID);
-      sessionButtonRefs.current.get(nextID)?.focus();
-      return;
-    }
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      setTreeCursorSessionID(sessionID);
-      activateThread(sessionID);
-      focusComposerSoon();
-      return;
-    }
-    if (event.key.toLowerCase() === "p") {
-      event.preventDefault();
-      setThreadPinned(sessionID, !pinned);
-    }
-  }
-
-  function toggleMessageExpanded(entryID: string) {
-    setExpandedMessageIDs((prev) =>
-      prev.includes(entryID)
-        ? prev.filter((id) => id !== entryID)
-        : [...prev, entryID],
-    );
-  }
-
-  async function copyToClipboard(content: string, key: string) {
-    const text = content ?? "";
-    if (!text) return;
-    try {
-      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const area = document.createElement("textarea");
-        area.value = text;
-        area.style.position = "fixed";
-        area.style.opacity = "0";
-        document.body.appendChild(area);
-        area.focus();
-        area.select();
-        document.execCommand("copy");
-        document.body.removeChild(area);
-      }
-      setCopiedCodeKey(key);
-      if (copyResetTimerRef.current !== null) {
-        window.clearTimeout(copyResetTimerRef.current);
-      }
-      copyResetTimerRef.current = window.setTimeout(() => {
-        setCopiedCodeKey("");
-      }, 1500);
-    } catch {
-      setCopiedCodeKey("");
-    }
-  }
-
-  function renderTimelineEntryBody(entry: TimelineEntry) {
-    const segments = parseMessageSegments(entry.body);
-    const collapsible = shouldCollapseMessageBody(entry.body);
-    const expanded = expandedMessageIDs.includes(entry.id);
-    const showCollapsed = collapsible && !expanded;
-    const wrapperClass = `message-body${showCollapsed ? " message-body-collapsed" : ""}`;
-    const canEditAndResend =
-      entry.kind === "user" && authPhase === "ready" && token.trim() !== "";
-    return (
-      <div className={wrapperClass}>
-        {segments.map((segment, index) =>
-          segment.kind === "text" ? (
-            <pre key={`${entry.id}_text_${index}`}>{segment.content}</pre>
-          ) : (
-            <section key={`${entry.id}_code_${index}`} className="message-code-block">
-              <header className="message-code-head">
-                <span>{segment.lang || "code"}</span>
-                <button
-                  type="button"
-                  className="ghost code-copy-btn"
-                  onClick={() => void copyToClipboard(segment.content, `${entry.id}_${index}`)}
-                >
-                  {copiedCodeKey === `${entry.id}_${index}` ? "Copied" : "Copy"}
-                </button>
-              </header>
-              <pre className="message-code-pre">{segment.content}</pre>
-            </section>
-          ),
-        )}
-        {showCollapsed ? <div className="message-collapse-mask" aria-hidden="true" /> : null}
-        {collapsible ? (
-          <div className="message-collapse-actions">
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => toggleMessageExpanded(entry.id)}
-            >
-              {expanded ? "Collapse" : "Expand"}
-            </button>
-          </div>
-        ) : null}
-        {canEditAndResend ? (
-          <div className="message-user-actions">
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => void onEditAndResend(entry)}
-              disabled={activeThreadBusy}
-            >
-              Edit & Resend
-            </button>
-          </div>
-        ) : null}
-      </div>
-    );
-  }
-
-  function toggleHostCollapsed(hostID: string) {
-    setCollapsedHostIDs((prev) =>
-      prev.includes(hostID)
-        ? prev.filter((id) => id !== hostID)
-        : [...prev, hostID],
-    );
-  }
-
-  function notifySessionDone(title: string, body: string) {
-    if (typeof Notification === "undefined") return;
-    if (notificationPermission !== "granted") return;
-    if (
-      typeof document !== "undefined" &&
-      document.visibilityState === "visible"
-    ) {
-      return;
-    }
-    try {
-      const note = new Notification(title, { body, silent: false });
-      window.setTimeout(() => note.close(), 6000);
-    } catch {
-      // Notification failures are non-fatal for session completion flow.
-    }
-  }
-
   function shouldSurfaceCompletion(createdAt?: string): boolean {
     const ts = createdAt?.trim();
     if (!ts) return false;
@@ -2362,1239 +813,74 @@ export function App() {
     return parsed >= completionAlertCutoffMSRef.current;
   }
 
-  function pushSessionAlert(alert: Omit<SessionAlert, "id">) {
-    const id = `alert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const next: SessionAlert = { id, ...alert };
-    setSessionAlerts((prev) => {
-      const duplicate = prev.some(
-        (item) =>
-          item.threadID === next.threadID &&
-          item.title === next.title &&
-          item.body === next.body,
-      );
-      if (duplicate) return prev;
-      const withNext = [...prev, next];
-      if (withNext.length <= 24) return withNext;
-      return withNext.slice(withNext.length - 24);
-    });
-  }
-
-  function dismissSessionAlert(alertID: string) {
-    setSessionAlerts((prev) => prev.filter((item) => item.id !== alertID));
-  }
-
-  function clearSessionAlerts() {
-    setSessionAlerts([]);
-  }
-
-  function updateSessionStreamHealth(
-    sessionID: string,
-    state: SessionStreamHealthState,
-    options?: {
-      retries?: number;
-      lastEventAt?: number;
-      lastError?: string;
-      throttleMS?: number;
-    },
-  ) {
-    const id = sessionID.trim();
-    if (!id) return;
-    setSessionStreamHealthByID((prev) => {
-      const current = prev[id] ?? {
-        state: "offline",
-        retries: 0,
-        lastEventAt: 0,
-        updatedAt: 0,
-        lastError: "",
-      };
-      const retries = options?.retries ?? current.retries;
-      const lastEventAt = options?.lastEventAt ?? current.lastEventAt;
-      const lastError = options?.lastError ?? current.lastError;
-      const now = Date.now();
-      const throttleMS = options?.throttleMS ?? 1100;
-      const stateChanged =
-        current.state !== state ||
-        current.retries !== retries ||
-        current.lastError !== lastError;
-      const eventAtChanged = current.lastEventAt !== lastEventAt;
-      if (
-        !stateChanged &&
-        (!eventAtChanged || now - current.updatedAt < throttleMS)
-      ) {
-        return prev;
-      }
-      const next: SessionStreamHealth = {
-        state,
-        retries,
-        lastEventAt,
-        updatedAt: now,
-        lastError,
-      };
-      return {
-        ...prev,
-        [id]: next,
-      };
-    });
-  }
-
-  function clearSessionStreamHealth(sessionID: string) {
-    const id = sessionID.trim();
-    if (!id) return;
-    setSessionStreamHealthByID((prev) => {
-      if (!(id in prev)) return prev;
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-  }
-
-  function openSessionFromAlert(alert: SessionAlert) {
-    if (threadWorkspaceMap.has(alert.threadID)) {
-      activateThread(alert.threadID);
-      switchMode("session");
-      focusComposerSoon();
-    }
-    dismissSessionAlert(alert.id);
-  }
-
-  async function onEnableNotifications() {
-    if (typeof Notification === "undefined") {
-      setNotificationPermission("denied");
-      return;
-    }
-    const result = await Notification.requestPermission();
-    setNotificationPermission(result);
-  }
-
-  async function ensureLocalCodexHost(
-    authToken: string,
-    currentHosts: Host[],
-  ): Promise<Host[]> {
-    if (currentHosts.some((host) => host.connection_mode === "local")) {
-      return currentHosts;
-    }
-    await upsertHost(authToken, {
-      name: "local-default",
-      connection_mode: "local",
-      host: "localhost",
-      workspace: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
-    });
-    return listHosts(authToken);
-  }
-
-  function buildDiscoveredProjects(
-    sourceHosts: Host[],
-    targets: Array<{
-      host: Host;
-      ok: boolean;
-      sessions?: Array<{
-        session_id: string;
-        cwd?: string;
-        thread_name?: string;
-        updated_at: string;
-      }>;
-    }>,
-  ) {
-    const hostMap = new Map<string, Host>();
-    for (const host of sourceHosts) hostMap.set(host.id, host);
-
-    const grouped = new Map<
-      string,
-      Map<string, Array<{ id: string; title: string; updatedAt?: string }>>
-    >();
-    for (const target of targets) {
-      const hostID = target.host?.id?.trim();
-      if (!hostID) continue;
-      if (!grouped.has(hostID)) grouped.set(hostID, new Map());
-      const pathMap = grouped.get(hostID)!;
-      const sessions = Array.isArray(target.sessions) ? target.sessions : [];
-      for (const sessionItem of sessions) {
-        const projectPath =
-          sessionItem.cwd?.trim() ||
-          target.host.workspace?.trim() ||
-          hostMap.get(hostID)?.workspace?.trim() ||
-          DEFAULT_WORKSPACE_PATH;
-        if (!pathMap.has(projectPath)) pathMap.set(projectPath, []);
-        pathMap.get(projectPath)!.push({
-          id: sessionItem.session_id,
-          title: sessionItem.thread_name?.trim() || sessionItem.session_id,
-          updatedAt: sessionItem.updated_at,
-        });
-      }
-      if (sessions.length === 0) {
-        const fallbackPath =
-          target.host.workspace?.trim() ||
-          hostMap.get(hostID)?.workspace?.trim();
-        if (fallbackPath && !pathMap.has(fallbackPath)) {
-          pathMap.set(fallbackPath, []);
-        }
-      }
-    }
-
-    const projects: Array<{
-      hostID: string;
-      hostName: string;
-      path: string;
-      title: string;
-      sessions: Array<{ id: string; title: string; updatedAt?: string }>;
-    }> = [];
-    for (const [hostID, pathMap] of grouped.entries()) {
-      const host = hostMap.get(hostID);
-      const hostName = host?.name ?? hostID;
-      for (const [projectPath, sessions] of pathMap.entries()) {
-        const orderedSessions = [...sessions].sort((a, b) => {
-          const left = a.updatedAt ?? "";
-          const right = b.updatedAt ?? "";
-          if (left === right) return a.title.localeCompare(b.title);
-          return left > right ? -1 : 1;
-        });
-        projects.push({
-          hostID,
-          hostName,
-          path: projectPath,
-          title: resolveProjectTitle(projectPath),
-          sessions: orderedSessions,
-        });
-      }
-    }
-
-    if (projects.length > 0) return projects;
-
-    // Fallback: no discoverable sessions yet, still expose one default project per host.
-    return sourceHosts.map((host) => ({
-      hostID: host.id,
-      hostName: host.name,
-      path: host.workspace?.trim() || DEFAULT_WORKSPACE_PATH,
-      title: resolveProjectTitle(host.workspace?.trim() || DEFAULT_WORKSPACE_PATH),
-      sessions: [],
-    }));
-  }
-
-  function buildProjectsFromRecords(
-    sourceHosts: Host[],
-    projects: ProjectRecord[],
-    sessions: SessionRecord[],
-  ) {
-    const hostMap = new Map<string, Host>();
-    for (const host of sourceHosts) {
-      hostMap.set(host.id, host);
-    }
-
-    const projectKeyByID = new Map<string, string>();
-    const grouped = new Map<
-      string,
-      {
-        projectID: string;
-        hostID: string;
-        hostName: string;
-        path: string;
-        title: string;
-        sessions: Array<{ id: string; title: string; updatedAt?: string }>;
-      }
-    >();
-    const sessionSeenByProjectKey = new Map<string, Set<string>>();
-
-    const ensureProjectBucket = (
-      hostIDRaw: string,
-      hostNameRaw: string,
-      pathRaw: string,
-      titleRaw?: string,
-      projectIDRaw?: string,
-    ) => {
-      const hostID = hostIDRaw.trim();
-      const path = pathRaw.trim();
-      if (!hostID || !path) return "";
-      const key = `${hostID}::${path}`;
-      const resolvedTitle = resolveProjectTitle(path, titleRaw);
-      const projectID = projectIDRaw?.trim() ?? "";
-      if (!grouped.has(key)) {
-        const host = hostMap.get(hostID);
-        grouped.set(key, {
-          projectID,
-          hostID,
-          hostName: hostNameRaw.trim() || host?.name || hostID,
-          path,
-          title: resolvedTitle,
-          sessions: [],
-        });
-      } else if (titleRaw?.trim()) {
-        const current = grouped.get(key);
-        if (current && current.title.trim() !== titleRaw.trim()) {
-          current.title = resolvedTitle;
-        }
-        if (current && !current.projectID && projectID) {
-          current.projectID = projectID;
-        }
-      } else {
-        const current = grouped.get(key);
-        if (current && !current.projectID && projectID) {
-          current.projectID = projectID;
-        }
-      }
-      if (!sessionSeenByProjectKey.has(key)) {
-        sessionSeenByProjectKey.set(key, new Set<string>());
-      }
-      return key;
-    };
-
-    for (const project of projects) {
-      const key = ensureProjectBucket(
-        project.host_id,
-        project.host_name ?? "",
-        project.path,
-        project.title,
-        project.id,
-      );
-      if (!key) continue;
-      projectKeyByID.set(project.id, key);
-    }
-
-    for (const sessionRecord of sessions) {
-      const sessionID = sessionRecord.id.trim();
-      if (!sessionID) continue;
-      const fromProjectID =
-        projectKeyByID.get(sessionRecord.project_id.trim()) ?? "";
-      const fallbackHostID = sessionRecord.host_id.trim();
-      const fallbackPath = sessionRecord.path.trim();
-      const fallbackHostName =
-        hostMap.get(fallbackHostID)?.name ?? fallbackHostID;
-      const key =
-        fromProjectID ||
-        ensureProjectBucket(fallbackHostID, fallbackHostName, fallbackPath);
-      if (!key) continue;
-      const bucket = grouped.get(key);
-      const seen = sessionSeenByProjectKey.get(key);
-      if (!bucket || !seen || seen.has(sessionID)) continue;
-      seen.add(sessionID);
-      bucket.sessions.push({
-        id: sessionID,
-        title: sessionRecord.title?.trim() || sessionID,
-        updatedAt: sessionRecord.updated_at,
-      });
-    }
-
-    for (const bucket of grouped.values()) {
-      bucket.sessions.sort((a, b) => {
-        const left = a.updatedAt ?? "";
-        const right = b.updatedAt ?? "";
-        if (left === right) return a.title.localeCompare(b.title);
-        return left > right ? -1 : 1;
-      });
-    }
-
-    const byHost = new Set<string>();
-    for (const bucket of grouped.values()) {
-      byHost.add(bucket.hostID);
-    }
-    for (const host of sourceHosts) {
-      if (byHost.has(host.id)) continue;
-      ensureProjectBucket(
-        host.id,
-        host.name,
-        host.workspace?.trim() || DEFAULT_WORKSPACE_PATH,
-        "",
-        "",
-      );
-    }
-
-    return Array.from(grouped.values()).map((project) => ({
-      id: project.projectID || undefined,
-      hostID: project.hostID,
-      hostName: project.hostName,
-      path: project.path,
-      title: project.title,
-      sessions: project.sessions,
-    }));
-  }
-
-  async function refreshProjectsFromDiscovery(
-    authToken: string,
-    sourceHosts: Host[],
-    discoverEnabled: boolean,
-    preserveOnError = true,
-  ) {
-    if (!discoverEnabled) {
-      setSourceProjectIDs([]);
-      syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []), {
-        source: "discovery",
-      });
-      return;
-    }
-    try {
-      const discovered = await discoverCodexSessions(authToken, {
-        all_hosts: true,
-        fanout: Math.max(1, Math.min(8, sourceHosts.length || 1)),
-        limit_per_host: 120,
-      });
-      setSourceProjectIDs([]);
-      syncProjectsFromDiscovery(
-        buildDiscoveredProjects(sourceHosts, discovered.body.targets ?? []),
-        { source: "discovery" },
-      );
-    } catch {
-      setSourceProjectIDs([]);
-      if (!preserveOnError) {
-        syncProjectsFromDiscovery(buildDiscoveredProjects(sourceHosts, []), {
-          source: "discovery",
-        });
-      }
-    }
-  }
-
-  async function refreshProjectsFromSource(
-    authToken: string,
-    sourceHosts: Host[],
-    discoverEnabled: boolean,
-    preserveOnError = true,
-  ) {
-    const normalizeLastStatus = (raw: string | undefined): SessionLastStatus => {
-      const value = (raw ?? "").trim().toLowerCase();
-      if (value === "running" || value === "pending") return "running";
-      if (value === "succeeded") return "succeeded";
-      if (value === "failed") return "failed";
-      if (value === "canceled") return "canceled";
-      return "idle";
-    };
-    const reconcileFromSessionRecords = (records: SessionRecord[]) => {
-      const currentByID = new Map<
-        string,
-        { activeJobID: string; lastJobStatus: SessionLastStatus }
-      >();
-      for (const workspace of workspaces) {
-        for (const thread of workspace.sessions) {
-          currentByID.set(thread.id, {
-            activeJobID: thread.activeJobID.trim(),
-            lastJobStatus: thread.lastJobStatus,
-          });
-        }
-      }
-
-      for (const record of records) {
-        const sessionID = record.id.trim();
-        if (!sessionID) continue;
-        const current = currentByID.get(sessionID);
-        if (!current) continue;
-        const nextStatus = normalizeLastStatus(record.last_status);
-        const nextJobID =
-          nextStatus === "running"
-            ? record.last_run_id?.trim() || current.activeJobID
-            : "";
-        if (
-          current.activeJobID === nextJobID &&
-          current.lastJobStatus === nextStatus
-        ) {
-          continue;
-        }
-        setThreadJobState(sessionID, nextJobID, nextStatus);
-      }
-    };
-
-    try {
-      const [projects, sessions] = await Promise.all([
-        listProjects(authToken, 600, { runtime: "codex" }),
-        listSessions(authToken, 1200, { runtime: "codex" }),
-      ]);
-      setSourceProjectIDs(
-        projects
-          .map((project) => project.id.trim())
-          .filter((id) => id !== ""),
-      );
-      const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
-      // Server snapshot is authoritative for project/session membership.
-      syncProjectsFromServer(built);
-      reconcileFromSessionRecords(sessions);
-      return;
-    } catch {
-      setSourceProjectIDs([]);
-      // fall through to discovery fallback
-    }
-    await refreshProjectsFromDiscovery(
-      authToken,
-      sourceHosts,
-      discoverEnabled,
-      preserveOnError,
-    );
-  }
-
-  function waitWithAbort(ms: number, signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return Promise.resolve();
-    return new Promise((resolve) => {
-      const timer = window.setTimeout(() => {
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      }, ms);
-      const onAbort = () => {
-        window.clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
-  }
-
-  function waitFor(ms: number): Promise<void> {
-    return new Promise((resolve) => {
-      window.setTimeout(resolve, ms);
-    });
-  }
-
-  function trimCompletedRunsStore() {
-    while (completedJobsRef.current.size > MAX_PERSISTED_COMPLETED_RUNS) {
-      const oldest = completedJobsRef.current.values().next().value;
-      if (typeof oldest !== "string" || !oldest.trim()) break;
-      completedJobsRef.current.delete(oldest);
-    }
-  }
-
-  function markRunCompleted(runID: string): boolean {
-    const normalized = runID.trim();
-    if (!normalized) return false;
-    if (completedJobsRef.current.has(normalized)) return false;
-    completedJobsRef.current.add(normalized);
-    trimCompletedRunsStore();
-    persistCompletedRuns(completedJobsRef.current);
-    return true;
-  }
-
-  function setSessionEventCursor(sessionID: string, cursor: number) {
-    const normalizedSessionID = sessionID.trim();
-    if (!normalizedSessionID || !Number.isFinite(cursor) || cursor <= 0) return;
-    const current = sessionEventCursorRef.current.get(normalizedSessionID) ?? 0;
-    if (cursor <= current) return;
-    sessionEventCursorRef.current.set(normalizedSessionID, cursor);
-    persistSessionEventCursors(sessionEventCursorRef.current);
-  }
-
-  function deleteSessionEventCursor(sessionID: string) {
-    const normalizedSessionID = sessionID.trim();
-    if (!normalizedSessionID) return;
-    if (!sessionEventCursorRef.current.delete(normalizedSessionID)) return;
-    persistSessionEventCursors(sessionEventCursorRef.current);
-  }
-
-  function sessionPayloadRecord(
-    event: SessionEventRecord,
-  ): Record<string, unknown> {
-    return asRecord(event.payload) ?? {};
-  }
-
-  function sessionEventRunID(event: SessionEventRecord): string {
-    const direct = event.run_id?.trim() ?? "";
-    if (direct) return direct;
-    const payload = sessionPayloadRecord(event);
-    const fromPayload =
-      typeof payload.job_id === "string" ? payload.job_id.trim() : "";
-    return fromPayload;
-  }
-
-  function ensureSessionRunState(
-    sessionID: string,
-    runID: string,
-  ): SessionRunStreamState {
-    const existing = sessionRunStateRef.current.get(sessionID);
-    if (existing && existing.runID === runID) return existing;
-    const next: SessionRunStreamState = {
-      runID,
-      stdout: "",
-      streamSeen: false,
-      assistantFinalized: false,
-      failureHints: [],
-      eventParseOffset: 0,
-      surfacedEventKeys: new Set(),
-    };
-    sessionRunStateRef.current.set(sessionID, next);
-    return next;
-  }
-
-  function surfaceRuntimeCardsFromRunState(
-    sessionID: string,
-    runID: string,
-    state: SessionRunStreamState,
-    surface: boolean,
-  ) {
-    const parsed = parseCodexEventsIncremental(state.stdout, state.eventParseOffset);
-    state.eventParseOffset = parsed.nextOffset;
-    if (parsed.events.length === 0) return;
-    for (const event of parsed.events) {
-      const card = buildCodexRuntimeCardFromEvent(event, runID);
-      if (!card) continue;
-      if (state.surfacedEventKeys.has(card.key)) continue;
-      state.surfacedEventKeys.add(card.key);
-      if (!surface) continue;
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: card.state,
-          title: card.title,
-          body: card.body,
-        },
-        sessionID,
-      );
-    }
-  }
-
-  function markSessionDone(
-    sessionID: string,
-    runID: string,
-    status: "succeeded" | "failed" | "canceled",
-    options?: { surface?: boolean },
-  ): boolean {
-    if (!runID || !markRunCompleted(runID)) return false;
-    if (!options?.surface) return false;
-    const sessionTitle = threadTitleMapRef.current.get(sessionID) ?? "Session";
-    const completion = sessionCompletionCopy(status);
-    notifySessionDone(`${sessionTitle} ${completion.suffix}`, completion.body);
-    pushSessionAlert({
-      threadID: sessionID,
-      title: `${sessionTitle} ${completion.suffix}`,
-      body: completion.body,
-    });
-    return true;
-  }
-
-  function stopSessionStream(
-    sessionID: string,
-    options?: { preserveRunState?: boolean; preserveHealth?: boolean },
-  ) {
-    const state = sessionStreamStateRef.current.get(sessionID);
-    if (!state) return;
-    state.controller.abort();
-    sessionStreamStateRef.current.delete(sessionID);
-    sessionEventQueueRef.current.delete(sessionID);
-    if (!options?.preserveRunState) {
-      sessionRunStateRef.current.delete(sessionID);
-    }
-    if (!options?.preserveHealth) {
-      clearSessionStreamHealth(sessionID);
-    }
-  }
-
-  function stopAllSessionStreams() {
-    for (const state of sessionStreamStateRef.current.values()) {
-      state.controller.abort();
-    }
-    sessionStreamStateRef.current.clear();
-    sessionEventQueueRef.current.clear();
-    sessionRunStateRef.current.clear();
-    setSessionStreamHealthByID({});
-  }
-
-  async function finalizeStreamCompleted(
-    sessionID: string,
-    runID: string,
-    completedAt?: string,
-    options?: { surfaceCompletions?: boolean },
-  ) {
-    if (runID && completedJobsRef.current.has(runID)) {
-      return;
-    }
-    const state = sessionRunStateRef.current.get(sessionID);
-    let assistantText = state
-      ? parseCodexAssistantTextFromStdout(state.stdout, false)
-      : "";
-    let failureSummary = state?.failureHints.join("\n") ?? "";
-    let failed = failureSummary.trim() !== "";
-
-    const authToken = tokenRef.current.trim();
-    if (authToken && runID) {
-      const retryDelaysMS = assistantText ? [0] : [0, 200, 350, 550, 900, 1300];
-      for (let attempt = 0; attempt < retryDelaysMS.length; attempt += 1) {
-        const delay = retryDelaysMS[attempt] ?? 0;
-        if (delay > 0) {
-          await waitFor(delay);
-        }
-        try {
-          const job = await getRunJob(authToken, runID);
-          if (!assistantText) {
-            assistantText = extractAssistantTextFromJob(job);
-          }
-          if (jobHasTargetFailures(job)) {
-            failed = true;
-            if (!failureSummary) {
-              failureSummary =
-                summarizeTargetFailures(job) ||
-                (job.error ? String(job.error) : "");
-            }
-          }
-          const hasResponseTargets = Boolean(
-            job.response &&
-            "targets" in job.response &&
-            Array.isArray(job.response.targets),
-          );
-          const terminal =
-            job.status === "succeeded" ||
-            job.status === "failed" ||
-            job.status === "canceled";
-          if (assistantText || failed || (terminal && hasResponseTargets)) {
-            break;
-          }
-        } catch {
-          if (attempt === retryDelaysMS.length - 1) {
-            break;
-          }
-        }
-      }
-    }
-
-    if (failed) {
-      if (state?.streamSeen) {
-        finalizeAssistantStreamEntry(sessionID, "error");
-      }
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Failed",
-          body: failureSummary || "Session failed.",
-        },
-        sessionID,
-      );
-      setThreadJobState(sessionID, "", "failed");
-      const surfaced = markSessionDone(sessionID, runID, "failed", {
-        surface:
-          options?.surfaceCompletions !== false &&
-          shouldSurfaceCompletion(completedAt),
-      });
-      if (surfaced && sessionID !== activeThreadIDRef.current) {
-        setThreadUnread(sessionID, true);
-      }
-      sessionRunStateRef.current.delete(sessionID);
-      return;
-    }
-
-    setThreadJobState(sessionID, "", "succeeded");
-    if (assistantText.trim()) {
-      if (state?.streamSeen && !state.assistantFinalized) {
-        finalizeAssistantStreamEntry(
-          sessionID,
-          "success",
-          clipStreamText(assistantText),
-        );
-      } else if (!state?.assistantFinalized) {
-        addTimelineEntry(
-          {
-            kind: "assistant",
-            state: "success",
-            title: "Assistant",
-            body: assistantText,
-          },
-          sessionID,
-        );
-      }
-    } else if (state?.streamSeen && !state?.assistantFinalized) {
-      finalizeAssistantStreamEntry(
-        sessionID,
-        "success",
-        EMPTY_ASSISTANT_FALLBACK,
-      );
-    }
-    const surfaced = markSessionDone(sessionID, runID, "succeeded", {
-      surface:
-        options?.surfaceCompletions !== false &&
-        shouldSurfaceCompletion(completedAt),
-    });
-    if (surfaced && sessionID !== activeThreadIDRef.current) {
-      setThreadUnread(sessionID, true);
-    }
-    sessionRunStateRef.current.delete(sessionID);
-  }
-
-  async function handleSessionEventRecord(
-    sessionID: string,
-    event: SessionEventRecord,
-    options?: SessionEventHandleOptions,
-  ) {
-    const payload = sessionPayloadRecord(event);
-    const runID = sessionEventRunID(event);
-    const surfaceLifecycle = options?.surfaceLifecycle !== false;
-
-    switch (event.type) {
-      case "session.title.updated": {
-        const title =
-          typeof payload.title === "string" ? payload.title.trim() : "";
-        if (title) {
-          setThreadTitle(sessionID, title);
-        }
-        return;
-      }
-      case "run.started": {
-        const id = runID || `run_${Date.now()}`;
-        ensureSessionRunState(sessionID, id);
-        setThreadJobState(sessionID, id, "running");
-        if (sessionID === activeThreadIDRef.current) {
-          setActiveJobID(id);
-        }
-        return;
-      }
-      case "target.started": {
-        return;
-      }
-      case "assistant.delta": {
-        if (!runID) return;
-        const state = ensureSessionRunState(sessionID, runID);
-        const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
-        if (!chunk.trim()) return;
-        appendCodexStdoutChunk(state, chunk);
-        surfaceRuntimeCardsFromRunState(
-          sessionID,
-          runID,
-          state,
-          surfaceLifecycle,
-        );
-        const nextTitle = parseCodexSessionTitleFromStdout(state.stdout);
-        if (nextTitle) {
-          setThreadTitle(sessionID, nextTitle);
-        }
-        const contentOnly = parseCodexAssistantTextFromStdout(
-          state.stdout,
-          false,
-        );
-        if (contentOnly.trim()) {
-          state.streamSeen = true;
-          upsertAssistantStreamEntry(sessionID, clipStreamText(contentOnly));
-        } else if (
-          state.stdout.includes('"type":"turn.started"') ||
-          state.stdout.includes('"type":"thread.started"')
-        ) {
-          state.streamSeen = true;
-        }
-        return;
-      }
-      case "assistant.completed": {
-        if (!runID) return;
-        const state = ensureSessionRunState(sessionID, runID);
-        const contentOnly = parseCodexAssistantTextFromStdout(
-          state.stdout,
-          false,
-        );
-        if (contentOnly.trim()) {
-          state.streamSeen = true;
-          finalizeAssistantStreamEntry(
-            sessionID,
-            "success",
-            clipStreamText(contentOnly),
-          );
-          state.assistantFinalized = true;
-          return;
-        }
-        // Keep stream entry in running state when content is unavailable here.
-        // run.completed/job.succeeded handler will perform job-response fallback.
-        state.assistantFinalized = false;
-        return;
-      }
-      case "target.done": {
-        if (!runID) return;
-        const state = ensureSessionRunState(sessionID, runID);
-        const status =
-          typeof payload.status === "string" ? payload.status.trim() : "";
-        const host = sessionEventHostLabel(payload);
-        const exitCode = payload.exit_code;
-        const codeText =
-          typeof exitCode === "number" ? ` exit=${exitCode}` : "";
-        const errorText =
-          typeof payload.error === "string" && payload.error.trim()
-            ? ` error=${payload.error.trim()}`
-            : "";
-        if (status && status !== "ok") {
-          state.failureHints.push(`${host} failed${codeText}${errorText}`);
-        }
-        return;
-      }
-      case "job.cancel_requested": {
-        return;
-      }
-      case "run.failed":
-      case "job.failed": {
-        const id = runID || `run_${Date.now()}`;
-        const state = ensureSessionRunState(sessionID, id);
-        const errText =
-          typeof payload.error === "string" && payload.error.trim()
-            ? payload.error.trim()
-            : "Session failed.";
-        if (state.streamSeen) {
-          finalizeAssistantStreamEntry(sessionID, "error");
-        }
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Failed",
-            body: errText,
-          },
-          sessionID,
-        );
-        setThreadJobState(sessionID, "", "failed");
-        const surfaced = markSessionDone(sessionID, id, "failed", {
-          surface:
-            options?.surfaceCompletions !== false &&
-            shouldSurfaceCompletion(event.created_at),
-        });
-        if (surfaced && sessionID !== activeThreadIDRef.current) {
-          setThreadUnread(sessionID, true);
-        }
-        sessionRunStateRef.current.delete(sessionID);
-        return;
-      }
-      case "run.canceled":
-      case "job.canceled": {
-        const id = runID || `run_${Date.now()}`;
-        const state = ensureSessionRunState(sessionID, id);
-        if (state.streamSeen) {
-          finalizeAssistantStreamEntry(sessionID, "error");
-        }
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Interrupted",
-            body: "Session interrupted.",
-          },
-          sessionID,
-        );
-        setThreadJobState(sessionID, "", "canceled");
-        const surfaced = markSessionDone(sessionID, id, "canceled", {
-          surface:
-            options?.surfaceCompletions !== false &&
-            shouldSurfaceCompletion(event.created_at),
-        });
-        if (surfaced && sessionID !== activeThreadIDRef.current) {
-          setThreadUnread(sessionID, true);
-        }
-        sessionRunStateRef.current.delete(sessionID);
-        return;
-      }
-      case "run.completed":
-      case "job.succeeded": {
-        if (!runID) return;
-        await finalizeStreamCompleted(sessionID, runID, event.created_at, {
-          surfaceCompletions: options?.surfaceCompletions !== false,
-        });
-        return;
-      }
-      default:
-        return;
-    }
-  }
-
-  function decodeSessionEventRecord(input: unknown): SessionEventRecord | null {
-    const payload = asRecord(input);
-    if (!payload) return null;
-    const seq =
-      typeof payload.seq === "number" ? payload.seq : Number(payload.seq);
-    if (!Number.isFinite(seq) || seq <= 0) return null;
-    const sessionID =
-      typeof payload.session_id === "string" ? payload.session_id.trim() : "";
-    const eventType =
-      typeof payload.type === "string" ? payload.type.trim() : "";
-    if (!sessionID || !eventType) return null;
-    const createdAt =
-      typeof payload.created_at === "string" && payload.created_at.trim()
-        ? payload.created_at
-        : new Date().toISOString();
-    const runID =
-      typeof payload.run_id === "string" ? payload.run_id : undefined;
-    return {
-      seq,
-      session_id: sessionID,
-      run_id: runID,
-      type: eventType,
-      payload: payload.payload,
-      created_at: createdAt,
-    };
-  }
-
-  function handleSessionStreamFrame(
-    sessionID: string,
-    frame: SessionStreamFrame,
-  ) {
-    const state = sessionStreamStateRef.current.get(sessionID);
-    if (!state) return;
-    const receivedAt = Date.now();
-    state.lastEventAt = receivedAt;
-
-    if (frame.event === "session.ready") {
-      state.ready = true;
-      state.suppressReplaySurface = false;
-      updateSessionStreamHealth(sessionID, "live", {
-        lastEventAt: receivedAt,
-        lastError: "",
-      });
-      const data = asRecord(frame.data);
-      const cursor = data ? Number(data.cursor) : NaN;
-      if (Number.isFinite(cursor)) {
-        setSessionEventCursor(sessionID, cursor);
-      }
-      return;
-    }
-
-    if (frame.event === "session.reset") {
-      state.ready = false;
-      updateSessionStreamHealth(sessionID, "reconnecting", {
-        lastEventAt: receivedAt,
-        throttleMS: 0,
-      });
-      const data = asRecord(frame.data);
-      const nextAfter = data ? Number(data.next_after) : NaN;
-      state.suppressReplaySurface = !(Number.isFinite(nextAfter) && nextAfter > 0);
-      if (Number.isFinite(nextAfter)) {
-        setSessionEventCursor(sessionID, nextAfter);
-      }
-      return;
-    }
-
-    if (frame.event === "heartbeat") {
-      updateSessionStreamHealth(sessionID, "live", {
-        lastEventAt: receivedAt,
-      });
-      return;
-    }
-
-    if (frame.event !== "session.event") {
-      return;
-    }
-
-    updateSessionStreamHealth(sessionID, "live", {
-      lastEventAt: receivedAt,
-      lastError: "",
-    });
-    const event = decodeSessionEventRecord(frame.data);
-    if (!event) return;
-
-    const current = sessionEventCursorRef.current.get(sessionID) ?? 0;
-    if (event.seq <= current) return;
-    setSessionEventCursor(sessionID, event.seq);
-    const surfaceByReplay = !state.suppressReplaySurface;
-    const surfaceCompletions = state.ready || surfaceByReplay;
-    const surfaceLifecycle = state.ready || surfaceByReplay;
-    const previousQueue =
-      sessionEventQueueRef.current.get(sessionID) ?? Promise.resolve();
-    const nextQueue = previousQueue
-      .catch(() => undefined)
-      .then(() =>
-        handleSessionEventRecord(sessionID, event, {
-          surfaceCompletions,
-          surfaceLifecycle,
-        }),
-      )
-      .catch(() => undefined);
-    sessionEventQueueRef.current.set(sessionID, nextQueue);
-    void nextQueue.finally(() => {
-      const currentQueue = sessionEventQueueRef.current.get(sessionID);
-      if (currentQueue !== nextQueue) return;
-      sessionEventQueueRef.current.delete(sessionID);
-    });
-  }
-
-  function startSessionStream(sessionID: string, authToken: string) {
-    const trimmedSessionID = sessionID.trim();
-    if (!trimmedSessionID) return;
-    if (sessionStreamStateRef.current.has(trimmedSessionID)) return;
-
-    const controller = new AbortController();
-    sessionStreamStateRef.current.set(trimmedSessionID, {
-      controller,
-      ready: false,
-      lastEventAt: 0,
-      suppressReplaySurface: true,
-    });
-    updateSessionStreamHealth(trimmedSessionID, "connecting", {
-      retries: 0,
-      lastEventAt: 0,
-      lastError: "",
-      throttleMS: 0,
+  const { ensureLocalCodexHost, refreshProjectsFromSource } =
+    createProjectSourceActions({
+      activeWorkspacePath: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+      workspaces,
+      setSourceProjectIDs,
+      syncProjectsFromDiscovery,
+      syncProjectsFromServer,
+      setThreadJobState,
     });
 
-    const run = async () => {
-      let backoff = 700;
-      let retries = 0;
-      while (!controller.signal.aborted) {
-        if (retries > 0) {
-          updateSessionStreamHealth(trimmedSessionID, "reconnecting", {
-            retries,
-            throttleMS: 0,
-          });
-        }
-        const after = sessionEventCursorRef.current.get(trimmedSessionID) ?? 0;
-        const streamState = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (streamState && streamState.controller === controller) {
-          streamState.suppressReplaySurface = after <= 0;
-        }
-        try {
-          await streamSessionEvents(authToken, trimmedSessionID, {
-            after,
-            signal: controller.signal,
-            onFrame: (frame) =>
-              handleSessionStreamFrame(trimmedSessionID, frame),
-          });
-          if (controller.signal.aborted) break;
-          const isRunning = runningSessionIDsRef.current.has(trimmedSessionID);
-          if (isRunning) {
-            retries += 1;
-            updateSessionStreamHealth(trimmedSessionID, "reconnecting", {
-              retries,
-              lastError: "stream closed, retrying",
-              throttleMS: 0,
-            });
-          } else {
-            retries = 0;
-            updateSessionStreamHealth(trimmedSessionID, "live", {
-              retries: 0,
-              lastError: "",
-              throttleMS: 0,
-            });
-          }
-        } catch {
-          if (controller.signal.aborted) break;
-          retries += 1;
-          updateSessionStreamHealth(
-            trimmedSessionID,
-            retries >= 3 ? "error" : "reconnecting",
-            {
-              retries,
-              lastError: "stream interrupted, retrying",
-              throttleMS: 0,
-            },
-          );
-        }
-        const active = sessionStreamStateRef.current.get(trimmedSessionID);
-        if (
-          !active ||
-          active.controller !== controller ||
-          controller.signal.aborted
-        )
-          break;
-        active.ready = false;
-        await waitWithAbort(backoff, controller.signal);
-        backoff = Math.min(6000, Math.round(backoff * 1.7));
-      }
-      const active = sessionStreamStateRef.current.get(trimmedSessionID);
-      if (active && active.controller === controller) {
-        sessionStreamStateRef.current.delete(trimmedSessionID);
-        sessionEventQueueRef.current.delete(trimmedSessionID);
-        updateSessionStreamHealth(trimmedSessionID, "offline", {
-          throttleMS: 0,
-        });
-      }
-    };
-    void run();
-  }
+  const { handleSessionEventRecord } = createSessionRunEventHandlers({
+    workspaces,
+    sessionRunStateRef,
+    activeThreadIDRef,
+    threadTitleMapRef,
+    setThreadJobState,
+    setThreadUnread,
+    setThreadTitle,
+    setActiveJobID,
+    addTimelineEntry,
+    upsertAssistantStreamEntry,
+    finalizeAssistantStreamEntry,
+    notifySessionDone,
+    pushSessionAlert,
+    markRunCompleted,
+    hasCompletedRun,
+    shouldSurfaceCompletion,
+  });
+  const { stopSessionStream, stopAllSessionStreams, startSessionStream } =
+    createSessionStreamController({
+      sessionStreamStateRef,
+      sessionEventQueueRef,
+      sessionRunStateRef,
+      runningSessionIDsRef,
+      sessionEventCursorRef,
+      setSessionEventCursor,
+      updateSessionStreamHealth,
+      clearSessionStreamHealth,
+      clearAllSessionStreamHealth,
+      handleSessionEventRecord,
+    });
 
-  async function loadWorkspace(authToken: string) {
-    const refreshStartedAtMS = Date.now();
-    setIsRefreshing(true);
-    try {
-      const [
-        healthBody,
-        fetchedHosts,
-        nextRuntimes,
-        nextJobs,
-        nextRuns,
-        nextAudit,
-        nextMetrics,
-      ] = await Promise.all([
-        healthz(),
-        listHosts(authToken),
-        listRuntimes(authToken),
-        listRunJobs(authToken, 20),
-        listRuns(authToken, 20),
-        listAudit(authToken, 80),
-        getMetrics(authToken),
-      ]);
-      const nextHosts = await ensureLocalCodexHost(authToken, fetchedHosts);
-
-      setHealth(`ok ${healthBody.timestamp}`);
-      setHosts(nextHosts);
-      setRuntimes(nextRuntimes);
-      setJobs(nextJobs);
-      setRuns(nextRuns);
-      setAuditEvents(nextAudit);
-      setMetrics(nextMetrics);
-
-      const localHost = nextHosts.find(
-        (host) => host.connection_mode === "local",
-      );
-      if (localHost) {
-        setAllHosts(false);
-        setSelectedHostIDs([localHost.id]);
-      } else {
-        setSelectedHostIDs((prev) => {
-          const nextSelected = prev.filter((id) =>
-            nextHosts.some((host) => host.id === id),
-          );
-          if (nextSelected.length > 0) return nextSelected;
-          if (nextHosts.length > 0) return [nextHosts[0].id];
-          return [];
-        });
-      }
-      const codexRuntime = nextRuntimes.find(
-        (runtime) => runtime.name === "codex",
-      );
-      if (codexRuntime) {
-        setSelectedRuntime("codex");
-      } else if (
-        !nextRuntimes.some((runtime) => runtime.name === selectedRuntime)
-      ) {
-        setSelectedRuntime(nextRuntimes[0]?.name ?? "codex");
-      }
-      await refreshProjectsFromSource(
-        authToken,
-        nextHosts,
-        nextRuntimes.some((runtime) => runtime.name === "codex"),
-        workspaces.length > 0,
-      );
-
-      const running = nextJobs.find((job) => isJobActive(job));
-      if (running) {
-        setActiveJobID(running.id);
-        setActiveJob(running);
-      } else {
-        setActiveJobID("");
-        setActiveJob(null);
-      }
-      for (const job of nextJobs) {
-        if (!isJobActive(job)) continue;
-        if (!jobEventCursorRef.current.has(job.id)) {
-          jobEventCursorRef.current.set(job.id, 0);
-        }
-        if (!jobStreamSeenRef.current.has(job.id)) {
-          jobStreamSeenRef.current.set(job.id, false);
-        }
-      }
-      // Only surface completion alerts for events that happen after this sync starts.
-      completionAlertCutoffMSRef.current = refreshStartedAtMS;
-    } catch (error) {
-      setHealth(`error: ${String(error)}`);
-      throw error;
-    } finally {
-      setIsRefreshing(false);
-    }
-  }
-
-  async function unlockWorkspace(candidateToken: string) {
-    const trimmed = candidateToken.trim();
-    if (!trimmed) {
-      setAuthError("token is required");
-      setAuthPhase("locked");
-      return;
-    }
-
-    setAuthPhase("checking");
-    setAuthError("");
-
-    try {
-      await Promise.all([listRuntimes(trimmed), listHosts(trimmed)]);
-      storeToken(trimmed);
-      setToken(trimmed);
-      setTokenInput(trimmed);
-      await loadWorkspace(trimmed);
-      setAuthPhase("ready");
-    } catch (error) {
-      clearStoredToken();
-      setToken("");
-      setAuthPhase("locked");
-      setAuthError(`token validation failed: ${String(error)}`);
-    }
-  }
+  const { loadWorkspace, unlockWorkspace } = createWorkspaceAuthActions({
+    selectedRuntime,
+    workspacesLength: workspaces.length,
+    setIsRefreshing,
+    setHealth,
+    setHosts,
+    setRuntimes,
+    setJobs,
+    setRuns,
+    setAuditEvents,
+    setMetrics,
+    setAllHosts,
+    setSelectedHostIDs,
+    setSelectedRuntime,
+    setActiveJobID,
+    setActiveJob,
+    setToken,
+    setTokenInput,
+    setAuthError,
+    setAuthPhase,
+    ensureLocalCodexHost,
+    refreshProjectsFromSource,
+    jobEventCursorRef,
+    jobStreamSeenRef,
+    completionAlertCutoffMSRef,
+  });
 
   useEffect(() => {
     const cached = loadStoredToken();
@@ -3605,739 +891,85 @@ export function App() {
     void unlockWorkspace(cached);
   }, []);
 
-  useEffect(() => {
-    const ready = authPhase === "ready" && token.trim() !== "";
-    if (!ready) {
-      streamAuthTokenRef.current = "";
-      stopAllSessionStreams();
-      return;
-    }
-    if (streamAuthTokenRef.current !== token) {
-      stopAllSessionStreams();
-      streamAuthTokenRef.current = token;
-    }
-
-    const expected = new Set(sessionStreamTargetIDs);
-    for (const sessionID of expected) {
-      if (!sessionStreamStateRef.current.has(sessionID)) {
-        startSessionStream(sessionID, token);
-      }
-    }
-    for (const sessionID of Array.from(sessionStreamStateRef.current.keys())) {
-      if (expected.has(sessionID)) continue;
-      stopSessionStream(sessionID);
-    }
-  }, [authPhase, token, sessionStreamTargetIDs]);
-
-  useEffect(() => {
-    return () => {
-      stopAllSessionStreams();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (!activeSessionHostID) return;
-    if (!runtimes.some((runtime) => runtime.name === "codex")) return;
-    let canceled = false;
-    void discoverCodexModels(token, { host_id: activeSessionHostID })
-      .then((catalog) => {
-        if (canceled) return;
-        const nextDefault = catalog.default_model?.trim() || "";
-        const nextModels = Array.isArray(catalog.models)
-          ? catalog.models.filter((name) => name.trim() !== "")
-          : [];
-        setSessionModelDefault(nextDefault);
-        setSessionModelOptions(nextModels);
-      })
-      .catch(() => {
-        if (canceled) return;
-        setSessionModelDefault("");
-        setSessionModelOptions([]);
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [authPhase, token, activeSessionHostID, runtimes]);
-
-  useEffect(() => {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (appMode !== "session") return;
-    if (!runtimes.some((runtime) => runtime.name === "codex")) return;
-    if (hosts.length === 0) return;
-    if (runningThreadJobs.length > 0 || submittingThreadID !== "") return;
-
-    let canceled = false;
-    const refresh = async () => {
-      try {
-        await refreshProjectsFromSource(token, hosts, true, true);
-      } catch {
-        // no-op: best-effort title/session sync
-      }
-    };
-
-    const timer = window.setInterval(() => {
-      if (canceled) return;
-      void refresh();
-    }, 25000);
-
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, [
+  useSessionRuntimeEffects({
     authPhase,
     token,
     appMode,
-    hosts,
+    sessionStreamTargetIDs,
+    sessionStreamStateRef,
+    streamAuthTokenRef,
+    stopAllSessionStreams,
+    startSessionStream,
+    stopSessionStream,
+    activeSessionHostID,
     runtimes,
-    runningThreadJobs.length,
+    setSessionModelDefault,
+    setSessionModelOptions,
+    hosts,
+    runningThreadJobsLength: runningThreadJobs.length,
     submittingThreadID,
-  ]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const syncFromHash = () => {
-      setAppMode(modeFromHash(window.location.hash));
-    };
-    syncFromHash();
-    window.addEventListener("hashchange", syncFromHash);
-    return () => {
-      window.removeEventListener("hashchange", syncFromHash);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (appMode === "session") return;
-    if (!commandPaletteOpen) return;
-    setCommandPaletteOpen(false);
-    setCommandPaletteQuery("");
-    setCommandPaletteCursor(0);
-  }, [appMode, commandPaletteOpen]);
-
-  useEffect(() => {
-    if (!commandPaletteOpen) return;
-    const frame = window.requestAnimationFrame(() => {
-      commandPaletteInputRef.current?.focus();
-      commandPaletteInputRef.current?.select();
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
-  }, [commandPaletteOpen]);
-
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    if (!commandPaletteOpen) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [commandPaletteOpen]);
-
-  useEffect(() => {
-    if (!commandPaletteOpen) return;
-    setCommandPaletteCursor((prev) => {
-      if (filteredCommandPaletteActions.length === 0) return 0;
-      if (prev < filteredCommandPaletteActions.length) return prev;
-      return filteredCommandPaletteActions.length - 1;
-    });
-  }, [commandPaletteOpen, filteredCommandPaletteActions.length]);
-
-  useEffect(() => {
-    const node = timelineViewportRef.current;
-    if (!node) return;
-    const threadChanged = lastTimelineThreadIDRef.current !== activeThreadID;
-    const nextSignature = [
-      activeThreadID,
-      String(activeTimeline.length),
-      activeTimelineTail?.id ?? "",
-      activeTimelineTail?.state ?? "",
-      String(activeTimelineTail?.body?.length ?? 0),
-    ].join("|");
-    const previousSignature = timelineLastSignatureRef.current;
-    const previousCount = timelineLastCountRef.current;
-    const previousTailID = timelineLastTailIDRef.current;
-    const previousTailState = timelineLastTailStateRef.current;
-    const nextTailID = activeTimelineTail?.id ?? "";
-    const nextTailState = activeTimelineTail?.state ?? "";
-    timelineLastCountRef.current = activeTimeline.length;
-    timelineLastTailIDRef.current = nextTailID;
-    timelineLastTailStateRef.current = nextTailState;
-    if (threadChanged) {
-      lastTimelineThreadIDRef.current = activeThreadID;
-      timelineForceStickRef.current = true;
-      timelineLastSignatureRef.current = nextSignature;
-      timelineLastCountRef.current = activeTimeline.length;
-      timelineLastTailIDRef.current = nextTailID;
-      timelineLastTailStateRef.current = nextTailState;
-      setTimelineUnreadCount(0);
-    }
-    const shouldStick =
-      timelineForceStickRef.current ||
-      timelineStickToBottomRef.current ||
-      threadChanged;
-    const timelineChanged =
-      !threadChanged && previousSignature !== nextSignature;
-    if (!shouldStick && timelineChanged) {
-      const structuralChange =
-        previousCount !== activeTimeline.length ||
-        previousTailID !== nextTailID ||
-        previousTailState !== nextTailState;
-      timelineLastSignatureRef.current = nextSignature;
-      if (structuralChange) {
-        setTimelineUnreadCount((count) =>
-          Math.min(TIMELINE_JUMP_COUNT_CAP, count + 1),
-        );
-      }
-      return;
-    }
-    timelineLastSignatureRef.current = nextSignature;
-    if (!shouldStick) return;
-    const frame = window.requestAnimationFrame(() => {
-      if (timelineBottomRef.current) {
-        timelineBottomRef.current.scrollIntoView({ block: "end" });
-      } else {
-        node.scrollTop = node.scrollHeight;
-      }
-      timelineForceStickRef.current = false;
-      setTimelineUnreadCount(0);
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
-  }, [
+    refreshProjectsFromSource,
     activeThreadID,
-    activeTimeline.length,
-    activeTimelineTail?.body,
-    activeTimelineTail?.state,
-  ]);
+    activeThreadActiveJobID: activeThread?.activeJobID?.trim() ?? "",
+    knownJobIDSet,
+    setActiveJobID,
+    setActiveJob,
+  });
 
-  function onTimelineScroll() {
-    const node = timelineViewportRef.current;
-    if (!node) return;
-    const gap = Math.abs(
-      node.scrollHeight - node.clientHeight - node.scrollTop,
-    );
-    const pinned = gap <= TIMELINE_STICK_GAP_PX;
-    timelineStickToBottomRef.current = pinned;
-    if (pinned) {
-      setTimelineUnreadCount(0);
-    }
-  }
-
-  function jumpTimelineToLatest() {
-    const node = timelineViewportRef.current;
-    if (!node) return;
-    timelineForceStickRef.current = true;
-    timelineStickToBottomRef.current = true;
-    setTimelineUnreadCount(0);
-    if (timelineBottomRef.current) {
-      timelineBottomRef.current.scrollIntoView({ block: "end" });
-      return;
-    }
-    node.scrollTop = node.scrollHeight;
-  }
-
-  useEffect(() => {
-    const node = promptInputRef.current;
-    if (!node) return;
-    node.style.height = "0px";
-    const nextHeight = Math.max(
-      COMPOSER_MIN_HEIGHT,
-      Math.min(COMPOSER_MAX_HEIGHT, node.scrollHeight),
-    );
-    node.style.height = `${nextHeight}px`;
-  }, [activeThreadID, activeDraft]);
-
-  useEffect(() => {
-    if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
-    if (!activeThread?.activeJobID) {
-      setActiveJobID("");
-      setActiveJob(null);
-      return;
-    }
-    void getRunJob(token, activeThread.activeJobID)
-      .then((job) => {
-        setActiveJobID(job.id);
-        setActiveJob(job);
-      })
-      .catch(() => {
-        setActiveJobID("");
-        setActiveJob(null);
-      });
-  }, [appMode, authPhase, token, activeThread?.id, activeThread?.activeJobID]);
-
-  useEffect(() => {
-    if (authPhase !== "ready") return;
-
-    const handleGlobalKeydown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        if (commandPaletteOpen) {
-          closeCommandPalette();
-          return;
-        }
-        openCommandPalette();
-        return;
-      }
-
-      if (commandPaletteOpen) {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          closeCommandPalette();
-        }
-        return;
-      }
-
-      if (appMode !== "session") return;
-
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        event.shiftKey &&
-        event.key.toLowerCase() === "n"
-      ) {
-        event.preventDefault();
-        createThreadAndFocus();
-        return;
-      }
-
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        event.shiftKey &&
-        (event.key === "ArrowUp" || event.key === "[")
-      ) {
-        event.preventDefault();
-        switchThreadByOffset(-1);
-        return;
-      }
-
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        event.shiftKey &&
-        (event.key === "ArrowDown" || event.key === "]")
-      ) {
-        event.preventDefault();
-        switchThreadByOffset(1);
-      }
-    };
-
-    window.addEventListener("keydown", handleGlobalKeydown);
-    return () => {
-      window.removeEventListener("keydown", handleGlobalKeydown);
-    };
-  }, [authPhase, appMode, threads, activeThreadID, commandPaletteOpen]);
-
-  useEffect(() => {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (runningThreadJobs.length === 0) return;
-
-    let canceled = false;
-    const poll = async () => {
-      const pollingJobs = runningThreadJobs;
-      if (pollingJobs.length === 0) return;
-      try {
-        const jobResults = await Promise.all(
-          pollingJobs.map(async (item) => {
-            try {
-              const after = jobEventCursorRef.current.get(item.jobID) ?? 0;
-              const [job, eventFeed] = await Promise.all([
-                getRunJob(token, item.jobID),
-                listRunJobEvents(token, item.jobID, after, 240).catch(() => ({
-                  events: [] as RunJobEvent[],
-                  next_after: after,
-                })),
-              ]);
-              return {
-                item,
-                job,
-                error: "",
-                events: eventFeed.events,
-                nextAfter: eventFeed.next_after,
-              };
-            } catch (error) {
-              return {
-                item,
-                job: null as RunJobRecord | null,
-                error: String(error),
-                events: [] as RunJobEvent[],
-                nextAfter: jobEventCursorRef.current.get(item.jobID) ?? 0,
-              };
-            }
-          }),
-        );
-        if (canceled) return;
-
-        let needsProjectRefresh = false;
-        for (const result of jobResults) {
-          const { item, job, error, events, nextAfter } = result;
-          if (!job) {
-            addTimelineEntry(
-              {
-                kind: "system",
-                state: "error",
-                title: "Session Update Failed",
-                body: error,
-              },
-              item.threadID,
-            );
-            setThreadJobState(item.threadID, "", "failed");
-            continue;
-          }
-          jobEventCursorRef.current.set(item.jobID, nextAfter);
-          const alreadyCompleted = completedJobsRef.current.has(item.jobID);
-          const streamRunState = sessionRunStateRef.current.get(item.threadID);
-          const preferSessionStream =
-            streamRunState?.runID === item.jobID &&
-            (streamRunState?.streamSeen || streamRunState?.assistantFinalized);
-
-          let stdoutStream = "";
-          const terminalHints: string[] = [];
-          const showLiveStream =
-            !preferSessionStream &&
-            appMode === "session" &&
-            item.threadID === activeThreadID;
-          const fallbackRunState =
-            !preferSessionStream && job.runtime === "codex"
-              ? ensureSessionRunState(item.threadID, item.jobID)
-              : null;
-          for (const event of events) {
-            if (
-              event.type === "target.stdout" &&
-              typeof event.chunk === "string"
-            ) {
-              stdoutStream += event.chunk;
-              if (fallbackRunState) {
-                appendCodexStdoutChunk(fallbackRunState, event.chunk);
-              }
-            }
-            if (
-              event.type === "target.done" &&
-              event.status &&
-              event.status !== "ok"
-            ) {
-              const line = summarizeJobEventLine(event);
-              if (line) terminalHints.push(line);
-            }
-            if (
-              event.type === "job.failed" ||
-              event.type === "job.canceled" ||
-              event.type === "job.cancel_requested"
-            ) {
-              const line = summarizeJobEventLine(event);
-              if (line) terminalHints.push(line);
-            }
-          }
-          if (!alreadyCompleted && showLiveStream && fallbackRunState) {
-            surfaceRuntimeCardsFromRunState(
-              item.threadID,
-              item.jobID,
-              fallbackRunState,
-              true,
-            );
-          }
-          if (!alreadyCompleted && showLiveStream && stdoutStream.trim()) {
-            if (job.runtime === "codex") {
-              const sourceStdout = fallbackRunState
-                ? fallbackRunState.stdout
-                : stdoutStream;
-              const nextTitle = parseCodexSessionTitleFromStdout(sourceStdout);
-              if (nextTitle) {
-                setThreadTitle(item.threadID, nextTitle);
-              }
-              const contentOnly = parseCodexAssistantTextFromStdout(
-                sourceStdout,
-                false,
-              );
-              if (contentOnly.trim()) {
-                jobStreamSeenRef.current.set(item.jobID, true);
-                upsertAssistantStreamEntry(
-                  item.threadID,
-                  clipStreamText(contentOnly),
-                );
-              } else if (
-                sourceStdout.includes('"type":"turn.started"') ||
-                sourceStdout.includes('"type":"thread.started"')
-              ) {
-                jobStreamSeenRef.current.set(item.jobID, true);
-              }
-            } else {
-              jobStreamSeenRef.current.set(item.jobID, true);
-              upsertAssistantStreamEntry(
-                item.threadID,
-                clipStreamText(stdoutStream),
-              );
-            }
-          }
-          if (!preferSessionStream && terminalHints.length > 0) {
-            addTimelineEntry(
-              {
-                kind: "system",
-                state: "error",
-                title: "Failed",
-                body: terminalHints.join("\n"),
-              },
-              item.threadID,
-            );
-          }
-
-          if (item.threadID === activeThreadID) {
-            setActiveJob(job);
-            setActiveJobID(job.id);
-          }
-
-          if (isJobActive(job)) {
-            setThreadJobState(item.threadID, job.id, "running");
-            continue;
-          }
-
-          const responseFailed = jobHasTargetFailures(job);
-          const assistantText =
-            job.status === "succeeded" ? extractAssistantTextFromJob(job) : "";
-          if (
-            job.runtime === "codex" &&
-            job.status === "succeeded" &&
-            !responseFailed &&
-            !assistantText.trim()
-          ) {
-            const retries =
-              jobNoTextFinalizeRetriesRef.current.get(job.id) ?? 0;
-            if (retries < 4) {
-              jobNoTextFinalizeRetriesRef.current.set(job.id, retries + 1);
-              setThreadJobState(item.threadID, job.id, "running");
-              continue;
-            }
-          } else {
-            jobNoTextFinalizeRetriesRef.current.delete(job.id);
-          }
-
-          if (job.runtime === "codex") {
-            needsProjectRefresh = true;
-          }
-          const terminalStatus =
-            job.status === "failed" || job.status === "canceled"
-              ? job.status
-              : responseFailed
-                ? "failed"
-                : job.status === "succeeded"
-                  ? "succeeded"
-                  : "failed";
-          const shouldSurfaceJobCompletion = shouldSurfaceCompletion(
-            job.finished_at || job.started_at || job.queued_at,
-          );
-          setThreadJobState(item.threadID, "", terminalStatus);
-          jobEventCursorRef.current.delete(item.jobID);
-          jobNoTextFinalizeRetriesRef.current.delete(job.id);
-          const pollRunState = sessionRunStateRef.current.get(item.threadID);
-          if (!preferSessionStream && pollRunState?.runID === item.jobID) {
-            sessionRunStateRef.current.delete(item.threadID);
-          }
-          const sawSessionStream =
-            streamRunState?.runID === item.jobID &&
-            (streamRunState.streamSeen || streamRunState.assistantFinalized);
-          const sawJobStream = Boolean(jobStreamSeenRef.current.get(item.jobID));
-          jobStreamSeenRef.current.delete(item.jobID);
-          const sawAnyStream = Boolean(sawSessionStream || sawJobStream);
-          if (shouldSurfaceJobCompletion && item.threadID !== activeThreadID) {
-            setThreadUnread(item.threadID, true);
-          }
-
-          if (completedJobsRef.current.has(job.id)) {
-            if (job.status === "succeeded") {
-              if (assistantText) {
-                if (sawAnyStream) {
-                  finalizeAssistantStreamEntry(
-                    item.threadID,
-                    "success",
-                    assistantText,
-                  );
-                }
-              } else if (sawAnyStream) {
-                finalizeAssistantStreamEntry(
-                  item.threadID,
-                  "success",
-                  EMPTY_ASSISTANT_FALLBACK,
-                );
-              }
-            }
-            continue;
-          }
-
-          markRunCompleted(job.id);
-          {
-            const failedSummary = summarizeTargetFailures(job);
-            if (
-              job.status === "failed" ||
-              job.status === "canceled" ||
-              responseFailed
-            ) {
-              if (sawAnyStream) {
-                finalizeAssistantStreamEntry(item.threadID, "error");
-              }
-              addTimelineEntry(
-                {
-                  kind: "system",
-                  state: "error",
-                  title: job.status === "canceled" ? "Interrupted" : "Failed",
-                  body:
-                    failedSummary ||
-                    (job.status === "canceled"
-                      ? "Session interrupted."
-                      : job.error
-                        ? String(job.error)
-                        : "Session failed."),
-                },
-                item.threadID,
-              );
-            } else if (assistantText) {
-              if (sawAnyStream) {
-                finalizeAssistantStreamEntry(
-                  item.threadID,
-                  "success",
-                  assistantText,
-                );
-              } else {
-                addTimelineEntry(
-                  {
-                    kind: "assistant",
-                    state: "success",
-                    title: "Assistant",
-                    body: assistantText,
-                  },
-                  item.threadID,
-                );
-              }
-            } else if (sawAnyStream) {
-              finalizeAssistantStreamEntry(
-                item.threadID,
-                "success",
-                EMPTY_ASSISTANT_FALLBACK,
-              );
-            }
-            const sessionTitle =
-              threadTitleMapRef.current.get(item.threadID) ?? "Session";
-            const completionStatus: "succeeded" | "failed" | "canceled" =
-              job.status === "canceled"
-                ? "canceled"
-                : job.status === "succeeded" && !responseFailed
-                  ? "succeeded"
-                  : "failed";
-            const completion = sessionCompletionCopy(completionStatus);
-            if (shouldSurfaceJobCompletion) {
-              notifySessionDone(
-                `${sessionTitle} ${completion.suffix}`,
-                completion.body,
-              );
-              pushSessionAlert({
-                threadID: item.threadID,
-                title: `${sessionTitle} ${completion.suffix}`,
-                body: completion.body,
-              });
-            }
-          }
-        }
-
-        const [nextJobs, nextRuns, nextAudit, refreshedMetrics] =
-          await Promise.all([
-            listRunJobs(token, 20),
-            listRuns(token, 20),
-            listAudit(token, 80),
-            getMetrics(token),
-          ]);
-        if (canceled) return;
-        setJobs(nextJobs);
-        setRuns(nextRuns);
-        setAuditEvents(nextAudit);
-        setMetrics(refreshedMetrics);
-        if (needsProjectRefresh) {
-          await refreshProjectsFromSource(
-            token,
-            hosts,
-            runtimes.some((runtime) => runtime.name === "codex"),
-            true,
-          );
-          if (canceled) return;
-        }
-      } catch {
-        if (canceled) return;
-      }
-    };
-
-    void poll();
-    const timer = window.setInterval(() => {
-      void poll();
-    }, 2100);
-
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, [
+  useSessionJobPolling({
     authPhase,
     token,
     appMode,
-    runningThreadJobs,
+    runningJobPollTargets,
     activeThreadID,
     hosts,
     runtimes,
-  ]);
+    jobEventCursorRef,
+    jobStreamSeenRef,
+    jobNoTextFinalizeRetriesRef,
+    sessionRunStateRef,
+    threadTitleMapRef,
+    hasCompletedRun,
+    markRunCompleted,
+    shouldSurfaceCompletion,
+    addTimelineEntry,
+    upsertAssistantStreamEntry,
+    finalizeAssistantStreamEntry,
+    setThreadTitle,
+    setThreadJobState,
+    setThreadUnread,
+    notifySessionDone,
+    pushSessionAlert,
+    setActiveJobID,
+    setActiveJob,
+    setJobs,
+    setRuns,
+    setAuditEvents,
+    setMetrics,
+    refreshProjectsFromSource,
+  });
 
-  useEffect(() => {
-    if (authPhase !== "ready" || !token.trim() || appMode !== "ops") return;
-
-    let canceled = false;
-    const timer = window.setInterval(async () => {
-      try {
-        const [nextJobs, nextRuns, nextAudit, nextMetrics] = await Promise.all([
-          listRunJobs(token, 20),
-          listRuns(token, 20),
-          listAudit(token, 80),
-          getMetrics(token),
-        ]);
-        if (canceled) return;
-        setJobs(nextJobs);
-        setRuns(nextRuns);
-        setAuditEvents(nextAudit);
-        setMetrics(nextMetrics);
-
-        if (!activeJobID) {
-          const running = nextJobs.find((job) => isJobActive(job));
-          if (running) {
-            setActiveJobID(running.id);
-            setActiveJob(running);
-          }
-        }
-      } catch {
-        if (canceled) return;
-      }
-    }, 5000);
-
-    return () => {
-      canceled = true;
-      window.clearInterval(timer);
-    };
-  }, [authPhase, token, appMode, activeJobID]);
+  useOpsPolling({
+    authPhase,
+    token,
+    appMode,
+    activeJobID,
+    setJobs,
+    setRuns,
+    setAuditEvents,
+    setMetrics,
+    setActiveJobID,
+    setActiveJob,
+  });
 
   async function onSubmitToken(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await unlockWorkspace(tokenInput);
   }
 
-  function switchMode(nextMode: AppMode) {
-    setAppMode(nextMode);
-    if (typeof window !== "undefined") {
-      const nextHash = modeToHash(nextMode);
-      if (window.location.hash !== nextHash) {
-        window.history.replaceState(null, "", nextHash);
-      }
-    }
-  }
-
   function onLogout() {
     clearStoredToken();
-    localStorage.removeItem(SESSION_EVENT_CURSOR_KEY);
-    localStorage.removeItem(COMPLETED_RUNS_KEY);
+    clearSessionRuntimePersistence();
     stopAllSessionStreams();
     streamAuthTokenRef.current = "";
     resetOpsDomain();
@@ -4347,10 +979,10 @@ export function App() {
     jobNoTextFinalizeRetriesRef.current.clear();
     sessionEventCursorRef.current.clear();
     sessionRunStateRef.current.clear();
-    completedJobsRef.current.clear();
+    clearCompletedRuns();
     setSubmittingThreadID("");
     setCancelingThreadID("");
-    setSessionAlerts([]);
+    clearSessionAlerts();
     setSessionModelDefault("");
     setSessionModelOptions([]);
     setSourceProjectIDs([]);
@@ -4368,2778 +1000,409 @@ export function App() {
     });
   }
 
-  async function onRefreshWorkspace() {
-    if (authPhase !== "ready" || !token.trim()) return;
-    await loadWorkspace(token);
-  }
-
-  async function onCreateProject(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (authPhase !== "ready" || !token.trim()) return;
-    const hostID = projectFormHostID.trim();
-    const path = projectFormPath.trim();
-    const title = projectFormTitle.trim();
-    if (!hostID || !path) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Project Validation",
-        body: "Server and project path are required.",
-      });
-      return;
-    }
-
-    setUpsertingProjectID("__create__");
-    try {
-      const saved = await upsertProject(token, {
-        host_id: hostID,
-        path,
-        title: title || undefined,
-        runtime: "codex",
-      });
-      await refreshProjectsFromSource(token, hosts, false, true);
-      if (saved.id.trim()) {
-        setActiveWorkspaceID(saved.id.trim());
-      }
-      closeProjectComposer();
-      addTimelineEntry({
-        kind: "system",
-        state: "success",
-        title: "Project Created",
-        body: `${resolveProjectTitle(path, title)} · ${path}`,
-      });
-    } catch (error) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Create Project Failed",
-        body: String(error),
-      });
-    } finally {
-      setUpsertingProjectID("");
-    }
-  }
-
-  async function onRenameProject(project: SessionTreeProject) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const currentTitle = resolveProjectTitle(project.path, project.title);
-    const next = window.prompt("Project name", currentTitle);
-    if (next === null) return;
-    const trimmed = next.trim();
-    if (!trimmed) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Rename Project Failed",
-        body: "Project name is required.",
-      });
-      return;
-    }
-    if (trimmed === currentTitle) return;
-
-    setUpsertingProjectID(project.id);
-    try {
-      const saved = await upsertProject(token, {
-        id: project.id,
-        host_id: project.hostID,
-        path: project.path,
-        title: trimmed,
-        runtime: "codex",
-      });
-      await refreshProjectsFromSource(token, hosts, false, true);
-      if (saved.id.trim()) {
-        setActiveWorkspaceID(saved.id.trim());
-      }
-      addTimelineEntry({
-        kind: "system",
-        state: "success",
-        title: "Project Renamed",
-        body: `${currentTitle} -> ${trimmed}`,
-      });
-    } catch (error) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Rename Project Failed",
-        body: String(error),
-      });
-    } finally {
-      setUpsertingProjectID("");
-    }
-  }
-
-  async function onArchiveProject(
-    projectID: string,
-    projectHostID: string,
-    projectPath: string,
-    sessionCount: number,
-  ) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const sourceProjectID = projectID.trim();
-    const sourceHostID = projectHostID.trim();
-    const sourcePath = projectPath.trim();
-    const loadingKey = sourceProjectID;
-
-    const confirmed = window.confirm(
-      `Archive empty project "${sourcePath}"?`,
-    );
-    if (!confirmed) return;
-
-    setDeletingProjectID(loadingKey);
-
-    let targetProjectID = sourceProjectID;
-    let remoteProjectResolved = sourceProjectIDSet.has(targetProjectID);
-    try {
-      if (!remoteProjectResolved) {
-        try {
-          const remoteProjects = await listProjects(token, 600, {
-            runtime: "codex",
-          });
-          setSourceProjectIDs(
-            remoteProjects
-              .map((project) => project.id.trim())
-              .filter((id) => id !== ""),
-          );
-          const matched =
-            remoteProjects.find(
-              (project) => project.id.trim() === sourceProjectID,
-            ) ??
-            remoteProjects.find(
-              (project) =>
-                project.host_id.trim() === sourceHostID &&
-                project.path.trim() === sourcePath,
-            );
-          if (matched?.id?.trim()) {
-            targetProjectID = matched.id.trim();
-            remoteProjectResolved = true;
-          }
-        } catch {
-          // no-op: keep fallback to local-only message below
-        }
-      }
-
-      if (!remoteProjectResolved || !targetProjectID) {
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Archive Unavailable",
-            body: "Project is local-only and cannot be archived remotely.",
-          },
-          activeThreadID,
-        );
-        return;
-      }
-
-      let resolvedSessionCount = sessionCount;
-      try {
-        const remoteSessions = await listSessions(token, 200, {
-          project_id: targetProjectID,
-          runtime: "codex",
-        });
-        resolvedSessionCount = remoteSessions.length;
-      } catch {
-        // fallback to current UI count
-      }
-
-      if (resolvedSessionCount > 0) {
-        addTimelineEntry(
-          {
-            kind: "system",
-            state: "error",
-            title: "Archive Blocked",
-            body:
-              resolvedSessionCount === 1
-                ? "Project still has 1 session. Archive it first."
-                : `Project still has ${resolvedSessionCount} sessions. Archive them first.`,
-          },
-          activeThreadID,
-        );
-        return;
-      }
-
-      await deleteProject(token, targetProjectID);
-      await refreshProjectsFromSource(token, hosts, false, true);
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "success",
-          title: "Project Archived",
-          body: projectPath,
-        },
-        activeThreadID,
-      );
-    } catch (error) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Project Archive Failed",
-          body: String(error),
-        },
-        activeThreadID,
-      );
-    } finally {
-      setDeletingProjectID("");
-    }
-  }
-
-  async function onArchiveActiveSession() {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    const targetSessionID = activeThread.id.trim();
-    if (!targetSessionID) return;
-    if (activeThread.activeJobID || submittingThreadID === targetSessionID) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Archive Blocked",
-          body: "Session is running. Stop it before archiving.",
-        },
-        targetSessionID,
-      );
-      return;
-    }
-    const confirmed = window.confirm(
-      `Archive session "${activeThread.title}" on host "${activeWorkspace?.hostName || "unknown"}"?`,
-    );
-    if (!confirmed) return;
-
-    setDeletingThreadID(targetSessionID);
-    try {
-      await archiveSession(token, targetSessionID);
-      stopSessionStream(targetSessionID);
-      deleteSessionEventCursor(targetSessionID);
-      sessionRunStateRef.current.delete(targetSessionID);
-      removeThread(targetSessionID);
-      await refreshProjectsFromSource(token, hosts, false, true);
-    } catch (error) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Archive Failed",
-          body: String(error),
-        },
-        targetSessionID,
-      );
-    } finally {
-      setDeletingThreadID("");
-    }
-  }
-
-  function onReconnectActiveStream() {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const sessionID = activeThreadID.trim();
-    if (!sessionID) return;
-    stopSessionStream(sessionID, { preserveRunState: true, preserveHealth: true });
-    updateSessionStreamHealth(sessionID, "connecting", {
-      throttleMS: 0,
-      lastError: "",
+  const { onCreateProject, onRenameProject, onArchiveProject } =
+    createProjectActions({
+      authPhase,
+      token,
+      projectFormHostID,
+      projectFormPath,
+      projectFormTitle,
+      hosts,
+      sourceProjectIDSet,
+      activeThreadID,
+      addTimelineEntry,
+      setUpsertingProjectID,
+      setDeletingProjectID,
+      setSourceProjectIDs,
+      setActiveWorkspaceID,
+      closeProjectComposer,
+      refreshProjectsFromSource,
     });
-    startSessionStream(sessionID, token);
-  }
 
-  async function submitPromptForActiveThread(trimmedPrompt: string) {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    if (activeThread.activeJobID || submittingThreadID === activeThread.id) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "running",
-          title: "Session Busy",
-          body: "This session is already running. Wait for completion or switch to another session.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-
-    const prompt = trimmedPrompt.trim();
-    if (!prompt) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Prompt Missing",
-          body: "Prompt is required.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-    if (isGenericSessionTitle(activeThread.title)) {
-      const nextTitle = deriveSessionTitleFromPrompt(prompt);
-      if (nextTitle) {
-        setThreadTitle(activeThread.id, nextTitle);
-      }
-    }
-
-    const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
-    const localHostIDs = hosts
-      .filter((host) => host.connection_mode === "local")
-      .map((host) => host.id);
-    const targetHostIDs =
-      workspaceHostID !== ""
-        ? [workspaceHostID]
-        : selectedHostIDs.length > 0
-          ? selectedHostIDs
-          : localHostIDs.length > 0
-            ? localHostIDs
-            : hosts.length > 0
-              ? [hosts[0].id]
-              : [];
-    if (targetHostIDs.length === 0) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "No Server Available",
-          body: "No server is available for this session.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-
-    const selectedHosts = hosts.filter((host) =>
-      targetHostIDs.includes(host.id),
-    );
-    const hasNonLocalTarget = selectedHosts.some(
-      (host) => host.connection_mode !== "local",
-    );
-    const safeImagePaths = !hasNonLocalTarget ? activeThread.imagePaths : [];
-    if (hasNonLocalTarget && activeThread.imagePaths.length > 0) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "running",
-          title: "Image Attachment Skipped",
-          body: "Image attachments are only applied to local-mode targets.",
-        },
-        activeThread.id,
-      );
-    }
-
-    const fanout = Math.max(1, Number.parseInt(fanoutValue, 10) || 1);
-    const outputCap = Math.max(32, Number.parseInt(maxOutputKB, 10) || 256);
-    const effectiveModel =
-      activeThread.model.trim() ||
-      sessionModelDefault.trim() ||
-      sessionModelChoices[0]?.trim() ||
-      undefined;
-    const effectiveSandbox =
-      activeThread.sandbox || runSandbox || "workspace-write";
-    const effectiveWorkdir = activeWorkspace?.path.trim() || undefined;
-
-    const codexRequest: RunRequest["codex"] =
-      (activeRuntime?.name ?? selectedRuntime) === "codex"
-        ? {
-            mode: "exec",
-            model: effectiveModel,
-            ask_for_approval: activeThread.approvalPolicy || undefined,
-            search: activeThread.webSearch ? true : undefined,
-            profile: activeThread.profile.trim() || undefined,
-            config:
-              activeThread.configFlags.length > 0
-                ? activeThread.configFlags
-                : undefined,
-            enable:
-              activeThread.enableFlags.length > 0
-                ? activeThread.enableFlags
-                : undefined,
-            disable:
-              activeThread.disableFlags.length > 0
-                ? activeThread.disableFlags
-                : undefined,
-            json_output: activeThread.jsonOutput,
-            skip_git_repo_check: activeThread.skipGitRepoCheck,
-            ephemeral: activeThread.ephemeral,
-            sandbox: effectiveSandbox,
-            add_dirs:
-              activeThread.addDirs.length > 0 ? activeThread.addDirs : undefined,
-            images: safeImagePaths.length > 0 ? safeImagePaths : undefined,
-          }
-        : undefined;
-
-    const request: RunRequest = {
-      runtime: activeRuntime?.name ?? selectedRuntime,
-      prompt,
-      session_id: activeThread.id,
-      all_hosts: false,
-      host_ids: targetHostIDs,
-      workdir: effectiveWorkdir,
-      fanout,
-      max_output_kb: outputCap,
-      codex: codexRequest,
-    };
-
-    addTimelineEntry(
-      {
-        kind: "user",
-        title: "You",
-        body: prompt,
-      },
-      activeThread.id,
-    );
-    timelineForceStickRef.current = true;
-    timelineStickToBottomRef.current = true;
-    updateThreadDraft(activeThread.id, "");
-
-    setSubmittingThreadID(activeThread.id);
-    try {
-      if (runAsyncMode) {
-        const { body } = await enqueueRunJob(token, request);
-        jobEventCursorRef.current.set(body.job.id, 0);
-        jobStreamSeenRef.current.set(body.job.id, false);
-        ensureSessionRunState(activeThread.id, body.job.id);
-        setActiveJobID(body.job.id);
-        setActiveJobThreadID(activeThread.id);
-        setActiveJob(body.job);
-        setThreadJobState(activeThread.id, body.job.id, "running");
-        setJobs((prev) => [
-          body.job,
-          ...prev.filter((job) => job.id !== body.job.id),
-        ]);
-        setSubmittingThreadID("");
-      } else {
-        const { status, body } = await runFanout(token, request);
-        addTimelineEntry(
-          {
-            kind: "assistant",
-            state: status >= 400 ? "error" : "success",
-            title: `Response Finished (HTTP ${status})`,
-            body: summarizeRunResponse(body),
-          },
-          activeThread.id,
-        );
-
-        const [nextRuns, nextJobs, nextAudit, nextMetrics] = await Promise.all([
-          listRuns(token, 20),
-          listRunJobs(token, 20),
-          listAudit(token, 80),
-          getMetrics(token),
-        ]);
-        setRuns(nextRuns);
-        setJobs(nextJobs);
-        setAuditEvents(nextAudit);
-        setMetrics(nextMetrics);
-        setThreadJobState(
-          activeThread.id,
-          "",
-          status >= 400 ? "failed" : "succeeded",
-        );
-        setSubmittingThreadID("");
-      }
-    } catch (error) {
-      finalizeAssistantStreamEntry(activeThread.id, "error");
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Response Failed",
-          body: String(error),
-        },
-        activeThread.id,
-      );
-      setThreadJobState(activeThread.id, "", "failed");
-      setSubmittingThreadID("");
-    }
-  }
-
-  async function onSendPrompt(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    const editorValue = promptInputRef.current?.value ?? "";
-    const trimmedPrompt = activeThread.draft.trim() || editorValue.trim();
-    await submitPromptForActiveThread(trimmedPrompt);
-  }
-
-  async function onStopActiveSessionRun() {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    const runID = activeThread.activeJobID.trim();
-    if (!runID) return;
-    if (cancelingThreadID === activeThread.id) return;
-    setCancelingThreadID(activeThread.id);
-    try {
-      await cancelRunJob(token, runID);
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "running",
-          title: "Stopping",
-          body: "Stopping current response...",
-        },
-        activeThread.id,
-      );
-    } catch (error) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Stop Failed",
-          body: String(error),
-        },
-        activeThread.id,
-      );
-    } finally {
-      setCancelingThreadID("");
-    }
-  }
-
-  async function onRegenerateActiveSession() {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    const prompt = lastUserPromptFromTimeline(activeThread.timeline);
-    if (!prompt) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Regenerate Unavailable",
-          body: "No previous user prompt in this session.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-    await submitPromptForActiveThread(prompt);
-  }
-
-  function onForkActiveSession() {
-    if (!activeThread) return;
-    forkThread(activeThread.id);
-  }
-
-  async function onEditAndResend(entry: TimelineEntry) {
-    if (authPhase !== "ready" || !token.trim() || !activeThread) return;
-    if (entry.kind !== "user") return;
-    const edited = window.prompt("Edit prompt before resend", entry.body);
-    if (edited === null) return;
-    const trimmed = edited.trim();
-    if (!trimmed) {
-      addTimelineEntry(
-        {
-          kind: "system",
-          state: "error",
-          title: "Prompt Missing",
-          body: "Prompt is required.",
-        },
-        activeThread.id,
-      );
-      return;
-    }
-    await submitPromptForActiveThread(trimmed);
-  }
-
-  async function onRunPlatformLogin(action: "status" | "login_device" | "logout") {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const hostID = platformHostID.trim();
-    if (!hostID) {
-      setPlatformNotice("Select a target host first.");
-      return;
-    }
-    setPlatformBusySection("login");
-    setPlatformNotice(`Running login ${action} on ${platformHost?.name ?? hostID}...`);
-    try {
-      const result = await codexPlatformLogin(token, {
-        host_id: hostID,
-        action,
-      });
-      setPlatformLoginResult(result);
-      setPlatformNotice(`Login ${action} finished on ${result.host.name}.`);
-    } catch (error) {
-      setPlatformNotice(String(error));
-    } finally {
-      setPlatformBusySection("");
-    }
-  }
-
-  async function onRunPlatformMCP() {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const hostID = platformHostID.trim();
-    if (!hostID) {
-      setPlatformNotice("Select a target host first.");
-      return;
-    }
-    const command = platformMCPCommand
-      .trim()
-      .split(/\s+/)
-      .filter((item) => item !== "");
-    const request: {
-      host_id: string;
-      action: CodexPlatformMCPAction;
-      name?: string;
-      url?: string;
-      command?: string[];
-      env?: string[];
-      bearer_token_env_var?: string;
-      scopes?: string[];
-    } = {
-      host_id: hostID,
-      action: platformMCPAction,
-    };
-    if (platformMCPName.trim()) {
-      request.name = platformMCPName.trim();
-    }
-    if (platformMCPURL.trim()) {
-      request.url = platformMCPURL.trim();
-    }
-    if (command.length > 0) {
-      request.command = command;
-    }
-    const envValues = splitCSVValues(platformMCPEnvCSV);
-    if (envValues.length > 0) {
-      request.env = envValues;
-    }
-    if (platformMCPBearerTokenEnvVar.trim()) {
-      request.bearer_token_env_var = platformMCPBearerTokenEnvVar.trim();
-    }
-    const scopeValues = splitCSVValues(platformMCPScopeCSV);
-    if (scopeValues.length > 0) {
-      request.scopes = scopeValues;
-    }
-
-    setPlatformBusySection("mcp");
-    setPlatformNotice(`Running mcp ${platformMCPAction} on ${platformHost?.name ?? hostID}...`);
-    try {
-      const result = await codexPlatformMCP(token, request);
-      setPlatformMCPResult(result);
-      setPlatformNotice(`MCP ${platformMCPAction} finished on ${result.host.name}.`);
-    } catch (error) {
-      setPlatformNotice(String(error));
-    } finally {
-      setPlatformBusySection("");
-    }
-  }
-
-  async function onRunPlatformCloud() {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const hostID = platformHostID.trim();
-    if (!hostID) {
-      setPlatformNotice("Select a target host first.");
-      return;
-    }
-    const attempts = Number.parseInt(platformCloudAttempts, 10);
-    const limit = Number.parseInt(platformCloudLimit, 10);
-    const attempt = Number.parseInt(platformCloudAttempt, 10);
-    const request: {
-      host_id: string;
-      action: CodexPlatformCloudAction;
-      task_id?: string;
-      env_id?: string;
-      query?: string;
-      attempts?: number;
-      branch?: string;
-      limit?: number;
-      cursor?: string;
-      attempt?: number;
-    } = {
-      host_id: hostID,
-      action: platformCloudAction,
-    };
-    if (platformCloudTaskID.trim()) {
-      request.task_id = platformCloudTaskID.trim();
-    }
-    if (platformCloudEnvID.trim()) {
-      request.env_id = platformCloudEnvID.trim();
-    }
-    if (platformCloudQuery.trim()) {
-      request.query = platformCloudQuery.trim();
-    }
-    if (Number.isFinite(attempts) && attempts > 0) {
-      request.attempts = attempts;
-    }
-    if (platformCloudBranch.trim()) {
-      request.branch = platformCloudBranch.trim();
-    }
-    if (Number.isFinite(limit) && limit > 0) {
-      request.limit = limit;
-    }
-    if (platformCloudCursor.trim()) {
-      request.cursor = platformCloudCursor.trim();
-    }
-    if (Number.isFinite(attempt) && attempt > 0) {
-      request.attempt = attempt;
-    }
-
-    setPlatformBusySection("cloud");
-    setPlatformNotice(`Running cloud ${platformCloudAction} on ${platformHost?.name ?? hostID}...`);
-    try {
-      const result = await codexPlatformCloud(token, request);
-      setPlatformCloudResult(result);
-      setPlatformNotice(
-        `Cloud ${platformCloudAction} finished on ${result.host.name}.`,
-      );
-    } catch (error) {
-      setPlatformNotice(String(error));
-    } finally {
-      setPlatformBusySection("");
-    }
-  }
-
-  async function onAddHost(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (authPhase !== "ready" || !token.trim()) return;
-
-    const mode = hostForm.connectionMode ?? "ssh";
-    if (!hostForm.name.trim() || (mode === "ssh" && !hostForm.host.trim())) {
-      const validationMessage =
-        mode === "ssh"
-          ? "name and host are required for ssh mode."
-          : "name is required.";
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Host Validation",
-        body: validationMessage,
-      });
-      return;
-    }
-
-    const hostName = hostForm.name.trim();
-    const editing = editingHostID;
-
-    setAddingHost(true);
-    try {
-      await upsertHost(token, {
-        id: editing || undefined,
-        name: hostName,
-        connection_mode: mode,
-        host: hostForm.host.trim() || undefined,
-        user: hostForm.user.trim() || undefined,
-        workspace: hostForm.workspace.trim() || undefined,
-      });
-      setHostForm({
-        name: "",
-        connectionMode: "ssh",
-        host: "",
-        user: "",
-        workspace: "",
-      });
-      setEditingHostID("");
-      await loadWorkspace(token);
-      addTimelineEntry({
-        kind: "system",
-        state: "success",
-        title: editing ? "Host Updated" : "Host Saved",
-        body: `${editing ? "Updated" : "Saved"} host ${hostName}.`,
-      });
-      setOpsNotice(`${editing ? "Updated" : "Saved"} host ${hostName}.`);
-    } catch (error) {
-      addTimelineEntry({
-        kind: "system",
-        state: "error",
-        title: "Host Save Failed",
-        body: String(error),
-      });
-    } finally {
-      setAddingHost(false);
-    }
-  }
-
-  function onStartEditHost(host: Host) {
-    setEditingHostID(host.id);
-    setHostForm({
-      name: host.name,
-      connectionMode: host.connection_mode === "local" ? "local" : "ssh",
-      host: host.host,
-      user: host.user ?? "",
-      workspace: host.workspace ?? "",
+  const { onRefreshWorkspace, onArchiveActiveSession, onReconnectActiveStream } =
+    createSessionControlActions({
+      authPhase,
+      token,
+      activeThread,
+      activeThreadID,
+      submittingThreadID,
+      activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+      activeWorkspaceHostName: activeWorkspace?.hostName?.trim() ?? "",
+      hosts,
+      sessionRunStateRef,
+      addTimelineEntry,
+      removeThread,
+      stopSessionStream,
+      deleteSessionEventCursor,
+      refreshProjectsFromSource,
+      updateSessionStreamHealth,
+      startSessionStream,
+      loadWorkspace,
+      isLocalDraftSessionID,
+      setDeletingThreadID,
     });
-    setOpsNotice(`Editing host ${host.name}.`);
-  }
+  archiveSessionActionRef.current = onArchiveActiveSession;
+  reconnectStreamActionRef.current = onReconnectActiveStream;
 
-  function onCancelHostEdit() {
-    setEditingHostID("");
-    setHostForm({
-      name: "",
-      connectionMode: "ssh",
-      host: "",
-      user: "",
-      workspace: "",
-    });
-    setOpsNotice("Canceled host edit.");
-  }
+  const { submitPromptForActiveThread } = createSessionSubmitAction({
+    authPhase,
+    token,
+    activeThread,
+    submittingThreadID,
+    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+    activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
+    hosts,
+    selectedHostIDs,
+    sessionModelDefault,
+    sessionModelChoices,
+    runSandbox,
+    activeRuntimeName: activeRuntime?.name ?? selectedRuntime,
+    selectedRuntime,
+    activeThreadIDRef,
+    sessionRunStateRef,
+    sessionStreamStateRef,
+    addTimelineEntry,
+    setThreadTitle,
+    forceStickToBottom,
+    updateThreadDraft,
+    bindThreadID,
+    stopSessionStream,
+    deleteSessionEventCursor,
+    setThreadJobState,
+    setActiveJobThreadID,
+    setActiveJobID,
+    startSessionStream,
+    setSubmittingThreadID,
+    finalizeAssistantStreamEntry,
+    isLocalDraftSessionID,
+  });
 
-  async function onProbeHost(host: Host) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    setOpsHostBusyID(host.id);
-    setOpsNotice(`Probing ${host.name}...`);
-    try {
-      const result = await probeHost(token, host.id, { preflight: true });
-      const ssh = result.ssh?.ok ? "ok" : "fail";
-      const codex = result.codex?.ok ? "ok" : "fail";
-      const login = result.codex_login?.ok ? "ok" : "fail";
-      const sshErr = result.ssh?.error ? ` ssh_error=${result.ssh.error}` : "";
-      const codexErr = result.codex?.error
-        ? ` codex_error=${result.codex.error}`
-        : "";
-      const loginErr = result.codex_login?.error
-        ? ` login_error=${result.codex_login.error}`
-        : "";
-      setOpsNotice(
-        `Probe ${host.name}: ssh=${ssh} codex=${codex} login=${login}${sshErr}${codexErr}${loginErr}`,
-      );
-    } catch (error) {
-      setOpsNotice(`Probe failed for ${host.name}: ${String(error)}`);
-    } finally {
-      setOpsHostBusyID("");
-    }
-  }
+  const {
+    onSendPrompt,
+    onStopActiveSessionRun,
+    onRegenerateActiveSession,
+    onForkActiveSession,
+    onEditAndResend,
+  } = createSessionSecondaryActions({
+    authPhase,
+    token,
+    activeThread,
+    activeWorkspaceHostID,
+    activeWorkspacePath,
+    activeRuntimeName: activeRuntime?.name ?? selectedRuntime,
+    hosts,
+    cancelingThreadID,
+    promptInputRef,
+    addTimelineEntry,
+    submitPromptForActiveThread,
+    refreshProjectsFromSource,
+    activateThread,
+    forkThread,
+    isLocalDraftSessionID,
+    setCancelingThreadID,
+  });
+  forkSessionActionRef.current = onForkActiveSession;
+  const { renderTimelineEntryBody } = useTimelineEntryBody({
+    authPhase,
+    token,
+    activeThreadBusy,
+    onEditAndResend,
+  });
+  const { panelProps: platformPanelProps } = useCodexPlatformController({
+    authPhase,
+    token,
+    hosts,
+    activeWorkspaceHostID,
+  });
 
-  async function onDeleteHost(host: Host) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (typeof window !== "undefined") {
-      const confirmed = window.confirm(`Delete host '${host.name}'?`);
-      if (!confirmed) return;
-    }
+  const {
+    onAddHost,
+    onStartEditHost,
+    onCancelHostEdit,
+    onProbeHost,
+    onDeleteHost,
+  } = createHostActions({
+    authPhase,
+    token,
+    hostForm,
+    editingHostID,
+    setHostForm,
+    setEditingHostID,
+    setAddingHost,
+    setOpsHostBusyID,
+    setOpsNotice,
+    setSelectedHostIDs,
+    addTimelineEntry,
+    loadWorkspace,
+  });
 
-    setOpsHostBusyID(host.id);
-    try {
-      await deleteHost(token, host.id);
-      setSelectedHostIDs((prev) => prev.filter((id) => id !== host.id));
-      if (editingHostID === host.id) {
-        onCancelHostEdit();
-      }
-      await loadWorkspace(token);
-      setOpsNotice(`Deleted host ${host.name}.`);
-    } catch (error) {
-      setOpsNotice(`Delete failed for ${host.name}: ${String(error)}`);
-    } finally {
-      setOpsHostBusyID("");
-    }
-  }
+  const { onCancelJob } = createOpsJobActions({
+    authPhase,
+    token,
+    runningThreadJobs,
+    setThreadJobState,
+    setOpsNotice,
+    loadWorkspace,
+  });
 
-  async function onCancelJob(job: RunJobRecord) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    if (!isJobActive(job)) return;
-    if (typeof window !== "undefined") {
-      const confirmed = window.confirm(`Cancel job '${job.id}'?`);
-      if (!confirmed) return;
-    }
-    try {
-      await cancelRunJob(token, job.id);
-      const related = runningThreadJobs.find((item) => item.jobID === job.id);
-      if (related) {
-        setThreadJobState(related.threadID, "", "canceled");
-      }
-      setOpsNotice(`Cancel requested for ${job.id}.`);
-      await loadWorkspace(token);
-    } catch (error) {
-      setOpsNotice(`Cancel failed for ${job.id}: ${String(error)}`);
-    }
-  }
-
-  async function onUploadSessionImage(
-    file: File,
-    threadID = activeThread?.id ?? "",
-  ) {
-    if (authPhase !== "ready" || !token.trim()) return;
-    const targetThreadID = threadID.trim();
-    if (!targetThreadID) return;
-    if (!file.type.toLowerCase().startsWith("image/")) {
-      setImageUploadError("Only image files are supported.");
-      return;
-    }
-    setUploadingImage(true);
-    setImageUploadError("");
-    try {
-      const uploaded = await uploadImage(token, file);
-      addThreadImagePath(targetThreadID, uploaded.path);
-    } catch (error) {
-      setImageUploadError(String(error));
-    } finally {
-      setUploadingImage(false);
-    }
-  }
-
-  function onComposerPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
-    if (!activeThread || activeThreadBusy) return;
-    const imageFile = firstImageFile(event.clipboardData?.files);
-    if (!imageFile) return;
-    event.preventDefault();
-    void onUploadSessionImage(imageFile, activeThread.id);
-  }
-
-  function onComposerDragEnter(event: ReactDragEvent<HTMLElement>) {
-    if (!activeThread || activeThreadBusy) return;
-    if (!dataTransferHasImage(event.dataTransfer)) return;
-    event.preventDefault();
-    composerDragDepthRef.current += 1;
-    setComposerDropActive(true);
-  }
-
-  function onComposerDragOver(event: ReactDragEvent<HTMLElement>) {
-    if (!activeThread || activeThreadBusy) return;
-    if (!dataTransferHasImage(event.dataTransfer)) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    if (!composerDropActive) {
-      setComposerDropActive(true);
-    }
-  }
-
-  function onComposerDragLeave(event: ReactDragEvent<HTMLElement>) {
-    if (!composerDropActive) return;
-    event.preventDefault();
-    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1);
-    if (composerDragDepthRef.current > 0) return;
-    setComposerDropActive(false);
-  }
-
-  function onComposerDrop(event: ReactDragEvent<HTMLElement>) {
-    if (!dataTransferHasImage(event.dataTransfer)) return;
-    event.preventDefault();
-    composerDragDepthRef.current = 0;
-    setComposerDropActive(false);
-    if (!activeThread || activeThreadBusy) return;
-    const imageFile = firstImageFile(event.dataTransfer?.files);
-    if (!imageFile) return;
-    void onUploadSessionImage(imageFile, activeThread.id);
-  }
+  const {
+    onUploadSessionImage,
+    onComposerPaste,
+    onComposerDragEnter,
+    onComposerDragOver,
+    onComposerDragLeave,
+    onComposerDrop,
+  } = createComposerImageActions({
+    authPhase,
+    token,
+    activeThreadID: activeThread?.id ?? "",
+    activeThreadBusy,
+    composerDropActive,
+    composerDragDepthRef,
+    setUploadingImage,
+    setImageUploadError,
+    setComposerDropActive,
+    addThreadImagePath,
+  });
 
   if (authPhase !== "ready") {
     return (
-      <div className="gate-shell">
-        <div className="gate-noise" />
-        <section className="gate-card">
-          <p className="gate-eyebrow">remote-llm workspace</p>
-          <h1>Token Required</h1>
-          <p className="gate-copy">
-            Use your access token to unlock the operator console. No token means
-            no workspace access.
-          </p>
-          <form onSubmit={onSubmitToken} className="gate-form">
-            <label>
-              Access Token
-              <input
-                placeholder="rlm_xxx.yyy"
-                value={tokenInput}
-                onChange={(event) => setTokenInput(event.target.value)}
-                autoComplete="off"
-              />
-            </label>
-            <button type="submit" disabled={authPhase === "checking"}>
-              {authPhase === "checking" ? "Unlocking..." : "Unlock Workspace"}
-            </button>
-          </form>
-          {authError ? <p className="gate-error">{authError}</p> : null}
-          <p className="gate-hint">API base: {API_BASE || "not configured"}</p>
-        </section>
-      </div>
+      <TokenGate
+        tokenInput={tokenInput}
+        authPhase={authPhase}
+        authError={authError}
+        apiBase={API_BASE}
+        onTokenInputChange={setTokenInput}
+        onSubmitToken={onSubmitToken}
+      />
     );
   }
 
+  const sessionSidebarProps = buildSessionSidebarProps({
+    authReady: authPhase === "ready",
+    hasToken: token.trim() !== "",
+    hosts,
+    projectComposerOpen,
+    onOpenProjectComposer: openProjectComposer,
+    onCreateThread: createThreadAndFocus,
+    onCreateProject,
+    projectFormHostID,
+    setProjectFormHostID,
+    projectFormPath,
+    setProjectFormPath,
+    projectFormTitle,
+    setProjectFormTitle,
+    upsertingProjectID,
+    onCloseProjectComposer: closeProjectComposer,
+    projectFilter,
+    setProjectFilter,
+    sessionTreeHosts,
+    filteredSessionTreeHosts,
+    collapsedHostIDs,
+    onToggleHostCollapsed: toggleHostCollapsed,
+    activeWorkspaceID,
+    onSelectWorkspace: setActiveWorkspaceID,
+    onFocusComposer: focusComposerSoon,
+    onRenameProjectAsync: onRenameProject,
+    onArchiveProjectAsync: onArchiveProject,
+    deletingProjectID,
+    registerSessionButtonRef,
+    activeThreadID,
+    treeCursorSessionID,
+    setTreeCursorSessionID,
+    onActivateThread: activateThread,
+    onSetThreadPinned: setThreadPinned,
+    onSessionTreeKeyDown,
+    notificationPermission,
+    onEnableNotificationsAsync: onEnableNotifications,
+    setSessionAlertsExpanded,
+    sessionAlertsExpanded,
+    sessionAlerts,
+    onClearSessionAlerts: clearSessionAlerts,
+    onOpenSessionFromAlert: openSessionFromAlert,
+  });
+
+  const sessionComposerProps = buildSessionComposerProps({
+    formRef: composerFormRef,
+    promptInputRef,
+    composerDropActive,
+    onSubmit: onSendPrompt,
+    onDragEnter: onComposerDragEnter,
+    onDragOver: onComposerDragOver,
+    onDragLeave: onComposerDragLeave,
+    onDrop: onComposerDrop,
+    activeThreadStatusCopy,
+    activeThread,
+    activeThreadBusy,
+    activeThreadModelValue,
+    hasSessionModelChoices,
+    sessionModelChoices,
+    sessionModelDefault,
+    setThreadModel,
+    setThreadSandbox,
+    onForkActiveSession,
+    sessionAdvancedOpen,
+    setSessionAdvancedOpen,
+    approvalPolicyOptions: APPROVAL_POLICY_OPTIONS,
+    setThreadApprovalPolicy,
+    setThreadWebSearch,
+    setThreadProfile,
+    configFlagDraft,
+    onConfigFlagDraftChange: setConfigFlagDraft,
+    onConfigFlagDraftSubmit,
+    removeThreadConfigFlag,
+    enableFlagDraft,
+    onEnableFlagDraftChange: setEnableFlagDraft,
+    onEnableFlagDraftSubmit,
+    removeThreadEnableFlag,
+    disableFlagDraft,
+    onDisableFlagDraftChange: setDisableFlagDraft,
+    onDisableFlagDraftSubmit,
+    removeThreadDisableFlag,
+    addDirDraft,
+    onAddDirDraftChange: setAddDirDraft,
+    onAddDirDraftSubmit,
+    removeThreadAddDir,
+    setThreadSkipGitRepoCheck,
+    setThreadJSONOutput,
+    setThreadEphemeral,
+    pendingRequests: activePendingRequests,
+    pendingRequestsLoading,
+    pendingRequestsError,
+    resolvingPendingRequestID,
+    refreshPendingRequests,
+    resolvePendingRequest,
+    uploadingImage,
+    imageUploadError,
+    onUploadSessionImage,
+    removeThreadImagePath,
+    activeDraft,
+    updateThreadDraft,
+    onComposerPaste,
+    activeThreadRunID,
+    cancelingThreadID,
+    onStopActiveSessionRun,
+    hasRegeneratePrompt,
+    onRegenerateActiveSession,
+  });
+
+  const opsStageProps = buildOpsStageProps({
+    health,
+    allHosts,
+    onAllHostsChange: setAllHosts,
+    selectedHostCount,
+    hostFilter,
+    onHostFilterChange: setHostFilter,
+    hosts,
+    filteredHosts,
+    selectedHostIDs,
+    onToggleHostSelection: toggleHostSelection,
+    opsHostBusyID,
+    onProbeHost,
+    onStartEditHost,
+    onDeleteHost,
+    selectedRuntime,
+    onSelectedRuntimeChange: setSelectedRuntime,
+    runtimes,
+    runSandbox,
+    onRunSandboxChange: setRunSandbox,
+    runAsyncMode,
+    onRunAsyncModeChange: setRunAsyncMode,
+    metrics,
+    onRefreshWorkspace,
+    isRefreshing,
+    activeJob,
+    onCancelJob,
+    jobsLength: jobs.length,
+    runsLength: runs.length,
+    threadsLength: threads.length,
+    opsNotice,
+    opsNoticeIsError,
+    platformPanelProps,
+    activeJobThreadID,
+    activeProgress,
+    opsJobStatusFilter,
+    onOpsJobStatusFilterChange: setOpsJobStatusFilter,
+    opsJobTypeFilter,
+    onOpsJobTypeFilterChange: setOpsJobTypeFilter,
+    filteredOpsJobs,
+    onSelectActiveJob: (job) => {
+      setActiveJobID(job.id);
+      setActiveJob(job);
+    },
+    opsRunStatusFilter,
+    onOpsRunStatusFilterChange: setOpsRunStatusFilter,
+    filteredOpsRuns,
+    opsAuditMethodFilter,
+    onOpsAuditMethodFilterChange: setOpsAuditMethodFilter,
+    opsAuditStatusFilter,
+    onOpsAuditStatusFilterChange: setOpsAuditStatusFilter,
+    filteredAuditEvents,
+    editingHostID,
+    hostForm,
+    onHostFormChange: setHostForm,
+    addingHost,
+    onSubmit: onAddHost,
+    onCancelEdit: onCancelHostEdit,
+  });
+  const sessionStageProps = buildSessionStageProps({
+    sidebarProps: sessionSidebarProps,
+    composerProps: sessionComposerProps,
+    headerTitle: activeThread?.title ?? "Session",
+    headerContext:
+      (activeWorkspace?.hostName?.trim() || "local-default") +
+      " · " +
+      (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH),
+    streamTone: activeStreamTone,
+    streamCopy: activeStreamCopy,
+    streamLastError: activeStreamLastError,
+    canArchive: Boolean(activeThread) && !activeThreadBusy,
+    archiving: Boolean(activeThread && deletingThreadID === activeThread.id),
+    onArchive: onArchiveActiveSession,
+    canReconnect: canReconnectActiveStream,
+    onReconnect: onReconnectActiveStream,
+    timeline: activeTimeline,
+    isRefreshing,
+    renderTimelineEntryBody,
+    formatClock,
+    timelineViewportRef,
+    timelineBottomRef,
+    onTimelineScroll,
+    timelineUnreadCount,
+    onJumpTimelineToLatest: jumpTimelineToLatest,
+  });
+
   return (
     <div className="workspace-shell">
-      <header className="app-topbar">
-        <div className="topbar-title">
-          <p className="topbar-eyebrow">remote-llm workspace</p>
-          <h1>Codex Control App</h1>
-        </div>
-        <div className="topbar-controls">
-          <div className="mode-switch">
-            <button
-              type="button"
-              className={appMode === "session" ? "mode-btn active" : "mode-btn"}
-              onClick={() => switchMode("session")}
-            >
-              Session
-            </button>
-            <button
-              type="button"
-              className={appMode === "ops" ? "mode-btn active" : "mode-btn"}
-              onClick={() => switchMode("ops")}
-            >
-              Ops
-            </button>
-          </div>
-          <span
-            className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}
-          >
-            {syncLabel}
-          </span>
-          <button
-            onClick={() => void onRefreshWorkspace()}
-            disabled={isRefreshing}
-          >
-            {isRefreshing ? "Syncing..." : "Sync"}
-          </button>
-          <button className="ghost" onClick={onLogout}>
-            Logout
-          </button>
-        </div>
-      </header>
-
-      {healthIsError ? (
-        <section className="workspace-alert">
-          Controller state degraded: {health}
-        </section>
-      ) : null}
+      <AppChrome
+        appMode={appMode}
+        onSwitchMode={switchMode}
+        isRefreshing={isRefreshing}
+        healthIsError={healthIsError}
+        health={health}
+        syncLabel={syncLabel}
+        onRefreshWorkspace={onRefreshWorkspace}
+        onLogout={onLogout}
+      />
 
       {appMode === "session" ? (
-        <div className="session-stage">
-          <aside className="session-side codex-sidebar">
-            <section className="inspect-block focus-block">
-              <div className="pane-title-line">
-                <h3>Projects</h3>
-                <div className="pane-title-actions">
-                  <button
-                    type="button"
-                    className="ghost new-thread"
-                    onClick={openProjectComposer}
-                  >
-                    New Project
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost new-thread"
-                    onClick={createThreadAndFocus}
-                  >
-                    New Session
-                  </button>
-                </div>
-              </div>
-              {projectComposerOpen ? (
-                <form className="project-create-form" onSubmit={onCreateProject}>
-                  <label className="project-create-field">
-                    <span>Server</span>
-                    <select
-                      value={projectFormHostID}
-                      onChange={(event) => setProjectFormHostID(event.target.value)}
-                      disabled={
-                        authPhase !== "ready" ||
-                        !token.trim() ||
-                        upsertingProjectID !== ""
-                      }
-                    >
-                      {hosts.map((host) => (
-                        <option key={host.id} value={host.id}>
-                          {host.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="project-create-field">
-                    <span>Path</span>
-                    <input
-                      placeholder="/path/to/project"
-                      value={projectFormPath}
-                      onChange={(event) => setProjectFormPath(event.target.value)}
-                      disabled={
-                        authPhase !== "ready" ||
-                        !token.trim() ||
-                        upsertingProjectID !== ""
-                      }
-                    />
-                  </label>
-                  <label className="project-create-field">
-                    <span>Name</span>
-                    <input
-                      placeholder="My Project"
-                      value={projectFormTitle}
-                      onChange={(event) => setProjectFormTitle(event.target.value)}
-                      disabled={
-                        authPhase !== "ready" ||
-                        !token.trim() ||
-                        upsertingProjectID !== ""
-                      }
-                    />
-                  </label>
-                  <div className="project-create-actions">
-                    <button
-                      type="submit"
-                      disabled={
-                        authPhase !== "ready" ||
-                        !token.trim() ||
-                        upsertingProjectID !== "" ||
-                        !projectFormHostID.trim() ||
-                        !projectFormPath.trim()
-                      }
-                    >
-                      {upsertingProjectID === "__create__" ? "Creating..." : "Create"}
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={closeProjectComposer}
-                      disabled={upsertingProjectID !== ""}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              ) : null}
-              <label className="tree-filter">
-                <input
-                  value={projectFilter}
-                  onChange={(event) => setProjectFilter(event.target.value)}
-                  placeholder="Filter projects or sessions"
-                />
-              </label>
-              <div className="project-tree">
-                {sessionTreeHosts.length === 0 ? (
-                  <p className="pane-subtle-light">
-                    No servers/projects discovered yet.
-                  </p>
-                ) : filteredSessionTreeHosts.length === 0 ? (
-                  <p className="pane-subtle-light">
-                    No matching projects or sessions.
-                  </p>
-                ) : (
-                  filteredSessionTreeHosts.map((hostNode) => {
-                    const isCollapsed = collapsedHostIDs.includes(
-                      hostNode.hostID,
-                    );
-                    return (
-                      <article
-                        key={hostNode.hostID}
-                        className="project-host-group"
-                      >
-                        <header className="project-host-head">
-                          <div className="project-host-headline">
-                            <strong>{hostNode.hostName}</strong>
-                            {hostNode.hostAddress ? (
-                              <small>{hostNode.hostAddress}</small>
-                            ) : null}
-                          </div>
-                          <button
-                            type="button"
-                            className="ghost host-toggle"
-                            onClick={() => toggleHostCollapsed(hostNode.hostID)}
-                          >
-                            {isCollapsed ? "Expand" : "Collapse"}
-                          </button>
-                        </header>
-                        {isCollapsed ? null : hostNode.projects.length === 0 ? (
-                          <p className="pane-subtle-light compact-empty">
-                            No projects available.
-                          </p>
-                        ) : (
-                          hostNode.projects.map((projectNode) => (
-                            <div key={projectNode.id} className="project-node">
-                              <button
-                                type="button"
-                                className={`project-chip ${projectNode.id === activeWorkspaceID ? "active" : ""}`}
-                                onClick={() => {
-                                  setActiveWorkspaceID(projectNode.id);
-                                  focusComposerSoon();
-                                }}
-                                title={projectNode.path}
-                              >
-                                <span className="project-chip-main">
-                                  <strong>
-                                    {projectNode.title}
-                                  </strong>
-                                  <em>{projectNode.path}</em>
-                                </span>
-                                <small>
-                                  {projectNode.sessions.length === 0
-                                    ? "empty"
-                                    : `${projectNode.sessions.length}`}
-                                </small>
-                              </button>
-                              <div className="project-node-actions">
-                                <button
-                                  type="button"
-                                  className="ghost project-archive-btn"
-                                  disabled={
-                                    authPhase !== "ready" ||
-                                    !token.trim() ||
-                                    upsertingProjectID !== ""
-                                  }
-                                  onClick={() => void onRenameProject(projectNode)}
-                                >
-                                  {upsertingProjectID === projectNode.id
-                                    ? "Saving..."
-                                    : "Rename"}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ghost danger-ghost project-archive-btn"
-                                  disabled={
-                                    authPhase !== "ready" ||
-                                    !token.trim() ||
-                                    upsertingProjectID !== "" ||
-                                    deletingProjectID === projectNode.id ||
-                                    deletingProjectID !== ""
-                                  }
-                                  title="Archive project (empty only)"
-                                  onClick={() =>
-                                    void onArchiveProject(
-                                      projectNode.id,
-                                      projectNode.hostID,
-                                      projectNode.path,
-                                      projectNode.sessions.length,
-                                    )
-                                  }
-                                >
-                                  {deletingProjectID === projectNode.id
-                                    ? "Archiving..."
-                                    : "Archive"}
-                                </button>
-                              </div>
-                              <div className="project-session-list">
-                                {projectNode.sessions.length === 0 ? (
-                                  <p className="pane-subtle-light compact-empty">
-                                    No sessions in this project.
-                                  </p>
-                                ) : (
-                                  projectNode.sessions.map((sessionNode) => (
-                                    <button
-                                      key={sessionNode.id}
-                                      type="button"
-                                      ref={(node) =>
-                                        registerSessionButtonRef(sessionNode.id, node)
-                                      }
-                                      className={`session-chip-tree ${sessionNode.id === activeThreadID ? "active" : ""}`}
-                                      data-session-id={sessionNode.id}
-                                      data-pinned={sessionNode.pinned ? "true" : "false"}
-                                      tabIndex={
-                                        treeCursorSessionID === sessionNode.id ? 0 : -1
-                                      }
-                                      onClick={(event) => {
-                                        if (event.metaKey || event.ctrlKey) {
-                                          event.preventDefault();
-                                          setThreadPinned(
-                                            sessionNode.id,
-                                            !sessionNode.pinned,
-                                          );
-                                          return;
-                                        }
-                                        setTreeCursorSessionID(sessionNode.id);
-                                        activateThread(sessionNode.id);
-                                        focusComposerSoon();
-                                      }}
-                                      onFocus={() =>
-                                        setTreeCursorSessionID(sessionNode.id)
-                                      }
-                                      onKeyDown={(event) =>
-                                        onSessionTreeKeyDown(
-                                          event,
-                                          sessionNode.id,
-                                          sessionNode.pinned,
-                                        )
-                                      }
-                                      title={sessionNode.title}
-                                    >
-                                      <span className="session-chip-label">
-                                        {sessionNode.title}
-                                      </span>
-                                      <span className="session-chip-state">
-                                        {sessionNode.pinned ? (
-                                          <small className="session-chip-badge pinned">
-                                            pin
-                                          </small>
-                                        ) : null}
-                                        {sessionNode.activeJobID ? (
-                                          <small className="session-chip-badge running">
-                                            running
-                                          </small>
-                                        ) : null}
-                                        {sessionNode.unreadDone ? (
-                                          <small className="session-chip-badge unread">
-                                            new
-                                          </small>
-                                        ) : null}
-                                        {!sessionNode.activeJobID &&
-                                        !sessionNode.unreadDone &&
-                                        sessionNode.lastJobStatus !== "idle" ? (
-                                          <small className="session-chip-badge status">
-                                            {sessionNode.lastJobStatus}
-                                          </small>
-                                        ) : null}
-                                      </span>
-                                    </button>
-                                  ))
-                                )}
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </article>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-
-            <section className="inspect-block compact-session-meta">
-              <p className="pane-subtle-light">
-                Ctrl/Cmd+K palette · Enter send · Shift+Enter newline ·
-                Ctrl/Cmd+Shift+N new session · P pin (on focused session)
-              </p>
-              <div className="ops-actions-row">
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => void onEnableNotifications()}
-                >
-                  Alerts: {notificationPermission}
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => setSessionAlertsExpanded((prev) => !prev)}
-                  disabled={sessionAlerts.length === 0}
-                >
-                  Notifications {sessionAlerts.length > 0 ? `(${sessionAlerts.length})` : ""}
-                </button>
-              </div>
-              {sessionAlerts.length === 0 ? (
-                <p className="pane-subtle-light">No notifications yet.</p>
-              ) : sessionAlertsExpanded ? (
-                <div className="notification-center">
-                  <div className="notification-head">
-                    <strong>Recent</strong>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={clearSessionAlerts}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                  <div className="notification-list" role="status" aria-live="polite">
-                    {sessionAlerts
-                      .slice(Math.max(0, sessionAlerts.length - 8))
-                      .reverse()
-                      .map((alert) => (
-                        <button
-                          key={alert.id}
-                          type="button"
-                          className="session-alert"
-                          onClick={() => openSessionFromAlert(alert)}
-                        >
-                          <strong>{alert.title}</strong>
-                          <span>{alert.body}</span>
-                        </button>
-                      ))}
-                  </div>
-                </div>
-              ) : null}
-            </section>
-          </aside>
-
-          <main className="chat-pane">
-            <header className="chat-head">
-              <div>
-                <h1>{activeThread?.title ?? "Session"}</h1>
-                <p className="chat-context">
-                  {(activeWorkspace?.hostName?.trim() || "local-default") +
-                    " · " +
-                    (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH)}
-                </p>
-              </div>
-              <div className="chat-head-side">
-                <span
-                  className={`stream-pill ${activeStreamTone}`}
-                  data-testid="stream-status"
-                  title={activeStreamLastError || `stream ${activeStreamCopy}`}
-                >
-                  stream {activeStreamCopy}
-                </span>
-                <button
-                  type="button"
-                  className="ghost danger-ghost stream-reconnect-btn"
-                  disabled={!activeThread || activeThreadBusy}
-                  onClick={() => void onArchiveActiveSession()}
-                >
-                  {activeThread && deletingThreadID === activeThread.id
-                    ? "Archiving..."
-                    : "Archive"}
-                </button>
-                <button
-                  type="button"
-                  className="ghost stream-reconnect-btn"
-                  disabled={!canReconnectActiveStream}
-                  onClick={onReconnectActiveStream}
-                >
-                  Reconnect
-                </button>
-              </div>
-            </header>
-
-            <div className="timeline-shell">
-              <section
-                className="timeline"
-                aria-live="polite"
-                ref={timelineViewportRef}
-                onScroll={onTimelineScroll}
-              >
-                {activeTimeline.length === 0 ? (
-                  <article className="message message-system">
-                    <div className="message-title-row">
-                      <h4>{isRefreshing ? "Loading" : "Start"}</h4>
-                    </div>
-                    <pre>
-                      {isRefreshing
-                        ? "Preparing session..."
-                        : "Ask Codex what to do in this workspace."}
-                    </pre>
-                  </article>
-                ) : (
-                  activeTimeline.map((entry) => (
-                    <article
-                      key={entry.id}
-                      className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}
-                    >
-                      <div className="message-title-row">
-                        <h4>{entry.title}</h4>
-                        <time>{formatClock(entry.createdAt)}</time>
-                      </div>
-                      {renderTimelineEntryBody(entry)}
-                    </article>
-                  ))
-                )}
-                <div ref={timelineBottomRef} />
-              </section>
-              {timelineUnreadCount > 0 ? (
-                <button
-                  type="button"
-                  className="timeline-jump-latest"
-                  data-testid="timeline-jump-latest"
-                  onClick={jumpTimelineToLatest}
-                >
-                  {timelineUnreadCount > 1
-                    ? `Jump to latest (${timelineUnreadCount})`
-                    : "Jump to latest"}
-                </button>
-              ) : null}
-            </div>
-
-            <form
-              ref={composerFormRef}
-              className={`composer ${composerDropActive ? "drop-active" : ""}`}
-              onSubmit={onSendPrompt}
-              onDragEnter={onComposerDragEnter}
-              onDragOver={onComposerDragOver}
-              onDragLeave={onComposerDragLeave}
-              onDrop={onComposerDrop}
-            >
-              {activeThreadStatusCopy ? (
-                <p className="composer-status" role="status">
-                  {activeThreadStatusCopy}
-                </p>
-              ) : null}
-              {composerDropActive ? (
-                <p className="composer-drop-indicator" role="status">
-                  Drop image to attach.
-                </p>
-              ) : null}
-              <div className="session-inline-settings">
-                <label className="session-setting-row">
-                  model
-                  <select
-                    data-testid="session-model-select"
-                    value={activeThreadModelValue}
-                    disabled={
-                      !activeThread || !hasSessionModelChoices || activeThreadBusy
-                    }
-                    onChange={(event) => {
-                      if (!activeThread) return;
-                      setThreadModel(activeThread.id, event.target.value);
-                    }}
-                  >
-                    {hasSessionModelChoices ? (
-                      sessionModelChoices.map((modelName) => (
-                        <option key={modelName} value={modelName}>
-                          {modelName === sessionModelDefault
-                            ? `${modelName} (default)`
-                            : modelName}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">model unavailable</option>
-                    )}
-                  </select>
-                  {!hasSessionModelChoices ? (
-                    <small className="pane-subtle-light">
-                      No models discovered on this server.
-                    </small>
-                  ) : null}
-                </label>
-                <label className="session-setting-row">
-                  sandbox
-                  <select
-                    data-testid="session-sandbox-select"
-                    value={activeThread?.sandbox ?? "workspace-write"}
-                    disabled={!activeThread || activeThreadBusy}
-                    onChange={(event) =>
-                      activeThread &&
-                      setThreadSandbox(
-                        activeThread.id,
-                        event.target.value as
-                          | ""
-                          | "read-only"
-                          | "workspace-write"
-                          | "danger-full-access",
-                      )
-                    }
-                  >
-                    <option value="read-only">read-only</option>
-                    <option value="workspace-write">workspace-write</option>
-                    <option value="danger-full-access">
-                      danger-full-access
-                    </option>
-                  </select>
-                </label>
-              </div>
-
-              <div className="session-controls-row">
-                <button
-                  type="button"
-                  className="ghost advanced-toggle-btn"
-                  data-testid="fork-session-btn"
-                  onClick={onForkActiveSession}
-                  disabled={!activeThread || activeThreadBusy}
-                >
-                  Fork Session
-                </button>
-                <button
-                  type="button"
-                  className="ghost advanced-toggle-btn"
-                  data-testid="advanced-toggle-btn"
-                  onClick={() => setSessionAdvancedOpen((prev) => !prev)}
-                  disabled={!activeThread}
-                >
-                  {sessionAdvancedOpen ? "Hide Advanced" : "Advanced"}
-                </button>
-              </div>
-
-              {sessionAdvancedOpen ? (
-                <div className="session-advanced-panel">
-                  <label className="session-setting-row">
-                    approval
-                    <select
-                      data-testid="advanced-approval-select"
-                      value={activeThread?.approvalPolicy ?? ""}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadApprovalPolicy(
-                          activeThread.id,
-                          event.target.value as CodexApprovalPolicy,
-                        )
-                      }
-                    >
-                      {APPROVAL_POLICY_OPTIONS.map((option) => (
-                        <option key={option.label} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label className="session-setting-row toggle-setting-row">
-                    <span>web search</span>
-                    <input
-                      type="checkbox"
-                      data-testid="advanced-web-search-toggle"
-                      checked={Boolean(activeThread?.webSearch)}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadWebSearch(activeThread.id, event.target.checked)
-                      }
-                    />
-                  </label>
-
-                  <label className="session-setting-row">
-                    profile
-                    <input
-                      data-testid="advanced-profile-input"
-                      placeholder="default"
-                      value={activeThread?.profile ?? ""}
-                      disabled={!activeThread || activeThreadBusy}
-                      onChange={(event) =>
-                        activeThread &&
-                        setThreadProfile(activeThread.id, event.target.value)
-                      }
-                    />
-                  </label>
-
-                  <label className="session-setting-row">
-                    config (-c)
-                    <div className="add-dir-row">
-                      <input
-                        data-testid="advanced-config-input"
-                        placeholder="sandbox_workspace_write=true"
-                        value={configFlagDraft}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          setConfigFlagDraft(event.target.value)
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          onConfigFlagDraftSubmit();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={
-                          !activeThread ||
-                          activeThreadBusy ||
-                          !configFlagDraft.trim()
-                        }
-                        onClick={onConfigFlagDraftSubmit}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    <div className="add-dir-list">
-                      {(activeThread?.configFlags ?? []).map((value) => (
-                        <button
-                          key={value}
-                          type="button"
-                          className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy}
-                          onClick={() =>
-                            activeThread &&
-                            removeThreadConfigFlag(activeThread.id, value)
-                          }
-                        >
-                          {value} ×
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-
-                  <label className="session-setting-row">
-                    enable
-                    <div className="add-dir-row">
-                      <input
-                        data-testid="advanced-enable-input"
-                        placeholder="web_search"
-                        value={enableFlagDraft}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          setEnableFlagDraft(event.target.value)
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          onEnableFlagDraftSubmit();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={
-                          !activeThread ||
-                          activeThreadBusy ||
-                          !enableFlagDraft.trim()
-                        }
-                        onClick={onEnableFlagDraftSubmit}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    <div className="add-dir-list">
-                      {(activeThread?.enableFlags ?? []).map((value) => (
-                        <button
-                          key={value}
-                          type="button"
-                          className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy}
-                          onClick={() =>
-                            activeThread &&
-                            removeThreadEnableFlag(activeThread.id, value)
-                          }
-                        >
-                          {value} ×
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-
-                  <label className="session-setting-row">
-                    disable
-                    <div className="add-dir-row">
-                      <input
-                        data-testid="advanced-disable-input"
-                        placeholder="legacy_preview"
-                        value={disableFlagDraft}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          setDisableFlagDraft(event.target.value)
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          onDisableFlagDraftSubmit();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={
-                          !activeThread ||
-                          activeThreadBusy ||
-                          !disableFlagDraft.trim()
-                        }
-                        onClick={onDisableFlagDraftSubmit}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    <div className="add-dir-list">
-                      {(activeThread?.disableFlags ?? []).map((value) => (
-                        <button
-                          key={value}
-                          type="button"
-                          className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy}
-                          onClick={() =>
-                            activeThread &&
-                            removeThreadDisableFlag(activeThread.id, value)
-                          }
-                        >
-                          {value} ×
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-
-                  <label className="session-setting-row">
-                    add dir
-                    <div className="add-dir-row">
-                      <input
-                        data-testid="advanced-add-dir-input"
-                        placeholder="/opt/shared"
-                        value={addDirDraft}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) => setAddDirDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") return;
-                          event.preventDefault();
-                          onAddDirDraftSubmit();
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        disabled={!activeThread || activeThreadBusy || !addDirDraft.trim()}
-                        onClick={onAddDirDraftSubmit}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    <div className="add-dir-list">
-                      {(activeThread?.addDirs ?? []).map((dir) => (
-                        <button
-                          key={dir}
-                          type="button"
-                          className="quick-chip ghost"
-                          disabled={!activeThread || activeThreadBusy}
-                          onClick={() =>
-                            activeThread && removeThreadAddDir(activeThread.id, dir)
-                          }
-                        >
-                          {dir} ×
-                        </button>
-                      ))}
-                    </div>
-                  </label>
-
-                  <div className="advanced-toggle-grid">
-                    <label className="session-setting-row toggle-setting-row">
-                      <span>skip repo check</span>
-                      <input
-                        type="checkbox"
-                        data-testid="advanced-skip-git-toggle"
-                        checked={activeThread?.skipGitRepoCheck ?? true}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          activeThread &&
-                          setThreadSkipGitRepoCheck(
-                            activeThread.id,
-                            event.target.checked,
-                          )
-                        }
-                      />
-                    </label>
-                    <label className="session-setting-row toggle-setting-row">
-                      <span>json output</span>
-                      <input
-                        type="checkbox"
-                        data-testid="advanced-json-output-toggle"
-                        checked={activeThread?.jsonOutput ?? true}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          activeThread &&
-                          setThreadJSONOutput(activeThread.id, event.target.checked)
-                        }
-                      />
-                    </label>
-                    <label className="session-setting-row toggle-setting-row">
-                      <span>ephemeral</span>
-                      <input
-                        type="checkbox"
-                        data-testid="advanced-ephemeral-toggle"
-                        checked={activeThread?.ephemeral ?? false}
-                        disabled={!activeThread || activeThreadBusy}
-                        onChange={(event) =>
-                          activeThread &&
-                          setThreadEphemeral(activeThread.id, event.target.checked)
-                        }
-                      />
-                    </label>
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="quick-strip">
-                <label
-                  className={`quick-chip ghost file-chip ${
-                    uploadingImage || !activeThread || activeThreadBusy
-                      ? "disabled"
-                      : ""
-                  }`}
-                >
-                  <input
-                    type="file"
-                    accept="image/*"
-                    disabled={uploadingImage || !activeThread || activeThreadBusy}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (!file) return;
-                      void onUploadSessionImage(file, activeThread?.id ?? "");
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                  {uploadingImage ? "uploading..." : "Attach Image"}
-                </label>
-                {(activeThread?.imagePaths ?? []).map((imagePath) => (
-                  <button
-                    key={imagePath}
-                    type="button"
-                    className="quick-chip ghost"
-                    onClick={() =>
-                      activeThread &&
-                      removeThreadImagePath(activeThread.id, imagePath)
-                    }
-                  >
-                    {imagePath.split("/").pop() ?? imagePath} ×
-                  </button>
-                ))}
-                {imageUploadError ? (
-                  <span className="shortcut-hint">{imageUploadError}</span>
-                ) : (
-                  <span className="shortcut-hint">Paste or drop image to attach.</span>
-                )}
-              </div>
-
-              <textarea
-                ref={promptInputRef}
-                value={activeDraft}
-                onChange={(event) => {
-                  if (activeThread) {
-                    updateThreadDraft(activeThread.id, event.target.value);
-                  }
-                }}
-                rows={1}
-                placeholder={
-                  activeThread
-                    ? "Tell codex what to do in this workspace..."
-                    : "Select a session to start"
-                }
-                disabled={!activeThread}
-                onPaste={onComposerPaste}
-                onKeyDown={(event) => {
-                  const composing =
-                    "isComposing" in event.nativeEvent
-                      ? Boolean(
-                          (event.nativeEvent as { isComposing?: boolean })
-                            .isComposing,
-                        )
-                      : false;
-                  if (event.key === "Enter" && !event.shiftKey && !composing) {
-                    event.preventDefault();
-                    composerFormRef.current?.requestSubmit();
-                  }
-                }}
-              />
-
-              <div className="composer-actions">
-                {activeThreadRunID ? (
-                  <button
-                    type="button"
-                    className="ghost danger-ghost"
-                    disabled={
-                      !activeThread ||
-                      !activeThreadRunID ||
-                      cancelingThreadID === activeThread.id
-                    }
-                    onClick={() => void onStopActiveSessionRun()}
-                  >
-                    {activeThread &&
-                    cancelingThreadID === activeThread.id
-                      ? "Stopping..."
-                      : "Stop"}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="ghost"
-                    disabled={!activeThread || !hasRegeneratePrompt || activeThreadBusy}
-                    onClick={() => void onRegenerateActiveSession()}
-                  >
-                    Regenerate
-                  </button>
-                )}
-                <button
-                  type="submit"
-                  disabled={activeThreadBusy || !activeThread}
-                >
-                  {activeThreadBusy ? "Running..." : "Send"}
-                </button>
-              </div>
-            </form>
-          </main>
-        </div>
+        <SessionStage {...sessionStageProps} />
       ) : (
-        <div className="ops-stage">
-          <aside className="nav-pane">
-            <header className="pane-head">
-              <p className="pane-eyebrow">remote operations</p>
-              <h2>Hosts and Runtime Control</h2>
-              <p className="pane-subtle">health: {health}</p>
-            </header>
-
-            <section className="pane-block">
-              <div className="pane-title-line">
-                <h3>Targets</h3>
-                <label className="switch-inline">
-                  <input
-                    type="checkbox"
-                    checked={allHosts}
-                    onChange={(event) => setAllHosts(event.target.checked)}
-                  />
-                  all
-                </label>
-              </div>
-              <p className="pane-subtle">selected={selectedHostCount}</p>
-              <label>
-                filter
-                <input
-                  placeholder="name / host / user / workspace"
-                  value={hostFilter}
-                  onChange={(event) => setHostFilter(event.target.value)}
-                />
-              </label>
-              <div className="target-list">
-                {hosts.length === 0 ? (
-                  <p className="pane-subtle">No hosts configured.</p>
-                ) : filteredHosts.length === 0 ? (
-                  <p className="pane-subtle">No hosts match filter.</p>
-                ) : (
-                  filteredHosts.map((host) => (
-                    <div key={host.id} className="target-item">
-                      <label className="target-checkline">
-                        <input
-                          type="checkbox"
-                          disabled={allHosts}
-                          checked={
-                            allHosts || selectedHostIDs.includes(host.id)
-                          }
-                          onChange={() => toggleHostSelection(host.id)}
-                        />
-                        <span className="target-meta">
-                          <strong>{host.name}</strong>
-                          <small>
-                            {host.user ? `${host.user}@` : ""}
-                            {host.host}:{host.port}
-                            {` mode=${host.connection_mode ?? "ssh"}`}
-                          </small>
-                        </span>
-                      </label>
-                      <div className="target-actions">
-                        <button
-                          type="button"
-                          className="ghost"
-                          disabled={opsHostBusyID === host.id}
-                          onClick={() => void onProbeHost(host)}
-                        >
-                          {opsHostBusyID === host.id ? "..." : "Probe"}
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
-                          disabled={opsHostBusyID === host.id}
-                          onClick={() => onStartEditHost(host)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost danger-ghost"
-                          disabled={opsHostBusyID === host.id}
-                          onClick={() => void onDeleteHost(host)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </section>
-
-            <section className="pane-block">
-              <h3>Runtime</h3>
-              <label>
-                runtime
-                <select
-                  value={selectedRuntime}
-                  onChange={(event) => setSelectedRuntime(event.target.value)}
-                >
-                  {runtimes.map((runtime) => (
-                    <option key={runtime.name} value={runtime.name}>
-                      {runtime.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                sandbox
-                <select
-                  value={runSandbox}
-                  onChange={(event) =>
-                    setRunSandbox(
-                      event.target.value as
-                        | ""
-                        | "read-only"
-                        | "workspace-write"
-                        | "danger-full-access",
-                    )
-                  }
-                >
-                  <option value="">default</option>
-                  <option value="read-only">read-only</option>
-                  <option value="workspace-write">workspace-write</option>
-                  <option value="danger-full-access">danger-full-access</option>
-                </select>
-              </label>
-              <label className="switch-inline">
-                <input
-                  type="checkbox"
-                  checked={runAsyncMode}
-                  onChange={(event) => setRunAsyncMode(event.target.checked)}
-                />
-                async queue
-              </label>
-            </section>
-
-            <section className="pane-block">
-              <h3>Queue Control</h3>
-              <ul className="metric-list">
-                <li>pending={metrics?.jobs.pending ?? "-"}</li>
-                <li>running={metrics?.jobs.running ?? "-"}</li>
-                <li>depth={metrics?.queue.depth ?? "-"}</li>
-              </ul>
-              <div className="ops-actions-row">
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => void onRefreshWorkspace()}
-                  disabled={isRefreshing}
-                >
-                  {isRefreshing ? "Refreshing..." : "Refresh Queue"}
-                </button>
-                <button
-                  type="button"
-                  className="ghost danger-ghost"
-                  disabled={!activeJob || !isJobActive(activeJob)}
-                  onClick={() =>
-                    activeJob ? void onCancelJob(activeJob) : undefined
-                  }
-                >
-                  Cancel Active
-                </button>
-              </div>
-            </section>
-
-            <section className="pane-block">
-              <h3>Overview</h3>
-              <ul className="metric-list">
-                <li>hosts={hosts.length}</li>
-                <li>jobs={jobs.length}</li>
-                <li>runs={runs.length}</li>
-                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
-                <li>
-                  workers={metrics?.queue.workers_active ?? "-"}/
-                  {metrics?.queue.workers_total ?? "-"}
-                </li>
-                <li>threads={threads.length}</li>
-              </ul>
-            </section>
-
-            {opsNotice ? (
-              <section
-                className={`pane-block ops-notice ${opsNoticeIsError ? "ops-notice-error" : ""}`}
-              >
-                <h3>Ops Notice</h3>
-                <p>{opsNotice}</p>
-              </section>
-            ) : null}
-          </aside>
-
-          <aside className="inspect-pane">
-            {isRefreshing ? (
-              <section className="inspect-block">
-                <h3>Loading</h3>
-                <p className="pane-subtle-light">
-                  Refreshing hosts, queue, runs, and audit timeline...
-                </p>
-              </section>
-            ) : null}
-
-            <section className="inspect-block codex-platform-block">
-              <h3>Codex Platform</h3>
-              <label>
-                target host
-                <select
-                  data-testid="platform-host-select"
-                  value={platformHostID}
-                  onChange={(event) => setPlatformHostID(event.target.value)}
-                  disabled={hosts.length === 0 || platformBusySection !== ""}
-                >
-                  {hosts.length === 0 ? (
-                    <option value="">no host</option>
-                  ) : (
-                    hosts.map((host) => (
-                      <option key={host.id} value={host.id}>
-                        {host.name}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </label>
-              {platformNotice ? (
-                <p className="pane-subtle-light platform-notice">
-                  {platformNotice}
-                </p>
-              ) : null}
-              <div className="platform-grid">
-                <article className="platform-card">
-                  <h4>Auth</h4>
-                  <div className="platform-actions-row">
-                    <button
-                      type="button"
-                      className="ghost"
-                      data-testid="platform-login-status-btn"
-                      onClick={() => void onRunPlatformLogin("status")}
-                      disabled={platformBusySection !== "" || !platformHostID}
-                    >
-                      Status
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost"
-                      data-testid="platform-login-device-btn"
-                      onClick={() => void onRunPlatformLogin("login_device")}
-                      disabled={platformBusySection !== "" || !platformHostID}
-                    >
-                      Device Login
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost danger-ghost"
-                      data-testid="platform-logout-btn"
-                      onClick={() => void onRunPlatformLogin("logout")}
-                      disabled={platformBusySection !== "" || !platformHostID}
-                    >
-                      Logout
-                    </button>
-                  </div>
-                  <pre
-                    className="platform-output"
-                    data-testid="platform-login-output"
-                  >
-                    {formatCodexPlatformResult(platformLoginResult)}
-                  </pre>
-                </article>
-
-                <article className="platform-card">
-                  <h4>MCP</h4>
-                  <label>
-                    action
-                    <select
-                      data-testid="platform-mcp-action-select"
-                      value={platformMCPAction}
-                      onChange={(event) =>
-                        setPlatformMCPAction(
-                          event.target.value as CodexPlatformMCPAction,
-                        )
-                      }
-                      disabled={platformBusySection !== ""}
-                    >
-                      {CODEX_PLATFORM_MCP_ACTIONS.map((item) => (
-                        <option key={item.value} value={item.value}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {platformMCPAction === "get" ||
-                  platformMCPAction === "add" ||
-                  platformMCPAction === "remove" ||
-                  platformMCPAction === "login" ||
-                  platformMCPAction === "logout" ? (
-                    <input
-                      data-testid="platform-mcp-name-input"
-                      placeholder="server name"
-                      value={platformMCPName}
-                      onChange={(event) => setPlatformMCPName(event.target.value)}
-                      disabled={platformBusySection !== ""}
-                    />
-                  ) : null}
-                  {platformMCPAction === "add" ? (
-                    <>
-                      <input
-                        data-testid="platform-mcp-url-input"
-                        placeholder="url (for streamable server)"
-                        value={platformMCPURL}
-                        onChange={(event) => setPlatformMCPURL(event.target.value)}
-                        disabled={platformBusySection !== ""}
-                      />
-                      <input
-                        data-testid="platform-mcp-command-input"
-                        placeholder="stdio command (space separated)"
-                        value={platformMCPCommand}
-                        onChange={(event) =>
-                          setPlatformMCPCommand(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                      <input
-                        data-testid="platform-mcp-env-input"
-                        placeholder="env KEY=VALUE,KEY2=VALUE2"
-                        value={platformMCPEnvCSV}
-                        onChange={(event) => setPlatformMCPEnvCSV(event.target.value)}
-                        disabled={platformBusySection !== ""}
-                      />
-                      <input
-                        data-testid="platform-mcp-bearer-env-input"
-                        placeholder="bearer token env var"
-                        value={platformMCPBearerTokenEnvVar}
-                        onChange={(event) =>
-                          setPlatformMCPBearerTokenEnvVar(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                    </>
-                  ) : null}
-                  {platformMCPAction === "login" ? (
-                    <input
-                      data-testid="platform-mcp-scopes-input"
-                      placeholder="scopes (comma separated)"
-                      value={platformMCPScopeCSV}
-                      onChange={(event) => setPlatformMCPScopeCSV(event.target.value)}
-                      disabled={platformBusySection !== ""}
-                    />
-                  ) : null}
-                  <div className="platform-actions-row">
-                    <button
-                      type="button"
-                      className="ghost"
-                      data-testid="platform-mcp-run-btn"
-                      onClick={() => void onRunPlatformMCP()}
-                      disabled={platformBusySection !== "" || !platformHostID}
-                    >
-                      Run MCP
-                    </button>
-                  </div>
-                  <pre className="platform-output" data-testid="platform-mcp-output">
-                    {formatCodexPlatformResult(platformMCPResult)}
-                  </pre>
-                </article>
-
-                <article className="platform-card">
-                  <h4>Cloud</h4>
-                  <label>
-                    action
-                    <select
-                      data-testid="platform-cloud-action-select"
-                      value={platformCloudAction}
-                      onChange={(event) =>
-                        setPlatformCloudAction(
-                          event.target.value as CodexPlatformCloudAction,
-                        )
-                      }
-                      disabled={platformBusySection !== ""}
-                    >
-                      {CODEX_PLATFORM_CLOUD_ACTIONS.map((item) => (
-                        <option key={item.value} value={item.value}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {platformCloudAction === "status" ||
-                  platformCloudAction === "diff" ||
-                  platformCloudAction === "apply" ? (
-                    <input
-                      data-testid="platform-cloud-task-id-input"
-                      placeholder="task id"
-                      value={platformCloudTaskID}
-                      onChange={(event) =>
-                        setPlatformCloudTaskID(event.target.value)
-                      }
-                      disabled={platformBusySection !== ""}
-                    />
-                  ) : null}
-                  {platformCloudAction === "exec" ? (
-                    <>
-                      <input
-                        data-testid="platform-cloud-env-id-input"
-                        placeholder="env id"
-                        value={platformCloudEnvID}
-                        onChange={(event) =>
-                          setPlatformCloudEnvID(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                      <input
-                        data-testid="platform-cloud-query-input"
-                        placeholder="query"
-                        value={platformCloudQuery}
-                        onChange={(event) =>
-                          setPlatformCloudQuery(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                      <input
-                        data-testid="platform-cloud-attempts-input"
-                        placeholder="attempts"
-                        value={platformCloudAttempts}
-                        onChange={(event) =>
-                          setPlatformCloudAttempts(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                      <input
-                        data-testid="platform-cloud-branch-input"
-                        placeholder="branch"
-                        value={platformCloudBranch}
-                        onChange={(event) =>
-                          setPlatformCloudBranch(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                    </>
-                  ) : null}
-                  {platformCloudAction === "list" ? (
-                    <>
-                      <input
-                        data-testid="platform-cloud-list-env-input"
-                        placeholder="env id (optional)"
-                        value={platformCloudEnvID}
-                        onChange={(event) =>
-                          setPlatformCloudEnvID(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                      <input
-                        data-testid="platform-cloud-limit-input"
-                        placeholder="limit"
-                        value={platformCloudLimit}
-                        onChange={(event) =>
-                          setPlatformCloudLimit(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                      <input
-                        data-testid="platform-cloud-cursor-input"
-                        placeholder="cursor"
-                        value={platformCloudCursor}
-                        onChange={(event) =>
-                          setPlatformCloudCursor(event.target.value)
-                        }
-                        disabled={platformBusySection !== ""}
-                      />
-                    </>
-                  ) : null}
-                  {platformCloudAction === "diff" ||
-                  platformCloudAction === "apply" ? (
-                    <input
-                      data-testid="platform-cloud-attempt-input"
-                      placeholder="attempt (optional)"
-                      value={platformCloudAttempt}
-                      onChange={(event) =>
-                        setPlatformCloudAttempt(event.target.value)
-                      }
-                      disabled={platformBusySection !== ""}
-                    />
-                  ) : null}
-                  <div className="platform-actions-row">
-                    <button
-                      type="button"
-                      className="ghost"
-                      data-testid="platform-cloud-run-btn"
-                      onClick={() => void onRunPlatformCloud()}
-                      disabled={platformBusySection !== "" || !platformHostID}
-                    >
-                      Run Cloud
-                    </button>
-                  </div>
-                  <pre
-                    className="platform-output"
-                    data-testid="platform-cloud-output"
-                  >
-                    {formatCodexPlatformResult(platformCloudResult)}
-                  </pre>
-                </article>
-              </div>
-            </section>
-
-            <section className="inspect-block">
-              <h3>Active Job</h3>
-              {activeJob ? (
-                <div className="job-card">
-                  <div className="job-head">
-                    <strong>{activeJob.id}</strong>
-                    <span className={`tone-${statusTone(activeJob.status)}`}>
-                      {activeJob.status}
-                    </span>
-                  </div>
-                  <p>runtime={activeJob.runtime}</p>
-                  <p>thread={activeJobThreadID}</p>
-                  <p>queued={formatDateTime(activeJob.queued_at)}</p>
-                  <p>
-                    hosts total={activeJob.total_hosts ?? 0} ok=
-                    {activeJob.succeeded_hosts ?? 0} failed=
-                    {activeJob.failed_hosts ?? 0}
-                  </p>
-                  <div className="progress-track" aria-label="job progress">
-                    <span style={{ width: `${activeProgress}%` }} />
-                  </div>
-                  <p>http={activeJob.result_status ?? "n/a"}</p>
-                  {activeJob.error ? (
-                    <p className="tone-err">{activeJob.error}</p>
-                  ) : null}
-                </div>
-              ) : (
-                <p className="pane-subtle-light">No active async job.</p>
-              )}
-            </section>
-
-            <section className="inspect-block">
-              <h3>Recent Jobs</h3>
-              <div className="ops-filter-row">
-                <label>
-                  status
-                  <select
-                    value={opsJobStatusFilter}
-                    onChange={(event) =>
-                      setOpsJobStatusFilter(
-                        event.target.value as
-                          | "all"
-                          | "pending"
-                          | "running"
-                          | "succeeded"
-                          | "failed"
-                          | "canceled",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="pending">pending</option>
-                    <option value="running">running</option>
-                    <option value="succeeded">succeeded</option>
-                    <option value="failed">failed</option>
-                    <option value="canceled">canceled</option>
-                  </select>
-                </label>
-                <label>
-                  type
-                  <select
-                    value={opsJobTypeFilter}
-                    onChange={(event) =>
-                      setOpsJobTypeFilter(
-                        event.target.value as "all" | "run" | "sync",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="run">run</option>
-                    <option value="sync">sync</option>
-                  </select>
-                </label>
-              </div>
-              {filteredOpsJobs.length === 0 ? (
-                <p className="pane-subtle-light">No jobs yet.</p>
-              ) : (
-                <ul className="history-list">
-                  {filteredOpsJobs.slice(0, 8).map((job) => (
-                    <li key={job.id}>
-                      <div className="history-item-main">
-                        <button
-                          className="ghost"
-                          onClick={() => {
-                            setActiveJobID(job.id);
-                            setActiveJob(job);
-                          }}
-                        >
-                          {job.id}
-                        </button>
-                        <span className={`tone-${statusTone(job.status)}`}>
-                          {job.status}
-                        </span>
-                        <span>{job.type}</span>
-                      </div>
-                      <div className="history-item-actions">
-                        {isJobActive(job) ? (
-                          <button
-                            type="button"
-                            className="ghost danger-ghost"
-                            onClick={() => void onCancelJob(job)}
-                          >
-                            Cancel
-                          </button>
-                        ) : null}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            <section className="inspect-block">
-              <h3>Recent Runs</h3>
-              <div className="ops-filter-row">
-                <label>
-                  status
-                  <select
-                    value={opsRunStatusFilter}
-                    onChange={(event) =>
-                      setOpsRunStatusFilter(
-                        event.target.value as "all" | "ok" | "error",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="ok">ok</option>
-                    <option value="error">error</option>
-                  </select>
-                </label>
-              </div>
-              {filteredOpsRuns.length === 0 ? (
-                <p className="pane-subtle-light">No run results yet.</p>
-              ) : (
-                <ul className="history-list history-runs">
-                  {filteredOpsRuns.slice(0, 8).map((run) => (
-                    <li key={run.id}>
-                      <span>{run.id}</span>
-                      <span
-                        className={`tone-${run.status_code < 400 ? "ok" : "err"}`}
-                      >
-                        {run.status_code < 400
-                          ? "ok"
-                          : `http_${run.status_code}`}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            <section className="inspect-block">
-              <h3>Audit Timeline</h3>
-              <div className="ops-filter-row">
-                <label>
-                  method
-                  <select
-                    value={opsAuditMethodFilter}
-                    onChange={(event) =>
-                      setOpsAuditMethodFilter(
-                        event.target.value as "all" | "GET" | "POST" | "DELETE",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="GET">GET</option>
-                    <option value="POST">POST</option>
-                    <option value="DELETE">DELETE</option>
-                  </select>
-                </label>
-                <label>
-                  status
-                  <select
-                    value={opsAuditStatusFilter}
-                    onChange={(event) =>
-                      setOpsAuditStatusFilter(
-                        event.target.value as "all" | "2xx" | "4xx" | "5xx",
-                      )
-                    }
-                  >
-                    <option value="all">all</option>
-                    <option value="2xx">2xx</option>
-                    <option value="4xx">4xx</option>
-                    <option value="5xx">5xx</option>
-                  </select>
-                </label>
-              </div>
-              {filteredAuditEvents.length === 0 ? (
-                <p className="pane-subtle-light">
-                  No audit events with current filters.
-                </p>
-              ) : (
-                <ul className="history-list">
-                  {filteredAuditEvents.slice(0, 12).map((evt) => (
-                    <li key={evt.id}>
-                      <div className="history-item-main">
-                        <span>{evt.action}</span>
-                        <span>
-                          {evt.method} {evt.path}
-                        </span>
-                      </div>
-                      <span
-                        className={`tone-${evt.status_code < 400 ? "ok" : "err"}`}
-                      >
-                        {evt.status_code}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            <section className="inspect-block">
-              <h3>{editingHostID ? "Edit Host" : "Add Host"}</h3>
-              <form className="host-form" onSubmit={onAddHost}>
-                <input
-                  placeholder="name"
-                  value={hostForm.name}
-                  onChange={(event) =>
-                    setHostForm((prev) => ({
-                      ...prev,
-                      name: event.target.value,
-                    }))
-                  }
-                />
-                <label>
-                  connection mode
-                  <select
-                    value={hostForm.connectionMode}
-                    onChange={(event) =>
-                      setHostForm((prev) => ({
-                        ...prev,
-                        connectionMode: event.target.value as "ssh" | "local",
-                      }))
-                    }
-                  >
-                    <option value="ssh">ssh</option>
-                    <option value="local">local</option>
-                  </select>
-                </label>
-                <input
-                  placeholder={
-                    hostForm.connectionMode === "local"
-                      ? "host (optional for local mode)"
-                      : "host"
-                  }
-                  value={hostForm.host}
-                  onChange={(event) =>
-                    setHostForm((prev) => ({
-                      ...prev,
-                      host: event.target.value,
-                    }))
-                  }
-                />
-                <input
-                  placeholder="user"
-                  value={hostForm.user}
-                  onChange={(event) =>
-                    setHostForm((prev) => ({
-                      ...prev,
-                      user: event.target.value,
-                    }))
-                  }
-                />
-                <input
-                  placeholder="workspace"
-                  value={hostForm.workspace}
-                  onChange={(event) =>
-                    setHostForm((prev) => ({
-                      ...prev,
-                      workspace: event.target.value,
-                    }))
-                  }
-                />
-                <div className="ops-actions-row">
-                  <button type="submit" disabled={addingHost}>
-                    {addingHost
-                      ? "Saving..."
-                      : editingHostID
-                        ? "Update Host"
-                        : "Save Host"}
-                  </button>
-                  {editingHostID ? (
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={onCancelHostEdit}
-                    >
-                      Cancel Edit
-                    </button>
-                  ) : null}
-                </div>
-              </form>
-            </section>
-          </aside>
-        </div>
+        <OpsStage {...opsStageProps} />
       )}
 
-      {commandPaletteOpen && appMode === "session" ? (
-        <div
-          className="command-palette-backdrop"
-          onMouseDown={(event) => {
-            if (event.target !== event.currentTarget) return;
-            closeCommandPalette();
-          }}
-        >
-          <section
-            className="command-palette"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Command Palette"
-          >
-            <input
-              ref={commandPaletteInputRef}
-              className="command-palette-input"
-              placeholder="Type a command..."
-              value={commandPaletteQuery}
-              onChange={(event) => {
-                setCommandPaletteQuery(event.target.value);
-                setCommandPaletteCursor(0);
-              }}
-              onKeyDown={onCommandPaletteKeyDown}
-            />
-            <div className="command-palette-list" role="listbox">
-              {filteredCommandPaletteActions.length === 0 ? (
-                <p className="command-palette-empty">No matching commands.</p>
-              ) : (
-                filteredCommandPaletteActions.map((action, index) => (
-                  <button
-                    key={action.id}
-                    type="button"
-                    className={`command-palette-item ${index === commandPaletteCursor ? "active" : ""}`}
-                    onMouseEnter={() => setCommandPaletteCursor(index)}
-                    onClick={() => runCommandPaletteAction(index)}
-                  >
-                    <strong>{action.label}</strong>
-                    <small>{action.detail}</small>
-                  </button>
-                ))
-              )}
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <CommandPalette
+        open={commandPaletteOpen && appMode === "session"}
+        inputRef={commandPaletteInputRef}
+        query={commandPaletteQuery}
+        cursor={commandPaletteCursor}
+        actions={filteredCommandPaletteActions}
+        onClose={closeCommandPalette}
+        onQueryChange={onCommandPaletteQueryChange}
+        onKeyDown={onCommandPaletteKeyDown}
+        onHoverAction={setCommandPaletteCursor}
+        onRunAction={runCommandPaletteAction}
+      />
 
     </div>
   );

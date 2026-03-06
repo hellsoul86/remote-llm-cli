@@ -83,3 +83,11 @@ Actions:
 2. Failure rate falls back to baseline.
 3. Root cause and mitigation are captured in repo issue/PR notes.
 4. Retention and alert thresholds are reviewed for recurrence prevention.
+
+## 7. Codex v2 staging soak
+
+Use the dedicated soak probe for reconnect/cursor continuity validation:
+
+- Runbook: [`docs/staging-soak-codex-v2.md`](docs/staging-soak-codex-v2.md)
+- Probe command: `cd server && go run ./cmd/remote-llm-soak ...`
+- Required evidence: soak JSON report + CI links + staging commit SHA
