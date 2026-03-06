@@ -19,6 +19,7 @@ type MockOptions = {
   pendingRequestScenario?: "command-approval";
   includeSecondSession?: boolean;
   backgroundCompletion?: boolean;
+  backgroundCompletionDelayMS?: number;
   titleUpdate?: string;
   jobRunningPolls?: number;
   jobEventFirstPollDelayMS?: number;
@@ -62,6 +63,10 @@ async function mockSessionApi(
   const pendingRequestScenario = options?.pendingRequestScenario ?? null;
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
+  const backgroundCompletionDelayMS = Math.max(
+    0,
+    options?.backgroundCompletionDelayMS ?? 0,
+  );
   const titleUpdate = options?.titleUpdate?.trim() ?? "";
   const jobRunningPolls = Math.max(1, options?.jobRunningPolls ?? 1);
   const jobEventFirstPollDelayMS = Math.max(
@@ -372,9 +377,12 @@ async function mockSessionApi(
     }
   };
 
-  const ensureSessionTwoBackgroundCompletion = () => {
+  const ensureSessionTwoBackgroundCompletion = async () => {
     if (!includeSecondSession || !backgroundCompletion || backgroundCompletionEmitted) {
       return;
+    }
+    if (backgroundCompletionDelayMS > 0) {
+      await sleep(backgroundCompletionDelayMS);
     }
     backgroundCompletionEmitted = true;
     const runID = "turn_bg_1";
@@ -1239,7 +1247,7 @@ async function mockSessionApi(
     }
 
     if (sessionID === "session_cli_2") {
-      ensureSessionTwoBackgroundCompletion();
+      await ensureSessionTwoBackgroundCompletion();
       await materializeSessionEventsForStream(sessionID);
       await route.fulfill({
         status: 200,
@@ -3023,6 +3031,32 @@ test("background completion shows one alert and unread badge", async ({ page }) 
       '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.unread',
     ),
   ).toHaveCount(0);
+});
+
+test("background completion does not steal active session after manual switch", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `BG_SWITCH_${Date.now()}`;
+  await mockSessionApi(page, `background ${marker}`, marker, {
+    includeSecondSession: true,
+    backgroundCompletion: true,
+    backgroundCompletionDelayMS: 400,
+  });
+  await unlock(page);
+
+  const session1Chip = page.locator('.session-chip-tree[data-session-id="session_cli_1"]');
+  const session2Chip = page.locator('.session-chip-tree[data-session-id="session_cli_2"]');
+  await session2Chip.click();
+  await expect(session2Chip).toHaveClass(/active/);
+
+  await session1Chip.click();
+  await expect(session1Chip).toHaveClass(/active/);
+
+  const alert = page.locator(".session-alert", {
+    hasText: "Session 2 completed",
+  });
+  await expect(alert).toBeVisible();
+  await expect(session1Chip).toHaveClass(/active/);
+  await expect(session2Chip).not.toHaveClass(/active/);
 });
 
 test("generic session title is auto-derived from first prompt", async ({ page }) => {
