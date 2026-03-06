@@ -18,6 +18,7 @@ import {
   useSessionDomain,
 } from "./domains/session";
 import { CommandPalette } from "./features/session/components/CommandPalette";
+import { OpsControlSidebar } from "./features/session/components/OpsControlSidebar";
 import { SessionComposer } from "./features/session/components/SessionComposer";
 import { OpsAuditTimelinePanel } from "./features/session/components/OpsAuditTimelinePanel";
 import { SessionHeader } from "./features/session/components/SessionHeader";
@@ -1480,190 +1481,39 @@ export function App() {
         </div>
       ) : (
         <div className="ops-stage">
-          <aside className="nav-pane">
-            <header className="pane-head">
-              <p className="pane-eyebrow">remote operations</p>
-              <h2>Hosts and Runtime Control</h2>
-              <p className="pane-subtle">health: {health}</p>
-            </header>
-
-            <section className="pane-block">
-              <div className="pane-title-line">
-                <h3>Targets</h3>
-                <label className="switch-inline">
-                  <input
-                    type="checkbox"
-                    checked={allHosts}
-                    onChange={(event) => setAllHosts(event.target.checked)}
-                  />
-                  all
-                </label>
-              </div>
-              <p className="pane-subtle">selected={selectedHostCount}</p>
-              <label>
-                filter
-                <input
-                  placeholder="name / host / user / workspace"
-                  value={hostFilter}
-                  onChange={(event) => setHostFilter(event.target.value)}
-                />
-              </label>
-              <div className="target-list">
-                {hosts.length === 0 ? (
-                  <p className="pane-subtle">No hosts configured.</p>
-                ) : filteredHosts.length === 0 ? (
-                  <p className="pane-subtle">No hosts match filter.</p>
-                ) : (
-                  filteredHosts.map((host) => (
-                    <div key={host.id} className="target-item">
-                      <label className="target-checkline">
-                        <input
-                          type="checkbox"
-                          disabled={allHosts}
-                          checked={
-                            allHosts || selectedHostIDs.includes(host.id)
-                          }
-                          onChange={() => toggleHostSelection(host.id)}
-                        />
-                        <span className="target-meta">
-                          <strong>{host.name}</strong>
-                          <small>
-                            {host.user ? `${host.user}@` : ""}
-                            {host.host}:{host.port}
-                            {` mode=${host.connection_mode ?? "ssh"}`}
-                          </small>
-                        </span>
-                      </label>
-                      <div className="target-actions">
-                        <button
-                          type="button"
-                          className="ghost"
-                          disabled={opsHostBusyID === host.id}
-                          onClick={() => void onProbeHost(host)}
-                        >
-                          {opsHostBusyID === host.id ? "..." : "Probe"}
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
-                          disabled={opsHostBusyID === host.id}
-                          onClick={() => onStartEditHost(host)}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost danger-ghost"
-                          disabled={opsHostBusyID === host.id}
-                          onClick={() => void onDeleteHost(host)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </section>
-
-            <section className="pane-block">
-              <h3>Runtime</h3>
-              <label>
-                runtime
-                <select
-                  value={selectedRuntime}
-                  onChange={(event) => setSelectedRuntime(event.target.value)}
-                >
-                  {runtimes.map((runtime) => (
-                    <option key={runtime.name} value={runtime.name}>
-                      {runtime.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                sandbox
-                <select
-                  value={runSandbox}
-                  onChange={(event) =>
-                    setRunSandbox(
-                      event.target.value as
-                        | ""
-                        | "read-only"
-                        | "workspace-write"
-                        | "danger-full-access",
-                    )
-                  }
-                >
-                  <option value="">default</option>
-                  <option value="read-only">read-only</option>
-                  <option value="workspace-write">workspace-write</option>
-                  <option value="danger-full-access">danger-full-access</option>
-                </select>
-              </label>
-              <label className="switch-inline">
-                <input
-                  type="checkbox"
-                  checked={runAsyncMode}
-                  onChange={(event) => setRunAsyncMode(event.target.checked)}
-                />
-                async queue
-              </label>
-            </section>
-
-            <section className="pane-block">
-              <h3>Queue Control</h3>
-              <ul className="metric-list">
-                <li>pending={metrics?.jobs.pending ?? "-"}</li>
-                <li>running={metrics?.jobs.running ?? "-"}</li>
-                <li>depth={metrics?.queue.depth ?? "-"}</li>
-              </ul>
-              <div className="ops-actions-row">
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => void onRefreshWorkspace()}
-                  disabled={isRefreshing}
-                >
-                  {isRefreshing ? "Refreshing..." : "Refresh Queue"}
-                </button>
-                <button
-                  type="button"
-                  className="ghost danger-ghost"
-                  disabled={!activeJob || !isJobActive(activeJob)}
-                  onClick={() =>
-                    activeJob ? void onCancelJob(activeJob) : undefined
-                  }
-                >
-                  Cancel Active
-                </button>
-              </div>
-            </section>
-
-            <section className="pane-block">
-              <h3>Overview</h3>
-              <ul className="metric-list">
-                <li>hosts={hosts.length}</li>
-                <li>jobs={jobs.length}</li>
-                <li>runs={runs.length}</li>
-                <li>queue_depth={metrics?.queue.depth ?? "-"}</li>
-                <li>
-                  workers={metrics?.queue.workers_active ?? "-"}/
-                  {metrics?.queue.workers_total ?? "-"}
-                </li>
-                <li>threads={threads.length}</li>
-              </ul>
-            </section>
-
-            {opsNotice ? (
-              <section
-                className={`pane-block ops-notice ${opsNoticeIsError ? "ops-notice-error" : ""}`}
-              >
-                <h3>Ops Notice</h3>
-                <p>{opsNotice}</p>
-              </section>
-            ) : null}
-          </aside>
+          <OpsControlSidebar
+            health={health}
+            allHosts={allHosts}
+            onAllHostsChange={setAllHosts}
+            selectedHostCount={selectedHostCount}
+            hostFilter={hostFilter}
+            onHostFilterChange={setHostFilter}
+            hosts={hosts}
+            filteredHosts={filteredHosts}
+            selectedHostIDs={selectedHostIDs}
+            onToggleHostSelection={toggleHostSelection}
+            opsHostBusyID={opsHostBusyID}
+            onProbeHost={onProbeHost}
+            onStartEditHost={onStartEditHost}
+            onDeleteHost={onDeleteHost}
+            selectedRuntime={selectedRuntime}
+            onSelectedRuntimeChange={setSelectedRuntime}
+            runtimes={runtimes}
+            runSandbox={runSandbox}
+            onRunSandboxChange={setRunSandbox}
+            runAsyncMode={runAsyncMode}
+            onRunAsyncModeChange={setRunAsyncMode}
+            metrics={metrics}
+            onRefreshWorkspace={onRefreshWorkspace}
+            isRefreshing={isRefreshing}
+            activeJob={activeJob}
+            onCancelJob={onCancelJob}
+            jobsLength={jobs.length}
+            runsLength={runs.length}
+            threadsLength={threads.length}
+            opsNotice={opsNotice}
+            opsNoticeIsError={opsNoticeIsError}
+          />
 
           <aside className="inspect-pane">
             {isRefreshing ? (
