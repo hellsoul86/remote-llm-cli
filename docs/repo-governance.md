@@ -14,12 +14,43 @@ Short-lived branches:
 - `chore/issue-xxx-...`
 - `hotfix/issue-xxx-...`
 
+Repository setting:
+
+- `delete_branch_on_merge = false`
+  - stacked child PRs must keep their base branch alive until the next PR is retargeted
+
 ## PR target rules
 
 - Feature/fix/chore PRs target `staging`
 - Release PR targets `main` from `staging`
 - Emergency hotfix PRs can target `main` from `hotfix/*`
 - Hotfix changes must be back-merged/cherry-picked to `staging` after `main` merge
+
+## PR contract
+
+Every PR must include:
+
+- `Summary`
+- `Linked Issue`
+- `Changes`
+- `DB Change`
+- `Migration Plan` when DB impact is not `none`
+- `Rollback Plan`
+- `Verification`
+- `Risk`
+
+The workflow `.github/workflows/pr-governance.yml` enforces this contract on every PR, including stacked child PRs.
+
+## Stacked PR operating mode
+
+Stacked PRs are allowed for large epics, but they are review slices, not release branches.
+
+Rules:
+
+- all PRs run CI, even when the base is another feature branch
+- only one PR at a time should be pointed at `staging` for merge
+- after a parent PR merges to `staging`, retarget its direct child to `staging`, update branch, wait for green, then merge
+- do not delete intermediate stack branches until their child PR has been retargeted
 
 ## Merge strategy
 
@@ -35,6 +66,7 @@ Required checks for PRs to `staging`/`main`:
 - `Web Build` (TypeScript + Vite build)
 - `Web E2E Smoke` (Playwright async-job UI smoke)
 - `Target Branch Rules` (PR target governance)
+- `PR Contract` (issue link, verification, rollback, DB declaration)
 
 Workflows:
 
@@ -42,13 +74,10 @@ Workflows:
 - `.github/workflows/pr-governance.yml`
 - `.github/workflows/deploy.yml` (post-merge deploy on `staging`/`main`)
 
-## Current merge order (active stacked PRs)
+Branch protection on GitHub must match the exact required check names above.
 
-1. `#4` `feat/issue-1-2-3-mvp-controller` -> `staging`
-2. `#6` `feat/issue-5-runtime-adapter-sdk` -> `feat/issue-1-2-3-mvp-controller`
-3. `#8` `feat/issue-7-codex-runtime-deepening` -> `feat/issue-5-runtime-adapter-sdk`
-4. `#10` `feat/issue-9-branch-governance` -> `feat/issue-7-codex-runtime-deepening`
+## Deploy gate
 
-After `#4/#6/#8/#10` are merged sequentially, open release PR:
-
-- `staging` -> `main`
+- only pushes to protected branches (`staging`, `main`) trigger deployment
+- deploy must complete post-deploy smoke before the run is considered healthy
+- staging soak remains a manual longer-running validation, not a merge blocker
