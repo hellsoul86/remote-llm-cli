@@ -7,6 +7,7 @@ type MockHarness = {
   sessionOneSSECalls: () => number;
   imageUploads: () => number;
   lastRunRequest: () => Record<string, unknown> | null;
+  lastPendingResolveRequest: () => Record<string, unknown> | null;
   lastPlatformLoginRequest: () => Record<string, unknown> | null;
   lastPlatformMCPRequest: () => Record<string, unknown> | null;
   lastPlatformCloudRequest: () => Record<string, unknown> | null;
@@ -14,6 +15,7 @@ type MockHarness = {
 
 type MockOptions = {
   streamPattern?: "ready-only" | "completion-once";
+  pendingRequestScenario?: "command-approval";
   includeSecondSession?: boolean;
   backgroundCompletion?: boolean;
   titleUpdate?: string;
@@ -42,11 +44,13 @@ async function mockSessionApi(
   let runReqCount = 0;
   let imageUploadCount = 0;
   let lastRunRequest: Record<string, unknown> | null = null;
+  let lastPendingResolveRequest: Record<string, unknown> | null = null;
   let lastPlatformLoginRequest: Record<string, unknown> | null = null;
   let lastPlatformMCPRequest: Record<string, unknown> | null = null;
   let lastPlatformCloudRequest: Record<string, unknown> | null = null;
 
   const streamPattern = options?.streamPattern ?? "ready-only";
+  const pendingRequestScenario = options?.pendingRequestScenario ?? null;
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
   const titleUpdate = options?.titleUpdate?.trim() ?? "";
@@ -120,8 +124,14 @@ async function mockSessionApi(
 
   type TurnState = {
     runID: string;
-    phase: "pending" | "started" | "completed" | "canceled";
+    phase:
+      | "pending"
+      | "waiting-request"
+      | "started"
+      | "completed"
+      | "canceled";
     remainingPolls: number;
+    pendingRequestID: string;
   };
 
   const turnStates: TurnState[] = [];
@@ -175,6 +185,29 @@ async function mockSessionApi(
       payload,
       created_at: createdAt,
     });
+  };
+
+  const pendingRequestRecordForTurn = (
+    turnState: TurnState,
+  ): Record<string, unknown> | null => {
+    if (pendingRequestScenario !== "command-approval") return null;
+    if (!turnState.pendingRequestID.trim()) return null;
+    return {
+      session_id: "session_cli_1",
+      request_id: turnState.pendingRequestID,
+      host_id: "local_1",
+      method: "item/commandExecution/requestApproval",
+      received_at: new Date().toISOString(),
+      params: {
+        threadId: "session_cli_1",
+        turnId: turnState.runID,
+        itemId: `cmd_${turnState.runID}`,
+        command: "git status --short",
+        cwd: "/srv/work",
+        reason: "Codex needs repo status before it can continue.",
+        availableDecisions: ["accept", "decline", "cancel"],
+      },
+    };
   };
 
   const chunkFromText = (text: string, includePrelude: boolean): string => {
@@ -286,7 +319,10 @@ async function mockSessionApi(
       return;
     }
     const current = turnStates.find(
-      (state) => state.phase === "pending" || state.phase === "started",
+      (state) =>
+        state.phase === "pending" ||
+        state.phase === "waiting-request" ||
+        state.phase === "started",
     );
     if (!current) return;
 
@@ -296,7 +332,11 @@ async function mockSessionApi(
         await sleep(jobEventFirstPollDelayMS);
       }
       appendTurnStartEvents(current);
-      current.phase = "started";
+      current.phase = current.pendingRequestID ? "waiting-request" : "started";
+    }
+
+    if (current.phase === "waiting-request") {
+      return;
     }
 
     if (current.phase === "started") {
@@ -800,7 +840,10 @@ async function mockSessionApi(
       return;
     }
     const activeTurn = turnStates.find(
-      (state) => state.phase === "pending" || state.phase === "started",
+      (state) =>
+        state.phase === "pending" ||
+        state.phase === "waiting-request" ||
+        state.phase === "started",
     );
     const latestTurn = turnStates.length > 0 ? turnStates[turnStates.length - 1] : null;
     const status = activeTurn
@@ -977,6 +1020,68 @@ async function mockSessionApi(
     });
   });
 
+  await page.route("**/v2/codex/sessions/*/requests/pending", async (route, request) => {
+    if (request.method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+    const pending = turnStates
+      .filter(
+        (state) =>
+          state.phase === "waiting-request" &&
+          state.pendingRequestID.trim() !== "" &&
+          sessionID === "session_cli_1",
+      )
+      .map((state) => pendingRequestRecordForTurn(state))
+      .filter((item): item is Record<string, unknown> => item !== null);
+    await route.fulfill({
+      status: 200,
+      json: {
+        session_id: sessionID,
+        requests: pending,
+      },
+    });
+  });
+
+  await page.route(
+    "**/v2/codex/sessions/*/requests/*/resolve",
+    async (route, request) => {
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const url = new URL(request.url());
+      const parts = url.pathname.split("/");
+      const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+      const requestID = decodeURIComponent(parts[6] ?? "").trim();
+      try {
+        lastPendingResolveRequest = JSON.parse(request.postData() ?? "{}") as Record<
+          string,
+          unknown
+        >;
+      } catch {
+        lastPendingResolveRequest = null;
+      }
+      const turnState = turnStates.find((state) => state.pendingRequestID === requestID);
+      if (turnState && turnState.phase === "waiting-request") {
+        turnState.phase = "started";
+        turnState.pendingRequestID = "";
+        turnState.remainingPolls = Math.max(1, turnState.remainingPolls);
+      }
+      await route.fulfill({
+        status: 200,
+        json: {
+          resolved: true,
+          session_id: sessionID,
+          request_id: requestID,
+        },
+      });
+    },
+  );
+
   await page.route("**/v2/codex/sessions/*/turns/start", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -1010,6 +1115,10 @@ async function mockSessionApi(
       runID,
       phase: "pending",
       remainingPolls: jobRunningPolls,
+      pendingRequestID:
+        sessionID === "session_cli_1" && pendingRequestScenario
+          ? `req_${runID}`
+          : "",
     });
 
     await route.fulfill({
@@ -1106,6 +1215,7 @@ async function mockSessionApi(
     sessionOneSSECalls: () => sessionOneSSECalls,
     imageUploads: () => imageUploadCount,
     lastRunRequest: () => lastRunRequest,
+    lastPendingResolveRequest: () => lastPendingResolveRequest,
     lastPlatformLoginRequest: () => lastPlatformLoginRequest,
     lastPlatformMCPRequest: () => lastPlatformMCPRequest,
     lastPlatformCloudRequest: () => lastPlatformCloudRequest,
@@ -2000,6 +2110,35 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   }).toBe(true);
 });
 
+test("pending command approval can be resolved inline", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PENDING_REQUEST_${Date.now()}`;
+  const harness = await mockSessionApi(page, `pending request ${marker}`, marker, {
+    pendingRequestScenario: "command-approval",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`pending request ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const pendingCard = page.getByTestId("pending-request-card");
+  await expect(pendingCard).toContainText("Approve command");
+  await expect(pendingCard).toContainText("git status --short");
+
+  await page.getByTestId("pending-request-decision-accept").click();
+  await expect.poll(() => {
+    const req = harness.lastPendingResolveRequest() as
+      | { result?: { decision?: string } }
+      | null;
+    return String(req?.result?.decision ?? "");
+  }).toBe("accept");
+  await expect(page.getByTestId("pending-request-card")).toHaveCount(0);
+});
+
 test("composer submits codex exec payload", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `EXEC_MODE_${Date.now()}`;
@@ -2091,6 +2230,43 @@ test("session stream renders command runtime cards", async ({ page }) => {
   await expect(page.getByText("Command Started")).toBeVisible();
   await expect(page.getByText("Command Completed")).toBeVisible();
   await expect(page.getByText(/^ls -la$/)).toBeVisible();
+});
+
+test("pending command approval resumes the session after allow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PENDING_APPROVAL_${Date.now()}`;
+  const harness = await mockSessionApi(page, `approval complete ${marker}`, marker, {
+    pendingRequestScenario: "command-approval",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`needs approval ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const pendingCard = page.getByTestId("pending-request-card");
+  await expect(pendingCard).toContainText("Approve command");
+  await expect(pendingCard).toContainText("git status --short");
+  await expect(page.getByText("Awaiting command approval.")).toBeVisible();
+
+  await page.getByTestId("pending-request-decision-accept").click();
+  await expect
+    .poll(() => harness.lastPendingResolveRequest()?.result)
+    .toEqual({ decision: "accept" });
+
+  await expect(page.getByTestId("pending-request-card")).toHaveCount(0, {
+    timeout: 12000,
+  });
+  await expect(
+    page.locator(".message.message-assistant pre", {
+      hasText: marker,
+    }),
+  ).toHaveCount(1);
 });
 
 test("stop and regenerate controls work in session composer", async ({
