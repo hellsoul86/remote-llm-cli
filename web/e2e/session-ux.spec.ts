@@ -2797,6 +2797,13 @@ test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
 
   const projectFilter = page.getByPlaceholder("Filter projects or sessions");
   await projectFilter.fill("session 2");
+  await expect
+    .poll(async () => {
+      return page.evaluate(() =>
+        window.localStorage.getItem("remote_llm_session_tree_prefs_v1") ?? "",
+      );
+    })
+    .toContain("session 2");
   await page.getByRole("button", { name: "Collapse" }).first().click();
   await expect(
     page.getByRole("button", { name: "Expand" }).first(),

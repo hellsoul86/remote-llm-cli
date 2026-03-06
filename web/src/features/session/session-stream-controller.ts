@@ -11,7 +11,9 @@ import type {
 export type SessionStreamRuntimeState = {
   controller: AbortController;
   ready: boolean;
+  startedAt: number;
   lastEventAt: number;
+  lastProgressAt: number;
   suppressReplaySurface: boolean;
 };
 
@@ -98,6 +100,9 @@ export function createSessionStreamController(
       const cursor = data ? Number(data.cursor) : NaN;
       if (Number.isFinite(cursor)) {
         deps.setSessionEventCursor(sessionID, cursor);
+        if (cursor > 0) {
+          state.lastProgressAt = receivedAt;
+        }
       }
       return;
     }
@@ -114,6 +119,9 @@ export function createSessionStreamController(
         !(Number.isFinite(nextAfter) && nextAfter > 0);
       if (Number.isFinite(nextAfter)) {
         deps.setSessionEventCursor(sessionID, nextAfter);
+        if (nextAfter > 0) {
+          state.lastProgressAt = receivedAt;
+        }
       }
       return;
     }
@@ -139,6 +147,7 @@ export function createSessionStreamController(
     const current = deps.sessionEventCursorRef.current.get(sessionID) ?? 0;
     if (event.seq <= current) return;
     deps.setSessionEventCursor(sessionID, event.seq);
+    state.lastProgressAt = receivedAt;
     const surfaceByReplay = !state.suppressReplaySurface;
     const surfaceCompletions = state.ready || surfaceByReplay;
     const surfaceLifecycle = state.ready || surfaceByReplay;
@@ -170,7 +179,9 @@ export function createSessionStreamController(
     deps.sessionStreamStateRef.current.set(trimmedSessionID, {
       controller,
       ready: false,
+      startedAt: Date.now(),
       lastEventAt: 0,
+      lastProgressAt: 0,
       suppressReplaySurface: true,
     });
     deps.updateSessionStreamHealth(trimmedSessionID, "connecting", {

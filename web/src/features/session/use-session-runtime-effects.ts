@@ -119,12 +119,12 @@ export function useSessionRuntimeEffects(args: UseSessionRuntimeEffectsArgs) {
         for (const thread of workspace.sessions) {
           if (!thread.activeJobID.trim()) continue;
           const streamState = args.sessionStreamStateRef.current.get(thread.id);
-          const health = args.sessionStreamHealthByID[thread.id];
-          const lastEventAt = Math.max(
-            streamState?.lastEventAt ?? 0,
-            health?.lastEventAt ?? 0,
+          const lastProgressAt = Math.max(
+            streamState?.lastProgressAt ?? 0,
+            streamState?.startedAt ?? 0,
           );
-          if (lastEventAt > 0 && now - lastEventAt < 12_000) continue;
+          const idleSince = lastProgressAt;
+          if (idleSince > 0 && now - idleSince < 12_000) continue;
           candidates.push(thread.id);
         }
       }
