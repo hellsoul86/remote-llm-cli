@@ -116,7 +116,12 @@ export function SessionSidebar({
     <aside className="session-side codex-sidebar">
       <section className="inspect-block focus-block">
         <div className="pane-title-line">
-          <h3>Projects</h3>
+          <div className="pane-title-copy">
+            <h3>Projects</h3>
+            <p className="pane-subtle-light">
+              Servers, project paths, and session history.
+            </p>
+          </div>
           <div className="pane-title-actions">
             <button
               type="button"
@@ -349,10 +354,14 @@ export function SessionSidebar({
       </section>
 
       <section className="inspect-block compact-session-meta">
-        <p className="pane-subtle-light">
-          Ctrl/Cmd+K palette · Enter send · Shift+Enter newline · Ctrl/Cmd+Shift+N new
-          session · P pin (on focused session)
-        </p>
+        <div className="shortcut-stack">
+          <p className="pane-subtle-light">
+            Ctrl/Cmd+K command palette · Enter send · Shift+Enter newline
+          </p>
+          <p className="pane-subtle-light">
+            Ctrl/Cmd+Shift+N new session · P pin focused session
+          </p>
+        </div>
         <div className="ops-actions-row">
           <button type="button" className="ghost" onClick={onEnableNotifications}>
             Alerts: {notificationPermission}

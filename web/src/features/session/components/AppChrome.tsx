@@ -23,8 +23,8 @@ export function AppChrome({
     <>
       <header className="app-topbar">
         <div className="topbar-title">
-          <p className="topbar-eyebrow">remote-llm workspace</p>
-          <h1>Codex Control App</h1>
+          <p className="topbar-eyebrow">remote workspace</p>
+          <h1>Codex</h1>
         </div>
         <div className="topbar-controls">
           <div className="mode-switch">

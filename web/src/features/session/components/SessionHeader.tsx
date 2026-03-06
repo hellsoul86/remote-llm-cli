@@ -25,11 +25,13 @@ export function SessionHeader({
 }: SessionHeaderProps) {
   return (
     <header className="chat-head">
-      <div>
+      <div className="chat-head-main">
+        <p className="chat-head-eyebrow">Session</p>
         <h1>{title || "Session"}</h1>
         <p className="chat-context">{context}</p>
       </div>
       <div className="chat-head-side">
+        <div className="chat-head-status">
         <span
           className={`stream-pill ${streamTone}`}
           data-testid="stream-status"
@@ -37,6 +39,8 @@ export function SessionHeader({
         >
           stream {streamCopy}
         </span>
+        </div>
+        <div className="chat-head-actions">
         <button
           type="button"
           className="ghost danger-ghost stream-reconnect-btn"
@@ -53,6 +57,7 @@ export function SessionHeader({
         >
           Reconnect
         </button>
+        </div>
       </div>
     </header>
   );

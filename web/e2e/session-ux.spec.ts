@@ -1786,6 +1786,10 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
     hasText: marker,
   });
   await expect(assistantWithMarker).toHaveCount(1);
+  await expect(page.locator(".message.message-assistant .message-title-row")).toHaveCount(0);
+  await expect(page.locator(".message.message-user .message-title-row")).toHaveCount(0);
+  await expect(page.locator(".message.message-assistant .message-meta time")).toHaveCount(1);
+  await expect(page.locator(".message.message-user .message-meta time")).toHaveCount(1);
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 

@@ -49,6 +49,10 @@ export function CommandPalette({
         aria-modal="true"
         aria-label="Command Palette"
       >
+        <header className="command-palette-head">
+          <strong>Command Palette</strong>
+          <small>Enter to run · Esc to close</small>
+        </header>
         <input
           ref={inputRef}
           className="command-palette-input"

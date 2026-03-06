@@ -170,11 +170,6 @@ export function SessionComposer({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      {activeThreadStatusCopy ? (
-        <p className="composer-status" role="status">
-          {activeThreadStatusCopy}
-        </p>
-      ) : null}
       {composerDropActive ? (
         <p className="composer-drop-indicator" role="status">
           Drop image to attach.
@@ -189,74 +184,82 @@ export function SessionComposer({
         onResolve={onResolvePendingRequest}
       />
 
-      <div className="session-inline-settings">
-        <label className="session-setting-row">
-          model
-          <select
-            data-testid="session-model-select"
-            value={activeThreadModelValue}
-            disabled={!activeThread || !hasSessionModelChoices || activeThreadBusy}
-            onChange={(event) => onSetThreadModel(event.target.value)}
-          >
-            {hasSessionModelChoices ? (
-              sessionModelChoices.map((modelName) => (
-                <option key={modelName} value={modelName}>
-                  {modelName === sessionModelDefault
-                    ? `${modelName} (default)`
-                    : modelName}
-                </option>
-              ))
-            ) : (
-              <option value="">model unavailable</option>
-            )}
-          </select>
-          {!hasSessionModelChoices ? (
-            <small className="pane-subtle-light">No models discovered on this server.</small>
-          ) : null}
-        </label>
-        <label className="session-setting-row">
-          sandbox
-          <select
-            data-testid="session-sandbox-select"
-            value={activeThread?.sandbox ?? "workspace-write"}
+      <div className="composer-toolbar">
+        <div className="session-inline-settings">
+          <label className="session-setting-row">
+            model
+            <select
+              data-testid="session-model-select"
+              value={activeThreadModelValue}
+              disabled={!activeThread || !hasSessionModelChoices || activeThreadBusy}
+              onChange={(event) => onSetThreadModel(event.target.value)}
+            >
+              {hasSessionModelChoices ? (
+                sessionModelChoices.map((modelName) => (
+                  <option key={modelName} value={modelName}>
+                    {modelName === sessionModelDefault
+                      ? `${modelName} (default)`
+                      : modelName}
+                  </option>
+                ))
+              ) : (
+                <option value="">model unavailable</option>
+              )}
+            </select>
+            {!hasSessionModelChoices ? (
+              <small className="pane-subtle-light">No models discovered on this server.</small>
+            ) : null}
+          </label>
+          <label className="session-setting-row">
+            sandbox
+            <select
+              data-testid="session-sandbox-select"
+              value={activeThread?.sandbox ?? "workspace-write"}
+              disabled={!activeThread || activeThreadBusy}
+              onChange={(event) =>
+                onSetThreadSandbox(
+                  event.target.value as
+                    | ""
+                    | "read-only"
+                    | "workspace-write"
+                    | "danger-full-access",
+                )
+              }
+            >
+              <option value="read-only">read-only</option>
+              <option value="workspace-write">workspace-write</option>
+              <option value="danger-full-access">danger-full-access</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="session-controls-row">
+          <button
+            type="button"
+            className="ghost advanced-toggle-btn"
+            data-testid="fork-session-btn"
+            onClick={onForkSession}
             disabled={!activeThread || activeThreadBusy}
-            onChange={(event) =>
-              onSetThreadSandbox(
-                event.target.value as
-                  | ""
-                  | "read-only"
-                  | "workspace-write"
-                  | "danger-full-access",
-              )
-            }
           >
-            <option value="read-only">read-only</option>
-            <option value="workspace-write">workspace-write</option>
-            <option value="danger-full-access">danger-full-access</option>
-          </select>
-        </label>
+            Fork Session
+          </button>
+          <button
+            type="button"
+            className="ghost advanced-toggle-btn"
+            data-testid="advanced-toggle-btn"
+            onClick={onToggleSessionAdvanced}
+            disabled={!activeThread}
+          >
+            {sessionAdvancedOpen ? "Hide Advanced" : "Advanced"}
+          </button>
+        </div>
       </div>
 
-      <div className="session-controls-row">
-        <button
-          type="button"
-          className="ghost advanced-toggle-btn"
-          data-testid="fork-session-btn"
-          onClick={onForkSession}
-          disabled={!activeThread || activeThreadBusy}
-        >
-          Fork Session
-        </button>
-        <button
-          type="button"
-          className="ghost advanced-toggle-btn"
-          data-testid="advanced-toggle-btn"
-          onClick={onToggleSessionAdvanced}
-          disabled={!activeThread}
-        >
-          {sessionAdvancedOpen ? "Hide Advanced" : "Advanced"}
-        </button>
-      </div>
+      {activeThreadStatusCopy ? (
+        <p className="composer-status" role="status">
+          {activeThreadStatusCopy}
+        </p>
+      ) : null}
 
       {sessionAdvancedOpen ? (
         <div className="session-advanced-panel">
@@ -528,50 +531,52 @@ export function SessionComposer({
         )}
       </div>
 
-      <textarea
-        ref={promptInputRef}
-        value={activeDraft}
-        onChange={(event) => onDraftChange(event.target.value)}
-        rows={1}
-        placeholder={
-          activeThread
-            ? "Tell codex what to do in this workspace..."
-            : "Select a session to start"
-        }
-        disabled={!activeThread}
-        onPaste={onComposerPaste}
-        onKeyDown={onComposerKeyDown}
-      />
+      <div className="composer-input-shell">
+        <textarea
+          ref={promptInputRef}
+          value={activeDraft}
+          onChange={(event) => onDraftChange(event.target.value)}
+          rows={1}
+          placeholder={
+            activeThread
+              ? "Tell codex what to do in this workspace..."
+              : "Select a session to start"
+          }
+          disabled={!activeThread}
+          onPaste={onComposerPaste}
+          onKeyDown={onComposerKeyDown}
+        />
 
-      <div className="composer-actions">
-        {activeThreadRunID ? (
-          <button
-            type="button"
-            className="ghost danger-ghost"
-            disabled={
-              !activeThread ||
-              !activeThreadRunID ||
-              cancelingThreadID === activeThread.id
-            }
-            onClick={onStopRun}
-          >
-            {activeThread && cancelingThreadID === activeThread.id
-              ? "Stopping..."
-              : "Stop"}
+        <div className="composer-actions">
+          {activeThreadRunID ? (
+            <button
+              type="button"
+              className="ghost danger-ghost"
+              disabled={
+                !activeThread ||
+                !activeThreadRunID ||
+                cancelingThreadID === activeThread.id
+              }
+              onClick={onStopRun}
+            >
+              {activeThread && cancelingThreadID === activeThread.id
+                ? "Stopping..."
+                : "Stop"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="ghost"
+              disabled={!activeThread || !hasRegeneratePrompt || activeThreadBusy}
+              onClick={onRegenerate}
+            >
+              Regenerate
+            </button>
+          )}
+          <button type="submit" disabled={activeThreadBusy || !activeThread}>
+            {activeThreadBusy ? "Running..." : "Send"}
           </button>
-        ) : (
-          <button
-            type="button"
-            className="ghost"
-            disabled={!activeThread || !hasRegeneratePrompt || activeThreadBusy}
-            onClick={onRegenerate}
-          >
-            Regenerate
-          </button>
-        )}
-        <button type="submit" disabled={activeThreadBusy || !activeThread}>
-          {activeThreadBusy ? "Running..." : "Send"}
-        </button>
+        </div>
       </div>
     </form>
   );

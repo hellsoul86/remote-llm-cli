@@ -25,6 +25,9 @@ export function SessionTimeline({
   timelineUnreadCount,
   onJumpTimelineToLatest,
 }: SessionTimelineProps) {
+  const isConversationEntry = (entry: TimelineEntry) =>
+    entry.kind === "user" || entry.kind === "assistant";
+
   return (
     <div className="timeline-shell">
       <section
@@ -34,9 +37,9 @@ export function SessionTimeline({
         onScroll={onTimelineScroll}
       >
         {timeline.length === 0 ? (
-          <article className="message message-system">
+          <article className="message message-system message-empty">
             <div className="message-title-row">
-              <h4>{isRefreshing ? "Loading" : "Start"}</h4>
+              <h4>{isRefreshing ? "Loading" : "Ready"}</h4>
             </div>
             <pre>
               {isRefreshing
@@ -50,11 +53,22 @@ export function SessionTimeline({
               key={entry.id}
               className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}
             >
-              <div className="message-title-row">
-                <h4>{entry.title}</h4>
-                <time>{formatClock(entry.createdAt)}</time>
-              </div>
+              {entry.kind === "system" || entry.state === "running" ? (
+                <div
+                  className={`message-title-row ${
+                    isConversationEntry(entry) ? "message-title-row-conversation" : ""
+                  }`}
+                >
+                  <h4>{entry.kind === "system" ? entry.title : "Codex"}</h4>
+                  <time>{formatClock(entry.createdAt)}</time>
+                </div>
+              ) : null}
               {renderTimelineEntryBody(entry)}
+              {isConversationEntry(entry) && entry.state !== "running" ? (
+                <div className={`message-meta message-meta-${entry.kind}`}>
+                  <time>{formatClock(entry.createdAt)}</time>
+                </div>
+              ) : null}
             </article>
           ))
         )}
