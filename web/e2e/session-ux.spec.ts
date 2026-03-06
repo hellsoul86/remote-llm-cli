@@ -1793,6 +1793,23 @@ test("normalizeSessionEvent maps codexrpc agent message deltas into assistant st
   );
 });
 
+test("codex parser preserves whitespace in streaming deltas", async () => {
+  const stdout = [
+    JSON.stringify({
+      type: "item.agent_message.delta",
+      delta: "LIVE_LONG line 1\nLIVE_LONG line 2\n",
+    }),
+    JSON.stringify({
+      type: "item.agent_message.delta",
+      delta: "LIVE_LONG line 3",
+    }),
+  ].join("\n");
+
+  expect(parseCodexAssistantTextFromStdout(stdout, false)).toBe(
+    "LIVE_LONG line 1\nLIVE_LONG line 2\nLIVE_LONG line 3",
+  );
+});
+
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");

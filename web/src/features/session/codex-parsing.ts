@@ -85,16 +85,27 @@ export function extractRunIDFromCodexRPC(
   return extractTurnIDFromPayload(params);
 }
 
-function gatherMessageText(value: unknown, depth = 0): string[] {
+type GatherMessageTextOptions = {
+  preserveWhitespace?: boolean;
+};
+
+function gatherMessageText(
+  value: unknown,
+  depth = 0,
+  options?: GatherMessageTextOptions,
+): string[] {
   if (depth > 4) return [];
   if (typeof value === "string") {
+    if (options?.preserveWhitespace) {
+      return value === "" ? [] : [value];
+    }
     const trimmed = value.trim();
     return trimmed ? [trimmed] : [];
   }
   if (Array.isArray(value)) {
     const out: string[] = [];
     for (const item of value) {
-      out.push(...gatherMessageText(item, depth + 1));
+      out.push(...gatherMessageText(item, depth + 1, options));
     }
     return out;
   }
@@ -105,7 +116,7 @@ function gatherMessageText(value: unknown, depth = 0): string[] {
   const keys = ["text", "message", "content", "parts", "output_text"];
   for (const key of keys) {
     if (!(key in record)) continue;
-    out.push(...gatherMessageText(record[key], depth + 1));
+    out.push(...gatherMessageText(record[key], depth + 1, options));
   }
   return out;
 }
@@ -163,7 +174,9 @@ export function parseCodexAssistantTextFromStdout(
     if (!event) continue;
     const eventType = typeof event.type === "string" ? event.type : "";
     if (eventType.endsWith(".delta")) {
-      const deltaText = gatherMessageText(event.delta ?? event).join("");
+      const deltaText = gatherMessageText(event.delta ?? event, 0, {
+        preserveWhitespace: true,
+      }).join("");
       if (deltaText.trim()) {
         deltas.push(deltaText);
       }
