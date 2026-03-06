@@ -425,13 +425,13 @@ func (b *Bridge) callConnected(ctx context.Context, method string, params any, o
 	}
 
 	respCh := make(chan rpcResponse, 1)
-	proc, err := b.registerPending(id, respCh)
+	proc, connID, err := b.registerPending(id, respCh)
 	if err != nil {
 		return err
 	}
 	if err := b.writeLine(proc, payload); err != nil {
 		b.unregisterPending(id)
-		b.handleProcessDrop(b.currentConnID(), fmt.Errorf("write request: %w", err))
+		b.handleProcessDrop(connID, fmt.Errorf("write request: %w", err))
 		return err
 	}
 
@@ -462,7 +462,7 @@ func (b *Bridge) notifyConnected(ctx context.Context, method string, params any)
 	if err != nil {
 		return err
 	}
-	proc, err := b.currentProcess()
+	proc, connID, err := b.currentProcess()
 	if err != nil {
 		return err
 	}
@@ -475,23 +475,23 @@ func (b *Bridge) notifyConnected(ctx context.Context, method string, params any)
 		return ctx.Err()
 	case err := <-done:
 		if err != nil {
-			b.handleProcessDrop(b.currentConnID(), fmt.Errorf("write notification: %w", err))
+			b.handleProcessDrop(connID, fmt.Errorf("write notification: %w", err))
 		}
 		return err
 	}
 }
 
-func (b *Bridge) registerPending(id string, respCh chan rpcResponse) (bridgeProcess, error) {
+func (b *Bridge) registerPending(id string, respCh chan rpcResponse) (bridgeProcess, uint64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
-		return nil, ErrBridgeClosed
+		return nil, 0, ErrBridgeClosed
 	}
 	if b.proc == nil {
-		return nil, errors.New("bridge is not connected")
+		return nil, 0, errors.New("bridge is not connected")
 	}
 	b.pending[id] = respCh
-	return b.proc, nil
+	return b.proc, b.connID, nil
 }
 
 func (b *Bridge) unregisterPending(id string) {
@@ -500,22 +500,16 @@ func (b *Bridge) unregisterPending(id string) {
 	delete(b.pending, id)
 }
 
-func (b *Bridge) currentProcess() (bridgeProcess, error) {
+func (b *Bridge) currentProcess() (bridgeProcess, uint64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
-		return nil, ErrBridgeClosed
+		return nil, 0, ErrBridgeClosed
 	}
 	if b.proc == nil {
-		return nil, errors.New("bridge is not connected")
+		return nil, 0, errors.New("bridge is not connected")
 	}
-	return b.proc, nil
-}
-
-func (b *Bridge) currentConnID() uint64 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.connID
+	return b.proc, b.connID, nil
 }
 
 func (b *Bridge) writeLine(proc bridgeProcess, payload []byte) error {

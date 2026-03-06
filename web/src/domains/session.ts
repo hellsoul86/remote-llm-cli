@@ -221,10 +221,20 @@ function isLegacyConnectionNoiseEntry(entry: TimelineEntry): boolean {
   if (entry.kind !== "system") return false;
   const title = entry.title.trim().toLowerCase();
   const body = entry.body.trim();
-  if (title === "connected" && body.startsWith("Connected. hosts=")) {
+  const bodyLower = body.toLowerCase();
+  if (title === "connected" && bodyLower.startsWith("connected. hosts=")) {
     return true;
   }
   if (title === "connection failed") {
+    return true;
+  }
+  if (title === "server completed") {
+    return true;
+  }
+  if (
+    (title === "failed" || title === "system") &&
+    /\b(done status=|completed exit=|queue_depth=)/.test(bodyLower)
+  ) {
     return true;
   }
   return false;
