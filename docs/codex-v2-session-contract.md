@@ -12,6 +12,9 @@ Version: `v1` (contract freeze wave for issues #169/#170/#171).
 - Cursor progression is monotonic per session and replay-safe.
 - Event application in clients must be idempotent by `seq`.
 - Legacy `/v1/jobs/*` is out of session-mode scope.
+- Pinned upstream protocol artifacts live under `schema/codex-app-server-protocol/`.
+- Regenerate pinned artifacts with `make protocol-schema-sync`.
+- Validate pinned artifacts against the surface we use with `make protocol-schema-validate`.
 
 ## Authentication
 

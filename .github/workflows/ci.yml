@@ -56,6 +56,10 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Validate pinned Codex protocol schema
+        run: node ./scripts/validate-codex-app-server-schema.mjs
+        working-directory: .
+
       - name: Build
         run: npm run build
 

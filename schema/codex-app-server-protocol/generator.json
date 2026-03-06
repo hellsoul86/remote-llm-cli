@@ -1,0 +1,11 @@
+{
+  "generator": "codex app-server",
+  "codex_cli_version": "codex-cli 0.111.0",
+  "experimental": false,
+  "typescript_dir": "schema/codex-app-server-protocol/typescript",
+  "json_dir": "schema/codex-app-server-protocol/json",
+  "commands": [
+    "codex app-server generate-ts --out schema/codex-app-server-protocol/typescript",
+    "codex app-server generate-json-schema --out schema/codex-app-server-protocol/json"
+  ]
+}

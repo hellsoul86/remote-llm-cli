@@ -1,4 +1,4 @@
-.PHONY: server-test server-run server-run-with-runtimes key-create runtime-validate tui-run web-install web-dev web-build
+.PHONY: server-test server-run server-run-with-runtimes key-create runtime-validate tui-run web-install web-dev web-build protocol-schema-sync protocol-schema-validate
 
 server-test:
 	cd server && go test ./...
@@ -26,3 +26,9 @@ web-dev:
 
 web-build:
 	cd web && npm run build
+
+protocol-schema-sync:
+	./scripts/sync-codex-app-server-schema.sh
+
+protocol-schema-validate:
+	node ./scripts/validate-codex-app-server-schema.mjs

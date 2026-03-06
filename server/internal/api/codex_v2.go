@@ -1275,7 +1275,7 @@ func normalizeCodexSessionEvent(method string, params json.RawMessage, runID str
 		payload = map[string]any{}
 	}
 	switch normalizedMethod {
-	case "thread/started", "thread/updated", "thread/named":
+	case "thread/started", "thread/updated", "thread/named", "thread/name/updated":
 		title := extractCodexThreadTitle(payload)
 		if title == "" {
 			return "", nil
@@ -1300,11 +1300,23 @@ func extractCodexThreadTitle(payload map[string]any) string {
 	if title := strings.TrimSpace(asString(payload["title"])); title != "" {
 		return title
 	}
+	if title := strings.TrimSpace(asString(payload["threadName"])); title != "" {
+		return title
+	}
+	if title := strings.TrimSpace(asString(payload["thread_name"])); title != "" {
+		return title
+	}
 	threadObj, ok := payload["thread"].(map[string]any)
 	if !ok {
 		return ""
 	}
 	if title := strings.TrimSpace(asString(threadObj["title"])); title != "" {
+		return title
+	}
+	if title := strings.TrimSpace(asString(threadObj["threadName"])); title != "" {
+		return title
+	}
+	if title := strings.TrimSpace(asString(threadObj["thread_name"])); title != "" {
 		return title
 	}
 	if preview := strings.TrimSpace(asString(threadObj["preview"])); preview != "" {
