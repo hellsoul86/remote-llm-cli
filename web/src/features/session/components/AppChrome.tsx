@@ -1,68 +1,85 @@
 type AppChromeProps = {
   appMode: "session" | "ops";
-  onSwitchMode: (mode: "session" | "ops") => void;
   isRefreshing: boolean;
   healthIsError: boolean;
   health: string;
-  syncLabel: string;
   onRefreshWorkspace: () => Promise<void>;
+  onOpenUtilities: () => void;
+  onReturnToSession: () => void;
   onLogout: () => void;
 };
 
 export function AppChrome({
   appMode,
-  onSwitchMode,
   isRefreshing,
   healthIsError,
   health,
-  syncLabel,
   onRefreshWorkspace,
+  onOpenUtilities,
+  onReturnToSession,
   onLogout,
 }: AppChromeProps) {
+  const statusCopy = healthIsError
+    ? "Connection needs attention"
+    : appMode === "ops" && isRefreshing
+      ? "Syncing workspace"
+      : "";
+
   return (
     <>
-      <header className="app-topbar">
+      <header className={`app-topbar ${appMode === "ops" ? "app-topbar-utility" : ""}`}>
         <div className="topbar-title">
-          <p className="topbar-eyebrow">remote workspace</p>
-          <h1>Codex</h1>
+          <p className="topbar-context">{appMode === "ops" ? "secondary surfaces" : "workspace"}</p>
+          <h1>{appMode === "ops" ? "Utilities" : "Codex"}</h1>
         </div>
         <div className="topbar-controls">
-          <div className="mode-switch">
+          {statusCopy ? (
+            <span
+              className={`sync-pill ${isRefreshing ? "busy" : "error"}`}
+              role="status"
+              title={health}
+            >
+              {statusCopy}
+            </span>
+          ) : null}
+          {appMode === "ops" ? (
             <button
               type="button"
-              className={appMode === "session" ? "mode-btn active" : "mode-btn"}
-              onClick={() => onSwitchMode("session")}
+              className="ghost topbar-utility-btn"
+              onClick={onReturnToSession}
             >
-              Session
+              Back to Codex
             </button>
+          ) : (
             <button
               type="button"
-              className={appMode === "ops" ? "mode-btn active" : "mode-btn"}
-              onClick={() => onSwitchMode("ops")}
+              className="ghost topbar-utility-btn"
+              onClick={onOpenUtilities}
             >
-              Ops
+              Utilities
             </button>
-          </div>
-          <span
-            className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}
-          >
-            {syncLabel}
-          </span>
-          <button
-            onClick={() => void onRefreshWorkspace()}
-            disabled={isRefreshing}
-          >
-            {isRefreshing ? "Syncing..." : "Sync"}
-          </button>
-          <button className="ghost" onClick={onLogout}>
-            Logout
-          </button>
+          )}
+          {appMode === "ops" ? (
+            <>
+              <button
+                type="button"
+                className="ghost topbar-quiet-btn"
+                onClick={() => void onRefreshWorkspace()}
+                disabled={isRefreshing}
+              >
+                {isRefreshing ? "Refreshing..." : "Refresh"}
+              </button>
+              <button type="button" className="ghost topbar-quiet-btn" onClick={onLogout}>
+                Lock
+              </button>
+            </>
+          ) : null}
         </div>
       </header>
 
       {healthIsError ? (
-        <section className="workspace-alert">
-          Controller state degraded: {health}
+        <section className="workspace-alert" role="status">
+          Connection needs attention. Session sync may pause until the controller recovers.
         </section>
       ) : null}
     </>
