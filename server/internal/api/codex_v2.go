@@ -660,32 +660,53 @@ func (p codexV2SessionParams) ToMap(includeCwd bool) map[string]any {
 }
 
 func normalizeCodexV2Approval(v string) string {
+	trimmed := strings.TrimSpace(v)
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "untrusted":
 		return "untrusted"
 	case "on-failure", "onfailure":
-		return "onFailure"
+		return "on-failure"
 	case "on-request", "onrequest":
-		return "onRequest"
+		return "on-request"
+	case "reject":
+		return "reject"
 	case "never":
 		return "never"
 	case "unless-trusted", "unlesstrusted":
-		return "unlessTrusted"
+		return "unless-trusted"
 	default:
-		return strings.TrimSpace(v)
+		switch trimmed {
+		case "onFailure":
+			return "on-failure"
+		case "onRequest":
+			return "on-request"
+		case "unlessTrusted":
+			return "unless-trusted"
+		default:
+			return trimmed
+		}
 	}
 }
 
 func normalizeCodexV2Sandbox(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "read-only", "readonly":
-		return "readOnly"
+		return "read-only"
 	case "workspace-write", "workspacewrite":
-		return "workspaceWrite"
+		return "workspace-write"
 	case "danger-full-access", "dangerfullaccess":
-		return "dangerFullAccess"
+		return "danger-full-access"
 	default:
-		return strings.TrimSpace(v)
+		switch strings.TrimSpace(v) {
+		case "readOnly":
+			return "read-only"
+		case "workspaceWrite":
+			return "workspace-write"
+		case "dangerFullAccess":
+			return "danger-full-access"
+		default:
+			return strings.TrimSpace(v)
+		}
 	}
 }
 
@@ -1045,14 +1066,14 @@ func (s *Server) putCodexPendingRequest(record codexPendingRequest) {
 func (s *Server) listCodexPendingRequests(sessionID string) []codexPendingRequest {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return nil
+		return []codexPendingRequest{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneCodexPendingLocked(time.Now().UTC())
 	bySession := s.codexPending[sessionID]
 	if len(bySession) == 0 {
-		return nil
+		return []codexPendingRequest{}
 	}
 	out := make([]codexPendingRequest, 0, len(bySession))
 	for _, item := range bySession {
