@@ -143,6 +143,7 @@ async function mockSessionApi(
 
   type TurnState = {
     runID: string;
+    sessionID: string;
     phase:
       | "pending"
       | "waiting-request"
@@ -154,51 +155,39 @@ async function mockSessionApi(
   };
 
   const turnStates: TurnState[] = [];
-  const sessionOneEvents: Array<Record<string, unknown>> = [];
-  const sessionTwoEvents: Array<Record<string, unknown>> = [];
-  let sessionOneSeq = 0;
-  let sessionTwoSeq = 0;
+  const sessionEvents = new Map<string, Array<Record<string, unknown>>>();
+  const sessionSeq = new Map<string, number>();
 
   const sleep = (ms: number) =>
     new Promise<void>((resolve) => {
       setTimeout(resolve, ms);
     });
 
-  const nextSessionOneSeq = (): number => {
-    sessionOneSeq += 1;
-    return sessionOneSeq;
+  const ensureSessionEvents = (sessionID: string): Array<Record<string, unknown>> => {
+    let events = sessionEvents.get(sessionID);
+    if (!events) {
+      events = [];
+      sessionEvents.set(sessionID, events);
+    }
+    return events;
   };
 
-  const nextSessionTwoSeq = (): number => {
-    sessionTwoSeq += 1;
-    return sessionTwoSeq;
+  const nextSessionSeq = (sessionID: string): number => {
+    const next = (sessionSeq.get(sessionID) ?? 0) + 1;
+    sessionSeq.set(sessionID, next);
+    return next;
   };
 
-  const pushSessionOneEvent = (
+  const pushSessionEvent = (
+    sessionID: string,
     runID: string,
     type: string,
     payload: Record<string, unknown>,
     createdAt: string,
   ) => {
-    sessionOneEvents.push({
-      seq: nextSessionOneSeq(),
-      session_id: "session_cli_1",
-      run_id: runID,
-      type,
-      payload,
-      created_at: createdAt,
-    });
-  };
-
-  const pushSessionTwoEvent = (
-    runID: string,
-    type: string,
-    payload: Record<string, unknown>,
-    createdAt: string,
-  ) => {
-    sessionTwoEvents.push({
-      seq: nextSessionTwoSeq(),
-      session_id: "session_cli_2",
+    ensureSessionEvents(sessionID).push({
+      seq: nextSessionSeq(sessionID),
+      session_id: sessionID,
       run_id: runID,
       type,
       payload,
@@ -274,8 +263,15 @@ async function mockSessionApi(
 
   const appendTurnStartEvents = (turnState: TurnState) => {
     const startedAt = new Date().toISOString();
-    pushSessionOneEvent(turnState.runID, "run.started", { turn_id: turnState.runID }, startedAt);
-    pushSessionOneEvent(
+    pushSessionEvent(
+      turnState.sessionID,
+      turnState.runID,
+      "run.started",
+      { turn_id: turnState.runID },
+      startedAt,
+    );
+    pushSessionEvent(
+      turnState.sessionID,
       turnState.runID,
       "target.started",
       { host_name: "local-default", attempt: 1 },
@@ -290,7 +286,8 @@ async function mockSessionApi(
         Math.min(replyLines.length, Math.round(replyLines.length * ratio)),
       );
       const text = replyLines.slice(0, lineCount).join("\n");
-      pushSessionOneEvent(
+      pushSessionEvent(
+        turnState.sessionID,
         turnState.runID,
         "assistant.delta",
         { chunk: chunkFromText(text, index === 0) },
@@ -301,7 +298,8 @@ async function mockSessionApi(
 
   const appendTurnTerminalEvents = (turnState: TurnState) => {
     const finishedAt = new Date().toISOString();
-    pushSessionOneEvent(
+    pushSessionEvent(
+      turnState.sessionID,
       turnState.runID,
       "target.done",
       {
@@ -311,21 +309,24 @@ async function mockSessionApi(
       },
       finishedAt,
     );
-    pushSessionOneEvent(
+    pushSessionEvent(
+      turnState.sessionID,
       turnState.runID,
       "assistant.completed",
       { turn_id: turnState.runID },
       finishedAt,
     );
     if (titleUpdate) {
-      pushSessionOneEvent(
+      pushSessionEvent(
+        turnState.sessionID,
         turnState.runID,
         "session.title.updated",
         { title: titleUpdate },
         finishedAt,
       );
     }
-    pushSessionOneEvent(
+    pushSessionEvent(
+      turnState.sessionID,
       turnState.runID,
       "run.completed",
       { turn_id: turnState.runID },
@@ -333,15 +334,16 @@ async function mockSessionApi(
     );
   };
 
-  const materializeSessionOneEventsForStream = async () => {
+  const materializeSessionEventsForStream = async (sessionID: string) => {
     if (streamPattern !== "completion-once" && streamPattern !== "ready-only") {
       return;
     }
     const current = turnStates.find(
       (state) =>
-        state.phase === "pending" ||
-        state.phase === "waiting-request" ||
-        state.phase === "started",
+        state.sessionID === sessionID &&
+        (state.phase === "pending" ||
+          state.phase === "waiting-request" ||
+          state.phase === "started"),
     );
     if (!current) return;
 
@@ -382,10 +384,10 @@ async function mockSessionApi(
       '{"type":"turn.started"}\n' +
       `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: `background reply ${marker}` } })}\n`;
 
-    pushSessionTwoEvent(runID, "run.started", { turn_id: runID }, startedAt);
-    pushSessionTwoEvent(runID, "assistant.delta", { chunk: streamChunk }, startedAt);
-    pushSessionTwoEvent(runID, "assistant.completed", { turn_id: runID }, finishedAt);
-    pushSessionTwoEvent(runID, "run.completed", { turn_id: runID }, finishedAt);
+    pushSessionEvent("session_cli_2", runID, "run.started", { turn_id: runID }, startedAt);
+    pushSessionEvent("session_cli_2", runID, "assistant.delta", { chunk: streamChunk }, startedAt);
+    pushSessionEvent("session_cli_2", runID, "assistant.completed", { turn_id: runID }, finishedAt);
+    pushSessionEvent("session_cli_2", runID, "run.completed", { turn_id: runID }, finishedAt);
   };
 
   const buildSSEBody = (
@@ -922,6 +924,7 @@ async function mockSessionApi(
 
     sessionStartCounter += 1;
     const sessionID = `session_cli_new_${sessionStartCounter}`;
+    ensureSessionEvents(sessionID);
     sessions.push({
       id: sessionID,
       project_id: project.id,
@@ -1153,6 +1156,7 @@ async function mockSessionApi(
     const runID = `turn_${runReqCount}`;
     turnStates.push({
       runID,
+      sessionID,
       phase: "pending",
       remainingPolls: jobRunningPolls,
       pendingRequestID:
@@ -1182,7 +1186,8 @@ async function mockSessionApi(
     if (state && state.phase !== "completed" && state.phase !== "canceled") {
       state.phase = "canceled";
       state.remainingPolls = 0;
-      pushSessionOneEvent(
+      pushSessionEvent(
+        state.sessionID,
         runID,
         "run.canceled",
         { turn_id: runID },
@@ -1219,14 +1224,14 @@ async function mockSessionApi(
         });
         return;
       }
-      await materializeSessionOneEventsForStream();
+      await materializeSessionEventsForStream(sessionID);
       await route.fulfill({
         status: 200,
         headers: { "content-type": "text/event-stream" },
         body: buildSSEBody(
           sessionID,
           ignoreStreamAfterCursor ? 0 : safeStreamAfter,
-          sessionOneEvents,
+          ensureSessionEvents(sessionID),
         ),
       });
       return;
@@ -1234,18 +1239,21 @@ async function mockSessionApi(
 
     if (sessionID === "session_cli_2") {
       ensureSessionTwoBackgroundCompletion();
+      await materializeSessionEventsForStream(sessionID);
       await route.fulfill({
         status: 200,
         headers: { "content-type": "text/event-stream" },
-        body: buildSSEBody(sessionID, safeStreamAfter, sessionTwoEvents),
+        body: buildSSEBody(sessionID, safeStreamAfter, ensureSessionEvents(sessionID)),
       });
       return;
     }
 
+    await materializeSessionEventsForStream(sessionID);
+
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
-      body: buildSSEBody(sessionID, safeStreamAfter, []),
+      body: buildSSEBody(sessionID, safeStreamAfter, ensureSessionEvents(sessionID)),
     });
   });
 
@@ -2226,6 +2234,44 @@ test("fork session creates a branch session in project list", async ({ page }) =
     page.locator(".project-session-list .session-chip-tree", {
       hasText: /Fork · Session 1/,
     }),
+  ).toHaveCount(1);
+});
+
+test("new session stays active after remote session binding", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REMOTE_BIND_${Date.now()}`;
+  const harness = await mockSessionApi(page, `remote bind ${marker}`, marker, {
+    includeSecondSession: true,
+  });
+  await unlock(page);
+
+  const initialActive = page.locator(".session-chip-tree.active").first();
+  await expect(initialActive).toHaveAttribute("data-session-id", "session_cli_1");
+
+  await page.getByRole("button", { name: "New Session", exact: true }).click();
+
+  const draftActive = page.locator(".session-chip-tree.active").first();
+  const draftSessionID = (await draftActive.getAttribute("data-session-id")) ?? "";
+  expect(draftSessionID.startsWith("session_")).toBeTruthy();
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`keep the new remote session active ${marker}`);
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const remoteSession = page.locator(
+    '.session-chip-tree[data-session-id="session_cli_new_1"]',
+  );
+  await expect(remoteSession).toHaveCount(1);
+  await expect(remoteSession).toHaveClass(/active/);
+  await expect(
+    page.locator('.session-chip-tree[data-session-id="session_cli_1"].active'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".message.message-assistant pre", { hasText: marker }),
   ).toHaveCount(1);
 });
 
