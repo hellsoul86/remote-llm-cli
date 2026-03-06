@@ -1772,10 +1772,15 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   await composer.fill(
     Array.from({ length: 12 }, (_, index) => `line-${index + 1}`).join("\n"),
   );
-  const expandedHeight = await composer.evaluate((el) =>
-    Number.parseFloat(getComputedStyle(el).height),
-  );
-  expect(expandedHeight > initialHeight).toBeTruthy();
+  await expect
+    .poll(
+      () =>
+        composer.evaluate((el) => Number.parseFloat(getComputedStyle(el).height)),
+      {
+        message: "composer textarea should grow for multiline prompts",
+      },
+    )
+    .toBeGreaterThan(initialHeight);
 
   await composer.fill(`reply once with marker: ${marker}`);
   await composer.press("Enter");
