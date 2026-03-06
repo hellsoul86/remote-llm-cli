@@ -7,7 +7,6 @@ import {
 } from "react";
 import {
   API_BASE,
-  type CodexPlatformResult,
 } from "./api";
 import { useOpsDomain } from "./domains/ops";
 import {
@@ -19,14 +18,17 @@ import {
 } from "./domains/session";
 import { AppChrome } from "./features/session/components/AppChrome";
 import { CommandPalette } from "./features/session/components/CommandPalette";
-import { OpsControlSidebar } from "./features/session/components/OpsControlSidebar";
-import { OpsInspectPane } from "./features/session/components/OpsInspectPane";
+import { OpsStage } from "./features/session/components/OpsStage";
 import { SessionStage } from "./features/session/components/SessionStage";
 import { TokenGate } from "./features/session/components/TokenGate";
+import { buildOpsStageProps } from "./features/session/ops-stage-props";
+import { buildSessionComposerProps } from "./features/session/session-composer-props";
+import { buildSessionSidebarProps } from "./features/session/session-sidebar-props";
 import { useAppMode } from "./features/session/use-app-mode";
 import { useComposerAutoResize } from "./features/session/use-composer-autosize";
 import { useCompletedRuns } from "./features/session/use-completed-runs";
 import { useCommandPaletteController } from "./features/session/use-command-palette";
+import { useCodexPlatformController } from "./features/session/use-codex-platform-controller";
 import { useGlobalShortcuts } from "./features/session/use-global-shortcuts";
 import { useSessionAlerts } from "./features/session/use-session-alerts";
 import { useSessionEventCursor } from "./features/session/use-session-event-cursor";
@@ -40,7 +42,6 @@ import { useCodexPendingRequests } from "./features/session/use-codex-pending-re
 import { createProjectSourceActions } from "./features/session/project-source-actions";
 import { createHostActions } from "./features/session/host-actions";
 import { createOpsJobActions } from "./features/session/ops-job-actions";
-import { createPlatformActions } from "./features/session/platform-actions";
 import { createProjectActions } from "./features/session/project-actions";
 import { createComposerImageActions } from "./features/session/composer-image-actions";
 import { createSessionControlActions } from "./features/session/session-control-actions";
@@ -62,8 +63,6 @@ import {
   MAX_SESSION_STREAMS,
   TIMELINE_JUMP_COUNT_CAP,
   TIMELINE_STICK_GAP_PX,
-  type CodexPlatformCloudAction,
-  type CodexPlatformMCPAction,
 } from "./features/session/config";
 import {
   clearSessionRuntimePersistence,
@@ -114,36 +113,6 @@ export function App() {
   );
   const [authError, setAuthError] = useState("");
   const { appMode, switchMode } = useAppMode();
-  const [platformHostID, setPlatformHostID] = useState("");
-  const [platformBusySection, setPlatformBusySection] = useState<
-    "" | "login" | "mcp" | "cloud"
-  >("");
-  const [platformNotice, setPlatformNotice] = useState("");
-  const [platformLoginResult, setPlatformLoginResult] =
-    useState<CodexPlatformResult | null>(null);
-  const [platformMCPAction, setPlatformMCPAction] =
-    useState<CodexPlatformMCPAction>("list");
-  const [platformMCPName, setPlatformMCPName] = useState("");
-  const [platformMCPURL, setPlatformMCPURL] = useState("");
-  const [platformMCPCommand, setPlatformMCPCommand] = useState("");
-  const [platformMCPEnvCSV, setPlatformMCPEnvCSV] = useState("");
-  const [platformMCPBearerTokenEnvVar, setPlatformMCPBearerTokenEnvVar] =
-    useState("");
-  const [platformMCPScopeCSV, setPlatformMCPScopeCSV] = useState("");
-  const [platformMCPResult, setPlatformMCPResult] =
-    useState<CodexPlatformResult | null>(null);
-  const [platformCloudAction, setPlatformCloudAction] =
-    useState<CodexPlatformCloudAction>("list");
-  const [platformCloudTaskID, setPlatformCloudTaskID] = useState("");
-  const [platformCloudEnvID, setPlatformCloudEnvID] = useState("");
-  const [platformCloudQuery, setPlatformCloudQuery] = useState("");
-  const [platformCloudAttempts, setPlatformCloudAttempts] = useState("1");
-  const [platformCloudBranch, setPlatformCloudBranch] = useState("");
-  const [platformCloudLimit, setPlatformCloudLimit] = useState("20");
-  const [platformCloudCursor, setPlatformCloudCursor] = useState("");
-  const [platformCloudAttempt, setPlatformCloudAttempt] = useState("1");
-  const [platformCloudResult, setPlatformCloudResult] =
-    useState<CodexPlatformResult | null>(null);
 
   const ops = useOpsDomain();
   const session = useSessionDomain();
@@ -374,6 +343,8 @@ export function App() {
     [workspaces, activeThreadID],
   );
   const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
+  const activeWorkspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
+  const activeWorkspacePath = activeWorkspace?.path?.trim() ?? "";
   const sessionTreeHosts = useMemo<SessionTreeHost[]>(
     () => buildSessionTreeHosts(hosts, workspaces, activeWorkspaceID),
     [hosts, workspaces, activeWorkspaceID],
@@ -489,8 +460,8 @@ export function App() {
     disableFlagDraft,
     setDisableFlagDraft,
     addThreadDisableFlag,
-    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
-    activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
+    activeWorkspaceHostID,
+    activeWorkspacePath,
     hosts,
     setProjectComposerOpen,
     setProjectFormHostID,
@@ -669,10 +640,6 @@ export function App() {
       return text.includes(query);
     });
   }, [hosts, hostFilter]);
-  const platformHost = useMemo(
-    () => hosts.find((host) => host.id === platformHostID) ?? null,
-    [hosts, platformHostID],
-  );
 
   const filteredOpsRuns = useMemo(() => {
     if (opsRunStatusFilter === "all") return runs;
@@ -706,24 +673,6 @@ export function App() {
   const healthIsError = health.startsWith("error");
   const opsNoticeIsError = /fail|error|degraded/i.test(opsNotice);
   const syncLabel = isRefreshing ? "syncing" : "live";
-
-  useEffect(() => {
-    if (hosts.length === 0) {
-      if (platformHostID) {
-        setPlatformHostID("");
-      }
-      return;
-    }
-    if (platformHostID && hosts.some((host) => host.id === platformHostID)) {
-      return;
-    }
-    const workspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
-    if (workspaceHostID && hosts.some((host) => host.id === workspaceHostID)) {
-      setPlatformHostID(workspaceHostID);
-      return;
-    }
-    setPlatformHostID(hosts[0].id);
-  }, [hosts, activeWorkspace?.hostID, platformHostID]);
 
   useEffect(() => {
     tokenRef.current = token;
@@ -1137,8 +1086,8 @@ export function App() {
     authPhase,
     token,
     activeThread,
-    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
-    activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
+    activeWorkspaceHostID,
+    activeWorkspacePath,
     activeRuntimeName: activeRuntime?.name ?? selectedRuntime,
     hosts,
     cancelingThreadID,
@@ -1158,35 +1107,12 @@ export function App() {
     activeThreadBusy,
     onEditAndResend,
   });
-
-  const { onRunPlatformLogin, onRunPlatformMCP, onRunPlatformCloud } =
-    createPlatformActions({
-      authPhase,
-      token,
-      platformHostID,
-      platformHostName: platformHost?.name ?? "",
-      platformMCPAction,
-      platformMCPName,
-      platformMCPURL,
-      platformMCPCommand,
-      platformMCPEnvCSV,
-      platformMCPBearerTokenEnvVar,
-      platformMCPScopeCSV,
-      platformCloudAction,
-      platformCloudTaskID,
-      platformCloudEnvID,
-      platformCloudQuery,
-      platformCloudAttempts,
-      platformCloudBranch,
-      platformCloudLimit,
-      platformCloudCursor,
-      platformCloudAttempt,
-      setPlatformBusySection,
-      setPlatformNotice,
-      setPlatformLoginResult,
-      setPlatformMCPResult,
-      setPlatformCloudResult,
-    });
+  const { panelProps: platformPanelProps } = useCodexPlatformController({
+    authPhase,
+    token,
+    hosts,
+    activeWorkspaceHostID,
+  });
 
   const {
     onAddHost,
@@ -1251,6 +1177,174 @@ export function App() {
     );
   }
 
+  const sessionSidebarProps = buildSessionSidebarProps({
+    authReady: authPhase === "ready",
+    hasToken: token.trim() !== "",
+    hosts,
+    projectComposerOpen,
+    onOpenProjectComposer: openProjectComposer,
+    onCreateThread: createThreadAndFocus,
+    onCreateProject,
+    projectFormHostID,
+    setProjectFormHostID,
+    projectFormPath,
+    setProjectFormPath,
+    projectFormTitle,
+    setProjectFormTitle,
+    upsertingProjectID,
+    onCloseProjectComposer: closeProjectComposer,
+    projectFilter,
+    setProjectFilter,
+    sessionTreeHosts,
+    filteredSessionTreeHosts,
+    collapsedHostIDs,
+    onToggleHostCollapsed: toggleHostCollapsed,
+    activeWorkspaceID,
+    onSelectWorkspace: setActiveWorkspaceID,
+    onFocusComposer: focusComposerSoon,
+    onRenameProjectAsync: onRenameProject,
+    onArchiveProjectAsync: onArchiveProject,
+    deletingProjectID,
+    registerSessionButtonRef,
+    activeThreadID,
+    treeCursorSessionID,
+    setTreeCursorSessionID,
+    onActivateThread: activateThread,
+    onSetThreadPinned: setThreadPinned,
+    onSessionTreeKeyDown,
+    notificationPermission,
+    onEnableNotificationsAsync: onEnableNotifications,
+    setSessionAlertsExpanded,
+    sessionAlertsExpanded,
+    sessionAlerts,
+    onClearSessionAlerts: clearSessionAlerts,
+    onOpenSessionFromAlert: openSessionFromAlert,
+  });
+
+  const sessionComposerProps = buildSessionComposerProps({
+    formRef: composerFormRef,
+    promptInputRef,
+    composerDropActive,
+    onSubmit: onSendPrompt,
+    onDragEnter: onComposerDragEnter,
+    onDragOver: onComposerDragOver,
+    onDragLeave: onComposerDragLeave,
+    onDrop: onComposerDrop,
+    activeThreadStatusCopy,
+    activeThread,
+    activeThreadBusy,
+    activeThreadModelValue,
+    hasSessionModelChoices,
+    sessionModelChoices,
+    sessionModelDefault,
+    setThreadModel,
+    setThreadSandbox,
+    onForkActiveSession,
+    sessionAdvancedOpen,
+    setSessionAdvancedOpen,
+    approvalPolicyOptions: APPROVAL_POLICY_OPTIONS,
+    setThreadApprovalPolicy,
+    setThreadWebSearch,
+    setThreadProfile,
+    configFlagDraft,
+    onConfigFlagDraftChange: setConfigFlagDraft,
+    onConfigFlagDraftSubmit,
+    removeThreadConfigFlag,
+    enableFlagDraft,
+    onEnableFlagDraftChange: setEnableFlagDraft,
+    onEnableFlagDraftSubmit,
+    removeThreadEnableFlag,
+    disableFlagDraft,
+    onDisableFlagDraftChange: setDisableFlagDraft,
+    onDisableFlagDraftSubmit,
+    removeThreadDisableFlag,
+    addDirDraft,
+    onAddDirDraftChange: setAddDirDraft,
+    onAddDirDraftSubmit,
+    removeThreadAddDir,
+    setThreadSkipGitRepoCheck,
+    setThreadJSONOutput,
+    setThreadEphemeral,
+    pendingRequests: activePendingRequests,
+    pendingRequestsLoading,
+    pendingRequestsError,
+    resolvingPendingRequestID,
+    refreshPendingRequests,
+    resolvePendingRequest,
+    uploadingImage,
+    imageUploadError,
+    onUploadSessionImage,
+    removeThreadImagePath,
+    activeDraft,
+    updateThreadDraft,
+    onComposerPaste,
+    activeThreadRunID,
+    cancelingThreadID,
+    onStopActiveSessionRun,
+    hasRegeneratePrompt,
+    onRegenerateActiveSession,
+  });
+
+  const opsStageProps = buildOpsStageProps({
+    health,
+    allHosts,
+    onAllHostsChange: setAllHosts,
+    selectedHostCount,
+    hostFilter,
+    onHostFilterChange: setHostFilter,
+    hosts,
+    filteredHosts,
+    selectedHostIDs,
+    onToggleHostSelection: toggleHostSelection,
+    opsHostBusyID,
+    onProbeHost,
+    onStartEditHost,
+    onDeleteHost,
+    selectedRuntime,
+    onSelectedRuntimeChange: setSelectedRuntime,
+    runtimes,
+    runSandbox,
+    onRunSandboxChange: setRunSandbox,
+    runAsyncMode,
+    onRunAsyncModeChange: setRunAsyncMode,
+    metrics,
+    onRefreshWorkspace,
+    isRefreshing,
+    activeJob,
+    onCancelJob,
+    jobsLength: jobs.length,
+    runsLength: runs.length,
+    threadsLength: threads.length,
+    opsNotice,
+    opsNoticeIsError,
+    platformPanelProps,
+    activeJobThreadID,
+    activeProgress,
+    opsJobStatusFilter,
+    onOpsJobStatusFilterChange: setOpsJobStatusFilter,
+    opsJobTypeFilter,
+    onOpsJobTypeFilterChange: setOpsJobTypeFilter,
+    filteredOpsJobs,
+    onSelectActiveJob: (job) => {
+      setActiveJobID(job.id);
+      setActiveJob(job);
+    },
+    opsRunStatusFilter,
+    onOpsRunStatusFilterChange: setOpsRunStatusFilter,
+    filteredOpsRuns,
+    opsAuditMethodFilter,
+    onOpsAuditMethodFilterChange: setOpsAuditMethodFilter,
+    opsAuditStatusFilter,
+    onOpsAuditStatusFilterChange: setOpsAuditStatusFilter,
+    filteredAuditEvents,
+    editingHostID,
+    hostForm,
+    onHostFormChange: setHostForm,
+    addingHost,
+    onSubmit: onAddHost,
+    onCancelEdit: onCancelHostEdit,
+  });
+
   return (
     <div className="workspace-shell">
       <AppChrome
@@ -1266,56 +1360,7 @@ export function App() {
 
       {appMode === "session" ? (
         <SessionStage
-          sidebarProps={{
-            authReady: authPhase === "ready",
-            hasToken: token.trim() !== "",
-            hosts,
-            projectComposerOpen,
-            onOpenProjectComposer: openProjectComposer,
-            onCreateThread: createThreadAndFocus,
-            onCreateProject,
-            projectFormHostID,
-            setProjectFormHostID,
-            projectFormPath,
-            setProjectFormPath,
-            projectFormTitle,
-            setProjectFormTitle,
-            upsertingProjectID,
-            onCloseProjectComposer: closeProjectComposer,
-            projectFilter,
-            setProjectFilter,
-            sessionTreeHosts,
-            filteredSessionTreeHosts,
-            collapsedHostIDs,
-            onToggleHostCollapsed: toggleHostCollapsed,
-            activeWorkspaceID,
-            onSelectWorkspace: setActiveWorkspaceID,
-            onFocusComposer: focusComposerSoon,
-            onRenameProject: (projectNode) => {
-              void onRenameProject(projectNode);
-            },
-            onArchiveProject: (projectID, hostID, path, sessionCount) => {
-              void onArchiveProject(projectID, hostID, path, sessionCount);
-            },
-            deletingProjectID,
-            registerSessionButtonRef,
-            activeThreadID,
-            treeCursorSessionID,
-            setTreeCursorSessionID,
-            onActivateThread: activateThread,
-            onSetThreadPinned: setThreadPinned,
-            onSessionTreeKeyDown,
-            notificationPermission,
-            onEnableNotifications: () => {
-              void onEnableNotifications();
-            },
-            onToggleAlertsExpanded: () =>
-              setSessionAlertsExpanded((prev) => !prev),
-            sessionAlertsExpanded,
-            sessionAlerts,
-            onClearSessionAlerts: clearSessionAlerts,
-            onOpenSessionFromAlert: openSessionFromAlert,
-          }}
+          sidebarProps={sessionSidebarProps}
           headerProps={{
             title: activeThread?.title ?? "Session",
             context:
@@ -1344,247 +1389,10 @@ export function App() {
             timelineUnreadCount,
             onJumpTimelineToLatest: jumpTimelineToLatest,
           }}
-          composerProps={{
-            formRef: composerFormRef,
-            promptInputRef,
-            composerDropActive,
-            onSubmit: onSendPrompt,
-            onDragEnter: onComposerDragEnter,
-            onDragOver: onComposerDragOver,
-            onDragLeave: onComposerDragLeave,
-            onDrop: onComposerDrop,
-            activeThreadStatusCopy,
-            activeThread,
-            activeThreadBusy,
-            activeThreadModelValue,
-            hasSessionModelChoices,
-            sessionModelChoices,
-            sessionModelDefault,
-            onSetThreadModel: (modelName) => {
-              if (!activeThread) return;
-              setThreadModel(activeThread.id, modelName);
-            },
-            onSetThreadSandbox: (value) => {
-              if (!activeThread) return;
-              setThreadSandbox(activeThread.id, value);
-            },
-            onForkSession: () => {
-              void onForkActiveSession();
-            },
-            sessionAdvancedOpen,
-            onToggleSessionAdvanced: () =>
-              setSessionAdvancedOpen((prev) => !prev),
-            approvalPolicyOptions: APPROVAL_POLICY_OPTIONS,
-            onSetThreadApprovalPolicy: (value) => {
-              if (!activeThread) return;
-              setThreadApprovalPolicy(activeThread.id, value);
-            },
-            onSetThreadWebSearch: (next) => {
-              if (!activeThread) return;
-              setThreadWebSearch(activeThread.id, next);
-            },
-            onSetThreadProfile: (value) => {
-              if (!activeThread) return;
-              setThreadProfile(activeThread.id, value);
-            },
-            configFlagDraft,
-            onConfigFlagDraftChange: setConfigFlagDraft,
-            onConfigFlagDraftSubmit,
-            onRemoveConfigFlag: (value) => {
-              if (!activeThread) return;
-              removeThreadConfigFlag(activeThread.id, value);
-            },
-            enableFlagDraft,
-            onEnableFlagDraftChange: setEnableFlagDraft,
-            onEnableFlagDraftSubmit,
-            onRemoveEnableFlag: (value) => {
-              if (!activeThread) return;
-              removeThreadEnableFlag(activeThread.id, value);
-            },
-            disableFlagDraft,
-            onDisableFlagDraftChange: setDisableFlagDraft,
-            onDisableFlagDraftSubmit,
-            onRemoveDisableFlag: (value) => {
-              if (!activeThread) return;
-              removeThreadDisableFlag(activeThread.id, value);
-            },
-            addDirDraft,
-            onAddDirDraftChange: setAddDirDraft,
-            onAddDirDraftSubmit,
-            onRemoveAddDir: (value) => {
-              if (!activeThread) return;
-              removeThreadAddDir(activeThread.id, value);
-            },
-            onSetThreadSkipGitRepoCheck: (next) => {
-              if (!activeThread) return;
-              setThreadSkipGitRepoCheck(activeThread.id, next);
-            },
-            onSetThreadJSONOutput: (next) => {
-              if (!activeThread) return;
-              setThreadJSONOutput(activeThread.id, next);
-            },
-            onSetThreadEphemeral: (next) => {
-              if (!activeThread) return;
-              setThreadEphemeral(activeThread.id, next);
-            },
-            pendingRequests: activePendingRequests,
-            pendingRequestsLoading,
-            pendingRequestsError,
-            resolvingPendingRequestID,
-            onRefreshPendingRequests: () => {
-              void refreshPendingRequests();
-            },
-            onResolvePendingRequest: async (requestID, payload) => {
-              await resolvePendingRequest(requestID, payload);
-            },
-            uploadingImage,
-            imageUploadError,
-            onUploadImage: (file, threadID) => {
-              void onUploadSessionImage(file, threadID);
-            },
-            onRemoveImagePath: (imagePath) => {
-              if (!activeThread) return;
-              removeThreadImagePath(activeThread.id, imagePath);
-            },
-            activeDraft,
-            onDraftChange: (value) => {
-              if (!activeThread) return;
-              updateThreadDraft(activeThread.id, value);
-            },
-            onComposerPaste,
-            activeThreadRunID,
-            cancelingThreadID,
-            onStopRun: () => {
-              void onStopActiveSessionRun();
-            },
-            hasRegeneratePrompt,
-            onRegenerate: () => {
-              void onRegenerateActiveSession();
-            },
-          }}
+          composerProps={sessionComposerProps}
         />
       ) : (
-        <div className="ops-stage">
-          <OpsControlSidebar
-            health={health}
-            allHosts={allHosts}
-            onAllHostsChange={setAllHosts}
-            selectedHostCount={selectedHostCount}
-            hostFilter={hostFilter}
-            onHostFilterChange={setHostFilter}
-            hosts={hosts}
-            filteredHosts={filteredHosts}
-            selectedHostIDs={selectedHostIDs}
-            onToggleHostSelection={toggleHostSelection}
-            opsHostBusyID={opsHostBusyID}
-            onProbeHost={onProbeHost}
-            onStartEditHost={onStartEditHost}
-            onDeleteHost={onDeleteHost}
-            selectedRuntime={selectedRuntime}
-            onSelectedRuntimeChange={setSelectedRuntime}
-            runtimes={runtimes}
-            runSandbox={runSandbox}
-            onRunSandboxChange={setRunSandbox}
-            runAsyncMode={runAsyncMode}
-            onRunAsyncModeChange={setRunAsyncMode}
-            metrics={metrics}
-            onRefreshWorkspace={onRefreshWorkspace}
-            isRefreshing={isRefreshing}
-            activeJob={activeJob}
-            onCancelJob={onCancelJob}
-            jobsLength={jobs.length}
-            runsLength={runs.length}
-            threadsLength={threads.length}
-            opsNotice={opsNotice}
-            opsNoticeIsError={opsNoticeIsError}
-          />
-
-          <OpsInspectPane
-            isRefreshing={isRefreshing}
-            platformPanelProps={{
-              hosts,
-              platformHostID,
-              onPlatformHostChange: setPlatformHostID,
-              platformBusySection,
-              platformNotice,
-              onRunPlatformLogin,
-              platformLoginResult,
-              platformMCPAction,
-              onPlatformMCPActionChange: setPlatformMCPAction,
-              platformMCPName,
-              onPlatformMCPNameChange: setPlatformMCPName,
-              platformMCPURL,
-              onPlatformMCPURLChange: setPlatformMCPURL,
-              platformMCPCommand,
-              onPlatformMCPCommandChange: setPlatformMCPCommand,
-              platformMCPEnvCSV,
-              onPlatformMCPEnvCSVChange: setPlatformMCPEnvCSV,
-              platformMCPBearerTokenEnvVar,
-              onPlatformMCPBearerTokenEnvVarChange: setPlatformMCPBearerTokenEnvVar,
-              platformMCPScopeCSV,
-              onPlatformMCPScopeCSVChange: setPlatformMCPScopeCSV,
-              onRunPlatformMCP,
-              platformMCPResult,
-              platformCloudAction,
-              onPlatformCloudActionChange: setPlatformCloudAction,
-              platformCloudTaskID,
-              onPlatformCloudTaskIDChange: setPlatformCloudTaskID,
-              platformCloudEnvID,
-              onPlatformCloudEnvIDChange: setPlatformCloudEnvID,
-              platformCloudQuery,
-              onPlatformCloudQueryChange: setPlatformCloudQuery,
-              platformCloudAttempts,
-              onPlatformCloudAttemptsChange: setPlatformCloudAttempts,
-              platformCloudBranch,
-              onPlatformCloudBranchChange: setPlatformCloudBranch,
-              platformCloudLimit,
-              onPlatformCloudLimitChange: setPlatformCloudLimit,
-              platformCloudCursor,
-              onPlatformCloudCursorChange: setPlatformCloudCursor,
-              platformCloudAttempt,
-              onPlatformCloudAttemptChange: setPlatformCloudAttempt,
-              onRunPlatformCloud,
-              platformCloudResult,
-            }}
-            activeJobPanelProps={{
-              activeJob,
-              activeJobThreadID,
-              activeProgress,
-            }}
-            recentJobsPanelProps={{
-              opsJobStatusFilter,
-              onOpsJobStatusFilterChange: setOpsJobStatusFilter,
-              opsJobTypeFilter,
-              onOpsJobTypeFilterChange: setOpsJobTypeFilter,
-              filteredOpsJobs,
-              onSelectActiveJob: (job) => {
-                setActiveJobID(job.id);
-                setActiveJob(job);
-              },
-              onCancelJob,
-            }}
-            recentRunsPanelProps={{
-              opsRunStatusFilter,
-              onOpsRunStatusFilterChange: setOpsRunStatusFilter,
-              filteredOpsRuns,
-            }}
-            auditTimelinePanelProps={{
-              opsAuditMethodFilter,
-              onOpsAuditMethodFilterChange: setOpsAuditMethodFilter,
-              opsAuditStatusFilter,
-              onOpsAuditStatusFilterChange: setOpsAuditStatusFilter,
-              filteredAuditEvents,
-            }}
-            hostFormPanelProps={{
-              editingHostID,
-              hostForm,
-              onHostFormChange: setHostForm,
-              addingHost,
-              onSubmit: onAddHost,
-              onCancelEdit: onCancelHostEdit,
-            }}
-          />
-        </div>
+        <OpsStage {...opsStageProps} />
       )}
 
       <CommandPalette
