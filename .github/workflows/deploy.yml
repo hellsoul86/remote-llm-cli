@@ -302,22 +302,28 @@ jobs:
           exit 1
 
       - name: Smoke authenticated API
-        if: ${{ secrets.SMOKE_ACCESS_TOKEN != '' }}
         env:
           API_BASE: ${{ env.SMOKE_API_BASE_EFFECTIVE }}
           SMOKE_ACCESS_TOKEN: ${{ secrets.SMOKE_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "${SMOKE_ACCESS_TOKEN:-}" ]; then
+            echo "SMOKE_ACCESS_TOKEN not set; skip authenticated smoke"
+            exit 0
+          fi
           curl -fsS \
             -H "Authorization: Bearer ${SMOKE_ACCESS_TOKEN}" \
             "${API_BASE%/}/v1/projects" | jq -e 'type == "array"' >/dev/null
 
       - name: Smoke web shell
-        if: ${{ vars.SMOKE_WEB_BASE != '' }}
         env:
-          WEB_BASE: ${{ vars.SMOKE_WEB_BASE }}
+          WEB_BASE: ${{ env.SMOKE_WEB_BASE_EFFECTIVE }}
         run: |
           set -euo pipefail
+          if [ -z "${WEB_BASE:-}" ]; then
+            echo "SMOKE_WEB_BASE not set; skip web shell smoke"
+            exit 0
+          fi
           body="$(mktemp)"
           status="$(curl -sS -L -o "${body}" -w "%{http_code}" "${WEB_BASE}")"
           if [ "${status}" != "200" ]; then
