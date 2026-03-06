@@ -1,5 +1,8 @@
 # Codex Native UX Contract v1
 
+Superseded for new work by [codex-native-ux-contract-v2.md](/tmp/rlm-192-native-ux-reset/docs/codex-native-ux-contract-v2.md).
+Use v1 only as historical context for the first session-first parity wave.
+
 ## Goal
 
 Ship a native-grade Codex app experience in WebCLI with a strict session-first UI:
