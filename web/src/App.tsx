@@ -19,11 +19,8 @@ import {
 } from "./domains/session";
 import { CommandPalette } from "./features/session/components/CommandPalette";
 import { OpsControlSidebar } from "./features/session/components/OpsControlSidebar";
-import { SessionComposer } from "./features/session/components/SessionComposer";
-import { SessionHeader } from "./features/session/components/SessionHeader";
 import { OpsInspectPane } from "./features/session/components/OpsInspectPane";
-import { SessionSidebar } from "./features/session/components/SessionSidebar";
-import { SessionTimeline } from "./features/session/components/SessionTimeline";
+import { SessionStage } from "./features/session/components/SessionStage";
 import { TokenGate } from "./features/session/components/TokenGate";
 import { useAppMode } from "./features/session/use-app-mode";
 import { useComposerAutoResize } from "./features/session/use-composer-autosize";
@@ -38,6 +35,7 @@ import { useSessionRuntimeEffects } from "./features/session/use-session-runtime
 import { useSessionStreamHealth } from "./features/session/use-session-stream-health";
 import { useTimelineEntryBody } from "./features/session/use-timeline-entry-body";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
+import { useCodexPendingRequests } from "./features/session/use-codex-pending-requests";
 import { createProjectSourceActions } from "./features/session/project-source-actions";
 import { createHostActions } from "./features/session/host-actions";
 import { createOpsJobActions } from "./features/session/ops-job-actions";
@@ -96,6 +94,7 @@ import {
   isJobActive,
   lastUserPromptFromTimeline,
 } from "./features/session/runtime-utils";
+import { pendingRequestsStatusCopy } from "./features/session/pending-request-utils";
 import {
   streamHealthCopy,
   streamHealthTone,
@@ -400,17 +399,33 @@ export function App() {
     (activeThread ? submittingThreadID === activeThread.id : false) ||
     (activeThread ? deletingThreadID === activeThread.id : false) ||
     (activeThread ? cancelingThreadID === activeThread.id : false);
+  const {
+    activeRequests: activePendingRequests,
+    loading: pendingRequestsLoading,
+    error: pendingRequestsError,
+    resolvingRequestID: resolvingPendingRequestID,
+    refreshPendingRequests,
+    resolvePendingRequest,
+  } = useCodexPendingRequests({
+    authReady: authPhase === "ready",
+    token,
+    sessionID: activeThreadID,
+    watchFast: activeThreadBusy,
+  });
   const activeThreadRunID = activeThread?.activeJobID.trim() ?? "";
   const hasRegeneratePrompt =
     activeThread !== null &&
     lastUserPromptFromTimeline(activeThread.timeline).trim() !== "";
-  const activeThreadStatusCopy = activeThreadBusy
-    ? "Codex is thinking..."
-    : activeThread?.lastJobStatus === "failed"
-      ? "Last response failed."
-      : activeThread?.lastJobStatus === "canceled"
-        ? "Last response interrupted."
-        : "";
+  const pendingRequestCopy = pendingRequestsStatusCopy(activePendingRequests);
+  const activeThreadStatusCopy = pendingRequestCopy
+    ? pendingRequestCopy
+    : activeThreadBusy
+      ? "Codex is thinking..."
+      : activeThread?.lastJobStatus === "failed"
+        ? "Last response failed."
+        : activeThread?.lastJobStatus === "canceled"
+          ? "Last response interrupted."
+          : "";
   const activeStreamState: SessionStreamHealthState = activeSessionStreamHealth
     ? activeSessionStreamHealth.state
     : activeThreadID
@@ -1283,197 +1298,204 @@ export function App() {
       ) : null}
 
       {appMode === "session" ? (
-        <div className="session-stage">
-          <SessionSidebar
-            authReady={authPhase === "ready"}
-            hasToken={token.trim() !== ""}
-            hosts={hosts}
-            projectComposerOpen={projectComposerOpen}
-            onOpenProjectComposer={openProjectComposer}
-            onCreateThread={createThreadAndFocus}
-            onCreateProject={onCreateProject}
-            projectFormHostID={projectFormHostID}
-            setProjectFormHostID={setProjectFormHostID}
-            projectFormPath={projectFormPath}
-            setProjectFormPath={setProjectFormPath}
-            projectFormTitle={projectFormTitle}
-            setProjectFormTitle={setProjectFormTitle}
-            upsertingProjectID={upsertingProjectID}
-            onCloseProjectComposer={closeProjectComposer}
-            projectFilter={projectFilter}
-            setProjectFilter={setProjectFilter}
-            sessionTreeHosts={sessionTreeHosts}
-            filteredSessionTreeHosts={filteredSessionTreeHosts}
-            collapsedHostIDs={collapsedHostIDs}
-            onToggleHostCollapsed={toggleHostCollapsed}
-            activeWorkspaceID={activeWorkspaceID}
-            onSelectWorkspace={setActiveWorkspaceID}
-            onFocusComposer={focusComposerSoon}
-            onRenameProject={(projectNode) => {
+        <SessionStage
+          sidebarProps={{
+            authReady: authPhase === "ready",
+            hasToken: token.trim() !== "",
+            hosts,
+            projectComposerOpen,
+            onOpenProjectComposer: openProjectComposer,
+            onCreateThread: createThreadAndFocus,
+            onCreateProject,
+            projectFormHostID,
+            setProjectFormHostID,
+            projectFormPath,
+            setProjectFormPath,
+            projectFormTitle,
+            setProjectFormTitle,
+            upsertingProjectID,
+            onCloseProjectComposer: closeProjectComposer,
+            projectFilter,
+            setProjectFilter,
+            sessionTreeHosts,
+            filteredSessionTreeHosts,
+            collapsedHostIDs,
+            onToggleHostCollapsed: toggleHostCollapsed,
+            activeWorkspaceID,
+            onSelectWorkspace: setActiveWorkspaceID,
+            onFocusComposer: focusComposerSoon,
+            onRenameProject: (projectNode) => {
               void onRenameProject(projectNode);
-            }}
-            onArchiveProject={(projectID, hostID, path, sessionCount) => {
+            },
+            onArchiveProject: (projectID, hostID, path, sessionCount) => {
               void onArchiveProject(projectID, hostID, path, sessionCount);
-            }}
-            deletingProjectID={deletingProjectID}
-            registerSessionButtonRef={registerSessionButtonRef}
-            activeThreadID={activeThreadID}
-            treeCursorSessionID={treeCursorSessionID}
-            setTreeCursorSessionID={setTreeCursorSessionID}
-            onActivateThread={activateThread}
-            onSetThreadPinned={setThreadPinned}
-            onSessionTreeKeyDown={onSessionTreeKeyDown}
-            notificationPermission={notificationPermission}
-            onEnableNotifications={() => {
+            },
+            deletingProjectID,
+            registerSessionButtonRef,
+            activeThreadID,
+            treeCursorSessionID,
+            setTreeCursorSessionID,
+            onActivateThread: activateThread,
+            onSetThreadPinned: setThreadPinned,
+            onSessionTreeKeyDown,
+            notificationPermission,
+            onEnableNotifications: () => {
               void onEnableNotifications();
-            }}
-            onToggleAlertsExpanded={() =>
-              setSessionAlertsExpanded((prev) => !prev)}
-            sessionAlertsExpanded={sessionAlertsExpanded}
-            sessionAlerts={sessionAlerts}
-            onClearSessionAlerts={clearSessionAlerts}
-            onOpenSessionFromAlert={openSessionFromAlert}
-          />
-          <main className="chat-pane">
-            <SessionHeader
-              title={activeThread?.title ?? "Session"}
-              context={
-                (activeWorkspace?.hostName?.trim() || "local-default") +
-                " · " +
-                (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH)
-              }
-              streamTone={activeStreamTone}
-              streamCopy={activeStreamCopy}
-              streamLastError={activeStreamLastError}
-              canArchive={Boolean(activeThread) && !activeThreadBusy}
-              archiving={Boolean(activeThread && deletingThreadID === activeThread.id)}
-              onArchive={() => {
-                void onArchiveActiveSession();
-              }}
-              canReconnect={canReconnectActiveStream}
-              onReconnect={onReconnectActiveStream}
-            />
-            <SessionTimeline
-              timeline={activeTimeline}
-              isRefreshing={isRefreshing}
-              renderTimelineEntryBody={renderTimelineEntryBody}
-              formatClock={formatClock}
-              timelineViewportRef={timelineViewportRef}
-              timelineBottomRef={timelineBottomRef}
-              onTimelineScroll={onTimelineScroll}
-              timelineUnreadCount={timelineUnreadCount}
-              onJumpTimelineToLatest={jumpTimelineToLatest}
-            />
-            <SessionComposer
-              formRef={composerFormRef}
-              promptInputRef={promptInputRef}
-              composerDropActive={composerDropActive}
-              onSubmit={onSendPrompt}
-              onDragEnter={onComposerDragEnter}
-              onDragOver={onComposerDragOver}
-              onDragLeave={onComposerDragLeave}
-              onDrop={onComposerDrop}
-              activeThreadStatusCopy={activeThreadStatusCopy}
-              activeThread={activeThread}
-              activeThreadBusy={activeThreadBusy}
-              activeThreadModelValue={activeThreadModelValue}
-              hasSessionModelChoices={hasSessionModelChoices}
-              sessionModelChoices={sessionModelChoices}
-              sessionModelDefault={sessionModelDefault}
-              onSetThreadModel={(modelName) => {
-                if (!activeThread) return;
-                setThreadModel(activeThread.id, modelName);
-              }}
-              onSetThreadSandbox={(value) => {
-                if (!activeThread) return;
-                setThreadSandbox(activeThread.id, value);
-              }}
-              onForkSession={() => {
-                void onForkActiveSession();
-              }}
-              sessionAdvancedOpen={sessionAdvancedOpen}
-              onToggleSessionAdvanced={() =>
-                setSessionAdvancedOpen((prev) => !prev)}
-              approvalPolicyOptions={APPROVAL_POLICY_OPTIONS}
-              onSetThreadApprovalPolicy={(value) => {
-                if (!activeThread) return;
-                setThreadApprovalPolicy(activeThread.id, value);
-              }}
-              onSetThreadWebSearch={(next) => {
-                if (!activeThread) return;
-                setThreadWebSearch(activeThread.id, next);
-              }}
-              onSetThreadProfile={(value) => {
-                if (!activeThread) return;
-                setThreadProfile(activeThread.id, value);
-              }}
-              configFlagDraft={configFlagDraft}
-              onConfigFlagDraftChange={setConfigFlagDraft}
-              onConfigFlagDraftSubmit={onConfigFlagDraftSubmit}
-              onRemoveConfigFlag={(value) => {
-                if (!activeThread) return;
-                removeThreadConfigFlag(activeThread.id, value);
-              }}
-              enableFlagDraft={enableFlagDraft}
-              onEnableFlagDraftChange={setEnableFlagDraft}
-              onEnableFlagDraftSubmit={onEnableFlagDraftSubmit}
-              onRemoveEnableFlag={(value) => {
-                if (!activeThread) return;
-                removeThreadEnableFlag(activeThread.id, value);
-              }}
-              disableFlagDraft={disableFlagDraft}
-              onDisableFlagDraftChange={setDisableFlagDraft}
-              onDisableFlagDraftSubmit={onDisableFlagDraftSubmit}
-              onRemoveDisableFlag={(value) => {
-                if (!activeThread) return;
-                removeThreadDisableFlag(activeThread.id, value);
-              }}
-              addDirDraft={addDirDraft}
-              onAddDirDraftChange={setAddDirDraft}
-              onAddDirDraftSubmit={onAddDirDraftSubmit}
-              onRemoveAddDir={(value) => {
-                if (!activeThread) return;
-                removeThreadAddDir(activeThread.id, value);
-              }}
-              onSetThreadSkipGitRepoCheck={(next) => {
-                if (!activeThread) return;
-                setThreadSkipGitRepoCheck(activeThread.id, next);
-              }}
-              onSetThreadJSONOutput={(next) => {
-                if (!activeThread) return;
-                setThreadJSONOutput(activeThread.id, next);
-              }}
-              onSetThreadEphemeral={(next) => {
-                if (!activeThread) return;
-                setThreadEphemeral(activeThread.id, next);
-              }}
-              uploadingImage={uploadingImage}
-              imageUploadError={imageUploadError}
-              onUploadImage={(file, threadID) => {
-                void onUploadSessionImage(file, threadID);
-              }}
-              onRemoveImagePath={(imagePath) => {
-                if (!activeThread) return;
-                removeThreadImagePath(activeThread.id, imagePath);
-              }}
-              activeDraft={activeDraft}
-              onDraftChange={(value) => {
-                if (!activeThread) return;
-                updateThreadDraft(activeThread.id, value);
-              }}
-              onComposerPaste={onComposerPaste}
-              activeThreadRunID={activeThreadRunID}
-              cancelingThreadID={cancelingThreadID}
-              onStopRun={() => {
-                void onStopActiveSessionRun();
-              }}
-              hasRegeneratePrompt={hasRegeneratePrompt}
-              onRegenerate={() => {
-                void onRegenerateActiveSession();
-              }}
-            />
-          </main>
-        </div>
+            },
+            onToggleAlertsExpanded: () =>
+              setSessionAlertsExpanded((prev) => !prev),
+            sessionAlertsExpanded,
+            sessionAlerts,
+            onClearSessionAlerts: clearSessionAlerts,
+            onOpenSessionFromAlert: openSessionFromAlert,
+          }}
+          headerProps={{
+            title: activeThread?.title ?? "Session",
+            context:
+              (activeWorkspace?.hostName?.trim() || "local-default") +
+              " · " +
+              (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH),
+            streamTone: activeStreamTone,
+            streamCopy: activeStreamCopy,
+            streamLastError: activeStreamLastError,
+            canArchive: Boolean(activeThread) && !activeThreadBusy,
+            archiving: Boolean(activeThread && deletingThreadID === activeThread.id),
+            onArchive: () => {
+              void onArchiveActiveSession();
+            },
+            canReconnect: canReconnectActiveStream,
+            onReconnect: onReconnectActiveStream,
+          }}
+          timelineProps={{
+            timeline: activeTimeline,
+            isRefreshing,
+            renderTimelineEntryBody,
+            formatClock,
+            timelineViewportRef,
+            timelineBottomRef,
+            onTimelineScroll,
+            timelineUnreadCount,
+            onJumpTimelineToLatest: jumpTimelineToLatest,
+          }}
+          composerProps={{
+            formRef: composerFormRef,
+            promptInputRef,
+            composerDropActive,
+            onSubmit: onSendPrompt,
+            onDragEnter: onComposerDragEnter,
+            onDragOver: onComposerDragOver,
+            onDragLeave: onComposerDragLeave,
+            onDrop: onComposerDrop,
+            activeThreadStatusCopy,
+            activeThread,
+            activeThreadBusy,
+            activeThreadModelValue,
+            hasSessionModelChoices,
+            sessionModelChoices,
+            sessionModelDefault,
+            onSetThreadModel: (modelName) => {
+              if (!activeThread) return;
+              setThreadModel(activeThread.id, modelName);
+            },
+            onSetThreadSandbox: (value) => {
+              if (!activeThread) return;
+              setThreadSandbox(activeThread.id, value);
+            },
+            onForkSession: () => {
+              void onForkActiveSession();
+            },
+            sessionAdvancedOpen,
+            onToggleSessionAdvanced: () =>
+              setSessionAdvancedOpen((prev) => !prev),
+            approvalPolicyOptions: APPROVAL_POLICY_OPTIONS,
+            onSetThreadApprovalPolicy: (value) => {
+              if (!activeThread) return;
+              setThreadApprovalPolicy(activeThread.id, value);
+            },
+            onSetThreadWebSearch: (next) => {
+              if (!activeThread) return;
+              setThreadWebSearch(activeThread.id, next);
+            },
+            onSetThreadProfile: (value) => {
+              if (!activeThread) return;
+              setThreadProfile(activeThread.id, value);
+            },
+            configFlagDraft,
+            onConfigFlagDraftChange: setConfigFlagDraft,
+            onConfigFlagDraftSubmit,
+            onRemoveConfigFlag: (value) => {
+              if (!activeThread) return;
+              removeThreadConfigFlag(activeThread.id, value);
+            },
+            enableFlagDraft,
+            onEnableFlagDraftChange: setEnableFlagDraft,
+            onEnableFlagDraftSubmit,
+            onRemoveEnableFlag: (value) => {
+              if (!activeThread) return;
+              removeThreadEnableFlag(activeThread.id, value);
+            },
+            disableFlagDraft,
+            onDisableFlagDraftChange: setDisableFlagDraft,
+            onDisableFlagDraftSubmit,
+            onRemoveDisableFlag: (value) => {
+              if (!activeThread) return;
+              removeThreadDisableFlag(activeThread.id, value);
+            },
+            addDirDraft,
+            onAddDirDraftChange: setAddDirDraft,
+            onAddDirDraftSubmit,
+            onRemoveAddDir: (value) => {
+              if (!activeThread) return;
+              removeThreadAddDir(activeThread.id, value);
+            },
+            onSetThreadSkipGitRepoCheck: (next) => {
+              if (!activeThread) return;
+              setThreadSkipGitRepoCheck(activeThread.id, next);
+            },
+            onSetThreadJSONOutput: (next) => {
+              if (!activeThread) return;
+              setThreadJSONOutput(activeThread.id, next);
+            },
+            onSetThreadEphemeral: (next) => {
+              if (!activeThread) return;
+              setThreadEphemeral(activeThread.id, next);
+            },
+            pendingRequests: activePendingRequests,
+            pendingRequestsLoading,
+            pendingRequestsError,
+            resolvingPendingRequestID,
+            onRefreshPendingRequests: () => {
+              void refreshPendingRequests();
+            },
+            onResolvePendingRequest: async (requestID, payload) => {
+              await resolvePendingRequest(requestID, payload);
+            },
+            uploadingImage,
+            imageUploadError,
+            onUploadImage: (file, threadID) => {
+              void onUploadSessionImage(file, threadID);
+            },
+            onRemoveImagePath: (imagePath) => {
+              if (!activeThread) return;
+              removeThreadImagePath(activeThread.id, imagePath);
+            },
+            activeDraft,
+            onDraftChange: (value) => {
+              if (!activeThread) return;
+              updateThreadDraft(activeThread.id, value);
+            },
+            onComposerPaste,
+            activeThreadRunID,
+            cancelingThreadID,
+            onStopRun: () => {
+              void onStopActiveSessionRun();
+            },
+            hasRegeneratePrompt,
+            onRegenerate: () => {
+              void onRegenerateActiveSession();
+            },
+          }}
+        />
       ) : (
         <div className="ops-stage">
           <OpsControlSidebar

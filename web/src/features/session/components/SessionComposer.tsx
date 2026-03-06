@@ -5,6 +5,8 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MutableRefObject,
 } from "react";
+import { type CodexV2PendingRequest } from "../../../api";
+import { SessionPendingRequests } from "./SessionPendingRequests";
 
 import {
   type CodexApprovalPolicy,
@@ -57,6 +59,19 @@ type SessionComposerProps = {
   onSetThreadSkipGitRepoCheck: (next: boolean) => void;
   onSetThreadJSONOutput: (next: boolean) => void;
   onSetThreadEphemeral: (next: boolean) => void;
+  pendingRequests: CodexV2PendingRequest[];
+  pendingRequestsLoading: boolean;
+  pendingRequestsError: string;
+  resolvingPendingRequestID: string;
+  onRefreshPendingRequests: () => void;
+  onResolvePendingRequest: (
+    requestID: string,
+    payload: {
+      decision?: unknown;
+      result?: unknown;
+      error?: { code: number; message: string; data?: unknown };
+    },
+  ) => Promise<void>;
   uploadingImage: boolean;
   imageUploadError: string;
   onUploadImage: (file: File, threadID: string) => void;
@@ -115,6 +130,12 @@ export function SessionComposer({
   onSetThreadSkipGitRepoCheck,
   onSetThreadJSONOutput,
   onSetThreadEphemeral,
+  pendingRequests,
+  pendingRequestsLoading,
+  pendingRequestsError,
+  resolvingPendingRequestID,
+  onRefreshPendingRequests,
+  onResolvePendingRequest,
   uploadingImage,
   imageUploadError,
   onUploadImage,
@@ -159,6 +180,14 @@ export function SessionComposer({
           Drop image to attach.
         </p>
       ) : null}
+      <SessionPendingRequests
+        requests={pendingRequests}
+        loading={pendingRequestsLoading}
+        error={pendingRequestsError}
+        resolvingRequestID={resolvingPendingRequestID}
+        onRefresh={onRefreshPendingRequests}
+        onResolve={onResolvePendingRequest}
+      />
 
       <div className="session-inline-settings">
         <label className="session-setting-row">

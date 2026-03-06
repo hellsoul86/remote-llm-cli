@@ -1027,6 +1027,33 @@ export async function listCodexV2PendingRequests(
   return body.requests as CodexV2PendingRequest[];
 }
 
+export async function resolveCodexV2PendingRequest(
+  token: string,
+  sessionID: string,
+  requestID: string,
+  request: {
+    decision?: unknown;
+    result?: unknown;
+    error?: { code: number; message: string; data?: unknown };
+  },
+): Promise<{ resolved: boolean; session_id: string; request_id: string }> {
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/requests/${encodeURIComponent(requestID)}/resolve`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request),
+    },
+  );
+  const body = await res.json();
+  if (!res.ok || body?.resolved !== true) {
+    throw new Error(
+      `resolve codex v2 pending request failed: ${res.status} ${JSON.stringify(body)}`,
+    );
+  }
+  return body as { resolved: boolean; session_id: string; request_id: string };
+}
+
 type StreamSessionEventsOptions = {
   after?: number;
   signal: AbortSignal;
