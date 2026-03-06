@@ -381,6 +381,8 @@ export function useSessionDomain() {
   const [activeJobThreadID, setActiveJobThreadID] = useState(initialThread?.id ?? "");
 
   const completedJobsRef = useRef<Set<string>>(new Set());
+  const workspacesRef = useRef<WorkspaceDirectory[]>(initial.workspaces);
+  const activeWorkspaceIDRef = useRef<string>(initial.activeWorkspaceID);
   const entryCounter = useRef(0);
   const sessionCounterRef = useRef(Math.max(1, initial.workspaces.reduce((sum, workspace) => sum + workspace.sessions.length, 0)));
   const workspaceCounterRef = useRef(Math.max(1, initial.workspaces.length));
@@ -434,6 +436,14 @@ export function useSessionDomain() {
     };
     window.localStorage.setItem(SESSION_STATE_KEY, JSON.stringify(payload));
   }, [workspaces, activeWorkspaceID]);
+
+  useEffect(() => {
+    workspacesRef.current = workspaces;
+  }, [workspaces]);
+
+  useEffect(() => {
+    activeWorkspaceIDRef.current = activeWorkspaceID;
+  }, [activeWorkspaceID]);
 
   function nextEntryID(): string {
     entryCounter.current += 1;
@@ -1217,6 +1227,8 @@ export function useSessionDomain() {
     projects: DiscoveredProject[],
     options?: SyncProjectsOptions,
   ) {
+    const currentWorkspaces = workspacesRef.current;
+    const currentActiveWorkspaceID = activeWorkspaceIDRef.current;
     const source = options?.source ?? "discovery";
     const preserveMissingSessions =
       options?.preserveMissingSessions ??
@@ -1232,7 +1244,7 @@ export function useSessionDomain() {
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
     const currentByHostPath = new Map<string, WorkspaceDirectory>();
     const incomingHostIDs = new Set<string>();
-    for (const workspace of workspaces) {
+    for (const workspace of currentWorkspaces) {
       currentByWorkspaceID.set(workspace.id, workspace);
       currentByHostPath.set(
         projectWorkspaceID(workspace.hostID, workspace.path),
@@ -1331,7 +1343,7 @@ export function useSessionDomain() {
       });
     }
 
-    for (const existing of workspaces) {
+    for (const existing of currentWorkspaces) {
       if (!preserveMissingProjects) continue;
       if (nextWorkspaces.some((workspace) => workspace.id === existing.id)) continue;
       const hostID = existing.hostID.trim();
@@ -1343,7 +1355,7 @@ export function useSessionDomain() {
     }
 
     if (nextWorkspaces.length === 0) {
-      if (preserveOnEmptyResult && workspaces.length > 0) {
+      if (preserveOnEmptyResult && currentWorkspaces.length > 0) {
         return;
       }
       const fallback = createWorkspace(1, DEFAULT_PROJECT_PATH);
@@ -1353,11 +1365,11 @@ export function useSessionDomain() {
       return;
     }
 
-    const nextActiveWorkspaceID = nextWorkspaces.some((workspace) => workspace.id === activeWorkspaceID)
-      ? activeWorkspaceID
+    const nextActiveWorkspaceID = nextWorkspaces.some((workspace) => workspace.id === currentActiveWorkspaceID)
+      ? currentActiveWorkspaceID
       : (() => {
-          const previousActive = workspaces.find(
-            (workspace) => workspace.id === activeWorkspaceID,
+          const previousActive = currentWorkspaces.find(
+            (workspace) => workspace.id === currentActiveWorkspaceID,
           );
           if (previousActive) {
             const matched = nextWorkspaces.find(
