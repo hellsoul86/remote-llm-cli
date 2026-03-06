@@ -184,10 +184,10 @@ export function SessionComposer({
         onResolve={onResolvePendingRequest}
       />
 
-      <div className="composer-toolbar">
-        <div className="session-inline-settings">
-          <label className="session-setting-row">
-            model
+      <div className="composer-toolbar composer-toolbar-native">
+        <div className="composer-context-strip">
+          <label className="composer-select-pill" aria-label="Model">
+            <span>Model</span>
             <select
               data-testid="session-model-select"
               value={activeThreadModelValue}
@@ -206,12 +206,9 @@ export function SessionComposer({
                 <option value="">model unavailable</option>
               )}
             </select>
-            {!hasSessionModelChoices ? (
-              <small className="pane-subtle-light">No models discovered on this server.</small>
-            ) : null}
           </label>
-          <label className="session-setting-row">
-            sandbox
+          <label className="composer-select-pill" aria-label="Access">
+            <span>Access</span>
             <select
               data-testid="session-sandbox-select"
               value={activeThread?.sandbox ?? "workspace-write"}
@@ -231,38 +228,32 @@ export function SessionComposer({
               <option value="danger-full-access">danger-full-access</option>
             </select>
           </label>
-        </div>
-
-        <div className="session-controls-row">
           <button
             type="button"
-            className="ghost advanced-toggle-btn"
+            className="ghost advanced-toggle-btn composer-pill"
             data-testid="fork-session-btn"
             onClick={onForkSession}
             disabled={!activeThread || activeThreadBusy}
           >
-            Fork Session
+            Fork
           </button>
           <button
             type="button"
-            className="ghost advanced-toggle-btn"
+            className="ghost advanced-toggle-btn composer-pill"
             data-testid="advanced-toggle-btn"
             onClick={onToggleSessionAdvanced}
             disabled={!activeThread}
           >
-            {sessionAdvancedOpen ? "Hide Advanced" : "Advanced"}
+            {sessionAdvancedOpen ? "Hide Controls" : "Controls"}
           </button>
         </div>
+        {!hasSessionModelChoices ? (
+          <small className="pane-subtle-light">No models discovered on this server.</small>
+        ) : null}
       </div>
 
-      {activeThreadStatusCopy ? (
-        <p className="composer-status" role="status">
-          {activeThreadStatusCopy}
-        </p>
-      ) : null}
-
       {sessionAdvancedOpen ? (
-        <div className="session-advanced-panel">
+        <div className="session-advanced-panel composer-secondary-panel">
           <label className="session-setting-row">
             approval
             <select
@@ -494,44 +485,50 @@ export function SessionComposer({
         </div>
       ) : null}
 
-      <div className="quick-strip">
-        <label
-          className={`quick-chip ghost file-chip ${
-            uploadingImage || !activeThread || activeThreadBusy ? "disabled" : ""
-          }`}
-        >
-          <input
-            type="file"
-            accept="image/*"
-            disabled={uploadingImage || !activeThread || activeThreadBusy}
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              if (!activeThread) return;
-              onUploadImage(file, activeThread.id);
-              event.currentTarget.value = "";
-            }}
-          />
-          {uploadingImage ? "uploading..." : "Attach Image"}
-        </label>
-        {(activeThread?.imagePaths ?? []).map((imagePath) => (
-          <button
-            key={imagePath}
-            type="button"
-            className="quick-chip ghost"
-            onClick={() => onRemoveImagePath(imagePath)}
-          >
-            {imagePath.split("/").pop() ?? imagePath} ×
-          </button>
-        ))}
-        {imageUploadError ? (
-          <span className="shortcut-hint">{imageUploadError}</span>
-        ) : (
-          <span className="shortcut-hint">Paste or drop image to attach.</span>
-        )}
-      </div>
-
       <div className="composer-input-shell">
+        <div className="composer-input-topbar">
+          <label
+            className={`ghost composer-attach-btn file-chip ${
+              uploadingImage || !activeThread || activeThreadBusy ? "disabled" : ""
+            }`}
+          >
+            <input
+              type="file"
+              accept="image/*"
+              disabled={uploadingImage || !activeThread || activeThreadBusy}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (!file) return;
+                if (!activeThread) return;
+                onUploadImage(file, activeThread.id);
+                event.currentTarget.value = "";
+              }}
+            />
+            {uploadingImage ? "Uploading..." : "Attach Image"}
+          </label>
+          <span className="shortcut-hint composer-shortcut-hint">
+            / commands · @ context · paste image
+          </span>
+        </div>
+
+        {(activeThread?.imagePaths ?? []).length > 0 || imageUploadError ? (
+          <div className="quick-strip quick-strip-attachments">
+            {(activeThread?.imagePaths ?? []).map((imagePath) => (
+              <button
+                key={imagePath}
+                type="button"
+                className="quick-chip ghost"
+                onClick={() => onRemoveImagePath(imagePath)}
+              >
+                {imagePath.split("/").pop() ?? imagePath} ×
+              </button>
+            ))}
+            {imageUploadError ? (
+              <span className="shortcut-hint">{imageUploadError}</span>
+            ) : null}
+          </div>
+        ) : null}
+
         <textarea
           ref={promptInputRef}
           value={activeDraft}
@@ -539,43 +536,48 @@ export function SessionComposer({
           rows={1}
           placeholder={
             activeThread
-              ? "Tell codex what to do in this workspace..."
-              : "Select a session to start"
+              ? "Ask Codex to work in this project..."
+              : "Select a thread to start"
           }
           disabled={!activeThread}
           onPaste={onComposerPaste}
           onKeyDown={onComposerKeyDown}
         />
 
-        <div className="composer-actions">
-          {activeThreadRunID ? (
-            <button
-              type="button"
-              className="ghost danger-ghost"
-              disabled={
-                !activeThread ||
-                !activeThreadRunID ||
-                cancelingThreadID === activeThread.id
-              }
-              onClick={onStopRun}
-            >
-              {activeThread && cancelingThreadID === activeThread.id
-                ? "Stopping..."
-                : "Stop"}
+        <div className="composer-input-footer">
+          <p className="composer-status" role="status">
+            {activeThreadStatusCopy || "Enter sends · Shift+Enter adds a line break"}
+          </p>
+          <div className="composer-actions">
+            {activeThreadRunID ? (
+              <button
+                type="button"
+                className="ghost danger-ghost"
+                disabled={
+                  !activeThread ||
+                  !activeThreadRunID ||
+                  cancelingThreadID === activeThread.id
+                }
+                onClick={onStopRun}
+              >
+                {activeThread && cancelingThreadID === activeThread.id
+                  ? "Stopping..."
+                  : "Stop"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="ghost"
+                disabled={!activeThread || !hasRegeneratePrompt || activeThreadBusy}
+                onClick={onRegenerate}
+              >
+                Regenerate
+              </button>
+            )}
+            <button type="submit" disabled={activeThreadBusy || !activeThread}>
+              {activeThreadBusy ? "Running..." : "Send"}
             </button>
-          ) : (
-            <button
-              type="button"
-              className="ghost"
-              disabled={!activeThread || !hasRegeneratePrompt || activeThreadBusy}
-              onClick={onRegenerate}
-            >
-              Regenerate
-            </button>
-          )}
-          <button type="submit" disabled={activeThreadBusy || !activeThread}>
-            {activeThreadBusy ? "Running..." : "Send"}
-          </button>
+          </div>
         </div>
       </div>
     </form>

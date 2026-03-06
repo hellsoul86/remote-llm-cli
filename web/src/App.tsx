@@ -1354,9 +1354,11 @@ export function App() {
     composerProps: sessionComposerProps,
     headerTitle: activeThread?.title ?? "Session",
     headerContext:
-      (activeWorkspace?.hostName?.trim() || "local-default") +
-      " · " +
-      (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH),
+      (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH) +
+      ((activeWorkspace?.hostName?.trim() || "") &&
+      activeWorkspace?.hostName?.trim() !== "local-default"
+        ? ` · ${activeWorkspace.hostName.trim()}`
+        : ""),
     streamTone: activeStreamTone,
     streamCopy: activeStreamCopy,
     streamLastError: activeStreamLastError,

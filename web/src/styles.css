@@ -2105,3 +2105,207 @@ pre {
     padding: 6px 10px;
   }
 }
+
+/* Native workbench overrides (issue-200) */
+.session-side {
+  position: relative;
+}
+
+.composer-toolbar-native {
+  justify-content: space-between;
+}
+
+.composer-context-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.composer-pill {
+  border-radius: 999px;
+}
+
+.composer-select-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #dfe5ef;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 4px 10px 4px 12px;
+  min-height: 38px;
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #52627d;
+  font-family: var(--font-mono);
+}
+
+.composer-select-pill select {
+  min-width: 130px;
+  width: auto;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+  font-size: 0.78rem;
+  color: var(--text);
+  font-family: var(--font-sans);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.composer-select-pill select:focus {
+  box-shadow: none;
+}
+
+.composer-secondary-panel {
+  background: rgba(249, 251, 255, 0.94);
+}
+
+.quick-strip-attachments {
+  min-height: 28px;
+}
+
+.composer-shortcut-hint {
+  margin-left: 0;
+}
+
+.composer-input-shell {
+  border-radius: 22px;
+  padding: 12px;
+  gap: 12px;
+}
+
+.composer-input-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.composer-attach-btn {
+  position: relative;
+  overflow: hidden;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.71rem;
+  font-family: var(--font-mono);
+}
+
+.composer-input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.composer-status {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.project-create-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 14;
+  border: 0;
+  background: rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(4px);
+  padding: 0;
+}
+
+.project-create-backdrop:hover {
+  transform: none;
+  background: rgba(15, 23, 42, 0.18);
+}
+
+.project-create-sheet {
+  position: fixed;
+  top: 84px;
+  left: 28px;
+  width: min(420px, calc(100vw - 56px));
+  z-index: 15;
+  border: 1px solid #dce3ee;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: var(--shadow-panel);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.project-create-sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.project-create-sheet-head h4 {
+  font-size: 1rem;
+  letter-spacing: -0.02em;
+}
+
+.project-node {
+  padding: 8px;
+  border-radius: 18px;
+  border: 1px solid rgba(224, 230, 240, 0.92);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.project-node-active {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: #d0d9e8;
+}
+
+.project-chip-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.project-host-pill {
+  border-radius: 999px;
+  border: 1px solid #dbe3ef;
+  background: #f5f8fd;
+  color: #566883;
+  padding: 2px 8px;
+}
+
+.project-session-list {
+  padding-left: 8px;
+  margin-left: 10px;
+}
+
+@media (max-width: 960px) {
+  .composer-context-strip {
+    width: 100%;
+  }
+
+  .composer-select-pill {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .composer-select-pill select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .composer-input-footer {
+    align-items: stretch;
+  }
+
+  .project-create-sheet {
+    top: 20px;
+    left: 20px;
+    width: calc(100vw - 40px);
+  }
+}

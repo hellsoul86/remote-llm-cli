@@ -1831,10 +1831,10 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   const chatPane = page.locator(".chat-pane");
   await expect(sidebar).toBeVisible();
   await expect(chatPane).toBeVisible();
-  await expect(page.locator(".chat-context")).toContainText(
-    "local-default · /srv/work",
+  await expect(page.locator(".chat-context")).toContainText("/srv/work");
+  await expect(page.locator(".pane-summary-copy").first()).toContainText(
+    "1 project across 1",
   );
-  await expect(page.locator(".pane-summary-copy")).toContainText("1 server · 1 project");
   await expect(
     page.getByText("Servers, project paths, and session history."),
   ).toHaveCount(0);
@@ -1845,23 +1845,19 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   expect(Math.abs((chatBox?.y ?? 0) - (sideBox?.y ?? 0)) <= 40).toBeTruthy();
   expect((chatBox?.width ?? 0) >= 600).toBeTruthy();
 
-  const projectFilter = page.getByPlaceholder("Filter projects or sessions");
+  const projectFilter = page.getByPlaceholder("Search projects or threads");
   await expect(projectFilter).toBeVisible();
   await projectFilter.fill("session 1");
   await expect(page.locator(".session-chip-tree")).toHaveCount(1);
   await projectFilter.fill("not-found-session");
   await expect(
-    page.getByText("No matching projects or sessions."),
+    page.getByText("No matching projects or threads."),
   ).toBeVisible();
   await projectFilter.fill("");
-  await page.getByRole("button", { name: "Collapse" }).first().click();
-  await expect(
-    page.getByRole("button", { name: "Expand" }).first(),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Expand" }).first().click();
+  await expect(page.locator(".project-host-pill").first()).toBeVisible();
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill("line-a");
   await composer.press("Shift+Enter");
@@ -1936,7 +1932,7 @@ test("jump-to-latest appears when timeline grows off-bottom", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   const largePrompt = Array.from(
     { length: 56 },
@@ -1985,7 +1981,7 @@ test("composer supports image paste and drag-drop upload", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   const composerPanel = page.locator(".composer");
 
@@ -2031,7 +2027,7 @@ test("tree interactions return focus to composer", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.focus();
   await expect(composer).toBeFocused();
@@ -2166,7 +2162,7 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await page.getByTestId("advanced-ephemeral-toggle").check();
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`advanced settings ${marker}`);
   await composer.press("Enter");
@@ -2246,7 +2242,7 @@ test("pending command approval can be resolved inline", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`pending request ${marker}`);
   await composer.press("Enter");
@@ -2272,7 +2268,7 @@ test("composer submits codex exec payload", async ({ page }) => {
   const harness = await mockSessionApi(page, `exec ${marker}`, marker);
   await unlock(page);
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`exec payload ${marker}`);
   await composer.press("Enter");
@@ -2325,7 +2321,7 @@ test("new session stays active after remote session binding", async ({ page }) =
   expect(draftSessionID.startsWith("session_")).toBeTruthy();
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`keep the new remote session active ${marker}`);
   await composer.press("Enter");
@@ -2356,7 +2352,7 @@ test("session stream completion keeps a single assistant reply", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`reply once with marker: ${marker}`);
   await composer.press("Enter");
@@ -2386,7 +2382,7 @@ test("session stream renders command runtime cards", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`emit runtime command cards ${marker}`);
   await composer.press("Enter");
@@ -2408,7 +2404,7 @@ test("pending command approval resumes the session after allow", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`needs approval ${marker}`);
   await composer.press("Enter");
@@ -2445,7 +2441,7 @@ test("stop and regenerate controls work in session composer", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`run long task ${marker}`);
   await composer.press("Enter");
@@ -2472,7 +2468,7 @@ test("user message supports edit and resend", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`initial prompt ${marker}`);
   await composer.press("Enter");
@@ -2520,7 +2516,7 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`check cursor replay safety ${marker}`);
   await composer.press("Enter");
@@ -2553,7 +2549,7 @@ test("archived session can be restored and survives reload", async ({ page }) =>
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`archive and restore ${marker}`);
   await composer.press("Enter");
@@ -2625,7 +2621,7 @@ test("server replay ignores cursor but timeline stays deduped", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`dedupe replay ${marker}`);
   await composer.press("Enter");
@@ -2700,7 +2696,7 @@ test("websocket reset reconnect completes once without SSE fallback", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`trigger ws reset ${marker}`);
   await composer.press("Enter");
@@ -2753,7 +2749,7 @@ test("websocket repeated resets reconnect and complete once", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`trigger ws flaky reset ${marker}`);
   await composer.press("Enter");
@@ -2816,7 +2812,7 @@ test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
   await expect(sessionTwo).toHaveClass(/active/);
   await expect(page.getByRole("heading", { name: "Session 2" })).toBeVisible();
 
-  const projectFilter = page.getByPlaceholder("Filter projects or sessions");
+  const projectFilter = page.getByPlaceholder("Search projects or threads");
   await projectFilter.fill("session 2");
   await expect
     .poll(async () => {
@@ -2825,17 +2821,11 @@ test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
       );
     })
     .toContain("session 2");
-  await page.getByRole("button", { name: "Collapse" }).first().click();
-  await expect(
-    page.getByRole("button", { name: "Expand" }).first(),
-  ).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(projectFilter).toHaveValue("session 2");
-  await expect(
-    page.getByRole("button", { name: "Expand" }).first(),
-  ).toBeVisible();
+  await expect(page.locator(".project-host-pill").first()).toBeVisible();
 });
 
 test("project create and rename use project name as primary label", async ({
@@ -3050,7 +3040,7 @@ test("generic session title is auto-derived from first prompt", async ({ page })
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await expect(page.getByRole("heading", { name: "Session 1" })).toBeVisible();
   await composer.fill("Plan deployment rollback strategy for staging API");
@@ -3075,7 +3065,7 @@ test("session title stream update overrides fallback title", async ({ page }) =>
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill("Create rollout checklist for QA and release validation");
   await composer.press("Enter");
@@ -3097,7 +3087,7 @@ test("running state locks session controls then unlocks on completion", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   const runningButton = page.getByRole("button", { name: "Running..." });
   const modelSelect = page.getByTestId("session-model-select");
@@ -3146,7 +3136,7 @@ test("stream status recovers after transient failures", async ({ page }) => {
   await expect(streamStatus).toContainText("Connected", { timeout: 15000 });
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`recover ${marker}`);
   await composer.press("Enter");
@@ -3220,7 +3210,7 @@ test("mobile session UX baseline (stacked layout + no horizontal overflow)", asy
   expect(overflowX <= 2).toBeTruthy();
 
   await expect(
-    page.getByPlaceholder("Tell codex what to do in this workspace..."),
+    page.getByPlaceholder("Ask Codex to work in this project..."),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
 });
