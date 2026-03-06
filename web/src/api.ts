@@ -1021,10 +1021,12 @@ export async function listCodexV2PendingRequests(
     headers: headers(token),
   });
   const body = await res.json();
-  if (!res.ok || !Array.isArray(body?.requests)) {
+  if (!res.ok) {
     throw new Error(`list codex v2 pending requests failed: ${res.status} ${JSON.stringify(body)}`);
   }
-  return body.requests as CodexV2PendingRequest[];
+  return Array.isArray(body?.requests)
+    ? (body.requests as CodexV2PendingRequest[])
+    : [];
 }
 
 export async function resolveCodexV2PendingRequest(

@@ -117,12 +117,17 @@ Example:
   "mode": "exec",
   "model": "gpt-5-codex",
   "cwd": "/home/ecs-user/repos/remote-llm-cli",
-  "approval_policy": "onRequest",
-  "sandbox": "workspaceWrite",
+  "approval_policy": "on-request",
+  "sandbox": "workspace-write",
   "search": true,
   "skip_git_repo_check": true
 }
 ```
+
+Over-the-wire request enums follow the Codex CLI/app-server spellings:
+
+- `approval_policy`: `untrusted`, `on-failure`, `on-request`, `reject`, `never`
+- `sandbox`: `read-only`, `workspace-write`, `danger-full-access`
 
 ## Pending Request Lifecycle
 

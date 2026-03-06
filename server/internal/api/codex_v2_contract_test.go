@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +101,71 @@ func TestCodexV2PendingRequestsContractShape(t *testing.T) {
 	}
 	if resp.Requests[0].RequestID != "req_contract_1" {
 		t.Fatalf("request_id=%q want=req_contract_1", resp.Requests[0].RequestID)
+	}
+}
+
+func TestCodexV2PendingRequestsContractUsesEmptyArrayWhenIdle(t *testing.T) {
+	srv, httpSrv, token, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_contract_pending_empty_v2"
+	upsertCodexTestSession(t, srv, sessionID)
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("%s/v2/codex/sessions/%s/requests/pending", httpSrv.URL, sessionID),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	res, err := httpSrv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want=200", res.StatusCode)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), `"requests":[]`) {
+		t.Fatalf("body=%s want requests as []", string(body))
+	}
+}
+
+func TestCodexV2RequestParamNormalizationUsesCLIEnumSpellings(t *testing.T) {
+	sessionParams := codexV2SessionParams{
+		model:          "gpt-5.3-codex",
+		approvalPolicy: "onRequest",
+		sandbox:        "workspaceWrite",
+		cwd:            "/tmp/project",
+	}.ToMap(true)
+	if got := sessionParams["approvalPolicy"]; got != "on-request" {
+		t.Fatalf("session approvalPolicy=%v want=on-request", got)
+	}
+	if got := sessionParams["sandbox"]; got != "workspace-write" {
+		t.Fatalf("session sandbox=%v want=workspace-write", got)
+	}
+	if got := sessionParams["cwd"]; got != "/tmp/project" {
+		t.Fatalf("session cwd=%v want=/tmp/project", got)
+	}
+
+	if got := normalizeCodexV2Approval("onFailure"); got != "on-failure" {
+		t.Fatalf("normalize approval onFailure=%q want=on-failure", got)
+	}
+	if got := normalizeCodexV2Approval("on-request"); got != "on-request" {
+		t.Fatalf("normalize approval on-request=%q want=on-request", got)
+	}
+	if got := normalizeCodexV2Sandbox("readOnly"); got != "read-only" {
+		t.Fatalf("normalize sandbox readOnly=%q want=read-only", got)
+	}
+	if got := normalizeCodexV2Sandbox("danger-full-access"); got != "danger-full-access" {
+		t.Fatalf("normalize sandbox danger-full-access=%q want=danger-full-access", got)
 	}
 }
 
