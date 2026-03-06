@@ -1810,6 +1810,42 @@ test("codex parser preserves whitespace in streaming deltas", async () => {
   );
 });
 
+test("codex parser accepts camelCase agentMessage final items", async () => {
+  const stdout = JSON.stringify({
+    type: "item.completed",
+    item: {
+      type: "agentMessage",
+      phase: "final_answer",
+      text: "1 LIVE_LONG\n2 LIVE_LONG\n3 LIVE_LONG",
+    },
+  });
+
+  expect(parseCodexAssistantTextFromStdout(stdout, false)).toBe(
+    "1 LIVE_LONG\n2 LIVE_LONG\n3 LIVE_LONG",
+  );
+});
+
+test("codex parser extracts assistant text from response_item envelopes", async () => {
+  const stdout = JSON.stringify({
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: "output_text",
+          text: "line-1\nline-2",
+        },
+      ],
+      phase: "final_answer",
+    },
+  });
+
+  expect(parseCodexAssistantTextFromStdout(stdout, false)).toBe(
+    "line-1\nline-2",
+  );
+});
+
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
