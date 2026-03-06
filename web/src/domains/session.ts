@@ -1175,11 +1175,12 @@ export function useSessionDomain() {
         };
       }
 
-      if (
-        !target ||
-        target.workspaceIndex !== source.workspaceIndex ||
-        target.threadIndex !== source.threadIndex
-      ) {
+      const shouldRemoveSource =
+        target !== null &&
+        (target.workspaceIndex !== source.workspaceIndex ||
+          target.threadIndex !== source.threadIndex);
+
+      if (shouldRemoveSource) {
         sourceWorkspace.sessions.splice(source.threadIndex, 1);
         if (sourceWorkspace.activeSessionID === sourceID) {
           const fallback = sourceWorkspace.sessions[0]?.id ?? "";
