@@ -28,3 +28,20 @@ body:
       label: Actual behavior
     validations:
       required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      options:
+        - Low
+        - Medium
+        - High
+    validations:
+      required: true
+  - type: textarea
+    id: mitigation
+    attributes:
+      label: Mitigation / Rollback
+      description: Immediate mitigation, rollback, or "Not needed"
+    validations:
+      required: true
