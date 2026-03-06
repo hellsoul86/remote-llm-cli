@@ -10,6 +10,7 @@ import {
 } from "react";
 import {
   API_BASE,
+  archiveCodexV2Session,
   cancelRunJob,
   codexPlatformCloud,
   codexPlatformLogin,
@@ -20,9 +21,11 @@ import {
   deleteProject,
   deleteHost,
   enqueueRunJob,
+  forkCodexV2Session,
   getMetrics,
   getRunJob,
   healthz,
+  interruptCodexV2Turn,
   listAudit,
   listHosts,
   listProjects,
@@ -33,6 +36,8 @@ import {
   listSessions,
   probeHost,
   runFanout,
+  startCodexV2Session,
+  startCodexV2Turn,
   streamSessionEvents,
   uploadImage,
   upsertHost,
@@ -400,6 +405,101 @@ function clipStreamText(raw: string, maxChars = 3600): string {
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") return null;
   return value as Record<string, unknown>;
+}
+
+function isLocalDraftSessionID(sessionID: string): boolean {
+  return /^session_\d+_\d+$/.test(sessionID.trim());
+}
+
+function isLegacyJobBackedSessionID(sessionID: string): boolean {
+  return /^session_cli_/i.test(sessionID.trim());
+}
+
+function extractThreadIDFromCodexSessionResponse(
+  value: unknown,
+): string {
+  const record = asRecord(value);
+  if (!record) return "";
+  const session = asRecord(record.session);
+  if (session) {
+    const id = typeof session.id === "string" ? session.id.trim() : "";
+    if (id) return id;
+  }
+  const thread = asRecord(record.thread);
+  if (thread) {
+    const id = typeof thread.id === "string" ? thread.id.trim() : "";
+    if (id) return id;
+  }
+  return "";
+}
+
+function extractTurnIDFromPayload(value: unknown): string {
+  const payload = asRecord(value);
+  if (!payload) return "";
+  const directKeys = ["turn_id", "turnId", "id"];
+  for (const key of directKeys) {
+    const direct = typeof payload[key] === "string" ? payload[key].trim() : "";
+    if (direct) return direct;
+  }
+  const turn = asRecord(payload.turn);
+  if (turn) {
+    const id = typeof turn.id === "string" ? turn.id.trim() : "";
+    if (id) return id;
+  }
+  const item = asRecord(payload.item);
+  if (item) {
+    const id = typeof item.turn_id === "string"
+      ? item.turn_id.trim()
+      : typeof item.turnId === "string"
+        ? item.turnId.trim()
+        : "";
+    if (id) return id;
+  }
+  return "";
+}
+
+function codexRPCMethodAndParams(
+  eventType: string,
+  payload: Record<string, unknown>,
+): {
+  method: string;
+  params: Record<string, unknown>;
+} {
+  const rawMethod = typeof payload.method === "string"
+    ? payload.method.trim()
+    : "";
+  const method = rawMethod
+    ? rawMethod
+    : eventType.startsWith("codexrpc.")
+      ? eventType.slice("codexrpc.".length).replace(/\./g, "/")
+      : "";
+  const params = asRecord(payload.params) ?? {};
+  return {
+    method: method.toLowerCase(),
+    params,
+  };
+}
+
+function extractRunIDFromCodexRPC(
+  payload: Record<string, unknown>,
+): string {
+  const { params } = codexRPCMethodAndParams("codexrpc", payload);
+  const direct = typeof params.run_id === "string"
+    ? params.run_id.trim()
+    : typeof params.runId === "string"
+      ? params.runId.trim()
+      : "";
+  if (direct) return direct;
+  return extractTurnIDFromPayload(params);
+}
+
+function shouldFallbackToLegacyJobs(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  if (message.includes(" 404 ")) return true;
+  if (message.includes(" not found")) return true;
+  if (message.includes("/v2/codex/")) return true;
+  return false;
 }
 
 function gatherMessageText(value: unknown, depth = 0): string[] {
@@ -1277,6 +1377,7 @@ export function App() {
     setThreadUnread,
     setThreadTitle,
     setThreadPinned,
+    bindThreadID,
     runningThreadJobs,
     syncProjectsFromDiscovery,
     syncProjectsFromServer,
@@ -1424,6 +1525,7 @@ export function App() {
 
     for (const workspace of workspaces) {
       for (const thread of workspace.sessions) {
+        if (isLocalDraftSessionID(thread.id)) continue;
         const priority = thread.id === activeThreadID
           ? 0
           : thread.activeJobID.trim()
@@ -1708,8 +1810,7 @@ export function App() {
         activeThread?.title || "current session",
         "fork branch duplicate session",
         () => {
-          if (!activeThread) return;
-          forkThread(activeThread.id);
+          void onForkActiveSession();
         },
       );
       pushAction(
@@ -1832,6 +1933,20 @@ export function App() {
     if (opsJobTypeFilter === "all") return byStatus;
     return byStatus.filter((job) => job.type === opsJobTypeFilter);
   }, [jobs, opsJobStatusFilter, opsJobTypeFilter]);
+  const knownJobIDSet = useMemo(
+    () =>
+      new Set(
+        jobs
+          .map((job) => job.id.trim())
+          .filter((id) => id !== ""),
+      ),
+    [jobs],
+  );
+  const runningJobPollTargets = useMemo(
+    () =>
+      runningThreadJobs.filter((item) => knownJobIDSet.has(item.jobID.trim())),
+    [runningThreadJobs, knownJobIDSet],
+  );
 
   const filteredHosts = useMemo(() => {
     const query = hostFilter.trim().toLowerCase();
@@ -2613,6 +2728,7 @@ export function App() {
       const hostID = hostIDRaw.trim();
       const path = pathRaw.trim();
       if (!hostID || !path) return "";
+      if (sourceHosts.length > 0 && !hostMap.has(hostID)) return "";
       const key = `${hostID}::${path}`;
       const resolvedTitle = resolveProjectTitle(path, titleRaw);
       const projectID = projectIDRaw?.trim() ?? "";
@@ -2816,6 +2932,10 @@ export function App() {
           .filter((id) => id !== ""),
       );
       const built = buildProjectsFromRecords(sourceHosts, projects, sessions);
+      const hasSessionItems = built.some((project) => project.sessions.length > 0);
+      if (!hasSessionItems && discoverEnabled) {
+        throw new Error("empty session snapshot");
+      }
       // Server snapshot is authoritative for project/session membership.
       syncProjectsFromServer(built);
       reconcileFromSessionRecords(sessions);
@@ -2898,9 +3018,25 @@ export function App() {
     const direct = event.run_id?.trim() ?? "";
     if (direct) return direct;
     const payload = sessionPayloadRecord(event);
+    if (event.type.startsWith("codexrpc.")) {
+      const fromRPC = extractRunIDFromCodexRPC(payload);
+      if (fromRPC) return fromRPC;
+    }
     const fromPayload =
       typeof payload.job_id === "string" ? payload.job_id.trim() : "";
     return fromPayload;
+  }
+
+  function sessionActiveRunID(sessionID: string): string {
+    const normalizedSessionID = sessionID.trim();
+    if (!normalizedSessionID) return "";
+    for (const workspace of workspaces) {
+      for (const thread of workspace.sessions) {
+        if (thread.id !== normalizedSessionID) continue;
+        return thread.activeJobID.trim();
+      }
+    }
+    return "";
   }
 
   function ensureSessionRunState(
@@ -3120,11 +3256,70 @@ export function App() {
     event: SessionEventRecord,
     options?: SessionEventHandleOptions,
   ) {
-    const payload = sessionPayloadRecord(event);
-    const runID = sessionEventRunID(event);
+    let eventType = event.type;
+    let payload = sessionPayloadRecord(event);
+    let runID = sessionEventRunID(event);
+    if (eventType.startsWith("codexrpc.")) {
+      const rpc = codexRPCMethodAndParams(eventType, payload);
+      const method = rpc.method;
+      payload = rpc.params;
+      if (!runID) {
+        runID = extractTurnIDFromPayload(payload);
+      }
+      if (
+        method === "thread/updated" ||
+        method === "thread/started" ||
+        method === "thread/named"
+      ) {
+        const thread = asRecord(payload.thread);
+        const title =
+          typeof payload.title === "string"
+            ? payload.title.trim()
+            : typeof thread?.title === "string"
+              ? thread.title.trim()
+              : typeof thread?.preview === "string"
+                ? thread.preview.trim()
+                : "";
+        if (title) {
+          eventType = "session.title.updated";
+          payload = { title };
+        } else {
+          return;
+        }
+      } else if (method === "turn/started") {
+        eventType = "run.started";
+      } else if (method === "turn/completed") {
+        eventType = "run.completed";
+      } else if (method === "turn/failed") {
+        eventType = "run.failed";
+      } else if (method === "turn/canceled" || method === "turn/interrupted") {
+        eventType = "run.canceled";
+      } else if (
+        method === "item/started" ||
+        method === "item/updated" ||
+        method === "item/completed"
+      ) {
+        const itemEvent = {
+          type: method.replace("/", "."),
+          ...payload,
+        };
+        payload = {
+          ...payload,
+          chunk: `${JSON.stringify(itemEvent)}\n`,
+        };
+        eventType = "assistant.delta";
+      } else if (method === "error") {
+        eventType = "run.failed";
+      } else {
+        return;
+      }
+    }
+    if (!runID) {
+      runID = sessionActiveRunID(sessionID);
+    }
     const surfaceLifecycle = options?.surfaceLifecycle !== false;
 
-    switch (event.type) {
+    switch (eventType) {
       case "session.title.updated": {
         const title =
           typeof payload.title === "string" ? payload.title.trim() : "";
@@ -3223,9 +3418,13 @@ export function App() {
       case "job.failed": {
         const id = runID || `run_${Date.now()}`;
         const state = ensureSessionRunState(sessionID, id);
+        const errorRecord = asRecord(payload.error);
         const errText =
           typeof payload.error === "string" && payload.error.trim()
             ? payload.error.trim()
+            : typeof errorRecord?.message === "string" &&
+                errorRecord.message.trim()
+              ? errorRecord.message.trim()
             : "Session failed.";
         if (state.streamSeen) {
           finalizeAssistantStreamEntry(sessionID, "error");
@@ -3869,12 +4068,13 @@ export function App() {
 
   useEffect(() => {
     if (appMode !== "session" || authPhase !== "ready" || !token.trim()) return;
-    if (!activeThread?.activeJobID) {
+    const activeRunID = activeThread?.activeJobID?.trim() ?? "";
+    if (!activeRunID || !knownJobIDSet.has(activeRunID)) {
       setActiveJobID("");
       setActiveJob(null);
       return;
     }
-    void getRunJob(token, activeThread.activeJobID)
+    void getRunJob(token, activeRunID)
       .then((job) => {
         setActiveJobID(job.id);
         setActiveJob(job);
@@ -3883,7 +4083,7 @@ export function App() {
         setActiveJobID("");
         setActiveJob(null);
       });
-  }, [appMode, authPhase, token, activeThread?.id, activeThread?.activeJobID]);
+  }, [appMode, authPhase, token, activeThread?.id, activeThread?.activeJobID, knownJobIDSet]);
 
   useEffect(() => {
     if (authPhase !== "ready") return;
@@ -3947,11 +4147,11 @@ export function App() {
 
   useEffect(() => {
     if (authPhase !== "ready" || !token.trim()) return;
-    if (runningThreadJobs.length === 0) return;
+    if (runningJobPollTargets.length === 0) return;
 
     let canceled = false;
     const poll = async () => {
-      const pollingJobs = runningThreadJobs;
+      const pollingJobs = runningJobPollTargets;
       if (pollingJobs.length === 0) return;
       try {
         const jobResults = await Promise.all(
@@ -4293,7 +4493,7 @@ export function App() {
     authPhase,
     token,
     appMode,
-    runningThreadJobs,
+    runningJobPollTargets,
     activeThreadID,
     hosts,
     runtimes,
@@ -4620,10 +4820,24 @@ export function App() {
       `Archive session "${activeThread.title}" on host "${activeWorkspace?.hostName || "unknown"}"?`,
     );
     if (!confirmed) return;
+    if (isLocalDraftSessionID(targetSessionID)) {
+      removeThread(targetSessionID);
+      return;
+    }
 
     setDeletingThreadID(targetSessionID);
     try {
-      await archiveSession(token, targetSessionID);
+      const runtimeName = activeRuntime?.name ?? selectedRuntime;
+      if (
+        runtimeName === "codex" &&
+        !isLegacyJobBackedSessionID(targetSessionID)
+      ) {
+        await archiveCodexV2Session(token, targetSessionID, {
+          host_id: activeWorkspace?.hostID?.trim() || undefined,
+        });
+      } else {
+        await archiveSession(token, targetSessionID);
+      }
       stopSessionStream(targetSessionID);
       deleteSessionEventCursor(targetSessionID);
       sessionRunStateRef.current.delete(targetSessionID);
@@ -4778,8 +4992,13 @@ export function App() {
           }
         : undefined;
 
+    const runtimeName = activeRuntime?.name ?? selectedRuntime;
+    const useCodexV2Session =
+      runtimeName === "codex" &&
+      !isLegacyJobBackedSessionID(activeThread.id);
+
     const request: RunRequest = {
-      runtime: activeRuntime?.name ?? selectedRuntime,
+      runtime: runtimeName,
       prompt,
       session_id: activeThread.id,
       all_hosts: false,
@@ -4798,12 +5017,89 @@ export function App() {
       },
       activeThread.id,
     );
+    let targetThreadID = activeThread.id;
     timelineForceStickRef.current = true;
     timelineStickToBottomRef.current = true;
     updateThreadDraft(activeThread.id, "");
 
     setSubmittingThreadID(activeThread.id);
     try {
+      if (useCodexV2Session) {
+        try {
+          const targetHostID = targetHostIDs[0]?.trim() ?? "";
+          if (!targetHostID) {
+            throw new Error("host_id is required for codex v2 session");
+          }
+
+          let sessionID = activeThread.id.trim();
+          if (isLocalDraftSessionID(sessionID)) {
+            const sessionResp = await startCodexV2Session(token, {
+              host_id: targetHostID,
+              path: effectiveWorkdir,
+              title: activeThread.title,
+              model: effectiveModel,
+              approval_policy: activeThread.approvalPolicy || undefined,
+              sandbox: effectiveSandbox,
+            });
+            const resolvedSessionID =
+              extractThreadIDFromCodexSessionResponse(sessionResp) ||
+              sessionResp.session.id.trim();
+            if (!resolvedSessionID) {
+              throw new Error("thread/start returned empty session id");
+            }
+            const previousSessionID = sessionID;
+            sessionID = bindThreadID(previousSessionID, resolvedSessionID, {
+              title: sessionResp.session.title,
+            });
+            targetThreadID = sessionID;
+            if (previousSessionID !== sessionID) {
+              stopSessionStream(previousSessionID, { preserveRunState: false, preserveHealth: false });
+              deleteSessionEventCursor(previousSessionID);
+              sessionRunStateRef.current.delete(previousSessionID);
+            }
+          }
+
+          const turnInput: Array<Record<string, unknown>> = [
+            { type: "text", text: prompt },
+          ];
+          for (const imagePath of safeImagePaths) {
+            const trimmedPath = imagePath.trim();
+            if (!trimmedPath) continue;
+            turnInput.push({
+              type: "input_image",
+              image_url: trimmedPath,
+            });
+          }
+
+          const turnResp = await startCodexV2Turn(token, sessionID, {
+            host_id: targetHostID,
+            input: turnInput,
+            model: effectiveModel,
+            cwd: effectiveWorkdir,
+            approval_policy: activeThread.approvalPolicy || undefined,
+            sandbox: effectiveSandbox,
+          });
+          const turnID = extractTurnIDFromPayload(turnResp);
+          const runID = turnID || `run_${Date.now()}`;
+          ensureSessionRunState(sessionID, runID);
+          setThreadJobState(sessionID, runID, "running");
+          setActiveJobThreadID(sessionID);
+          if (sessionID === activeThreadIDRef.current) {
+            setActiveJobID(runID);
+          }
+          if (!sessionStreamStateRef.current.has(sessionID)) {
+            startSessionStream(sessionID, token);
+          }
+          setSubmittingThreadID("");
+          return;
+        } catch (error) {
+          if (!shouldFallbackToLegacyJobs(error)) {
+            throw error;
+          }
+        }
+      }
+
+      request.session_id = targetThreadID;
       if (runAsyncMode) {
         const { body } = await enqueueRunJob(token, request);
         jobEventCursorRef.current.set(body.job.id, 0);
@@ -4848,7 +5144,7 @@ export function App() {
         setSubmittingThreadID("");
       }
     } catch (error) {
-      finalizeAssistantStreamEntry(activeThread.id, "error");
+      finalizeAssistantStreamEntry(targetThreadID, "error");
       addTimelineEntry(
         {
           kind: "system",
@@ -4856,9 +5152,9 @@ export function App() {
           title: "Response Failed",
           body: String(error),
         },
-        activeThread.id,
+        targetThreadID,
       );
-      setThreadJobState(activeThread.id, "", "failed");
+      setThreadJobState(targetThreadID, "", "failed");
       setSubmittingThreadID("");
     }
   }
@@ -4878,7 +5174,17 @@ export function App() {
     if (cancelingThreadID === activeThread.id) return;
     setCancelingThreadID(activeThread.id);
     try {
-      await cancelRunJob(token, runID);
+      const runtimeName = activeRuntime?.name ?? selectedRuntime;
+      const preferCodexV2 =
+        runtimeName === "codex" &&
+        !isLegacyJobBackedSessionID(activeThread.id);
+      if (preferCodexV2) {
+        await interruptCodexV2Turn(token, activeThread.id, runID, {
+          host_id: activeWorkspace?.hostID?.trim() || undefined,
+        });
+      } else {
+        await cancelRunJob(token, runID);
+      }
       addTimelineEntry(
         {
           kind: "system",
@@ -4889,6 +5195,16 @@ export function App() {
         activeThread.id,
       );
     } catch (error) {
+      if (
+        (activeRuntime?.name ?? selectedRuntime) === "codex" &&
+        !isLegacyJobBackedSessionID(activeThread.id)
+      ) {
+        try {
+          await cancelRunJob(token, runID);
+        } catch {
+          // no-op: keep primary interrupt error below
+        }
+      }
       addTimelineEntry(
         {
           kind: "system",
@@ -4921,9 +5237,45 @@ export function App() {
     await submitPromptForActiveThread(prompt);
   }
 
-  function onForkActiveSession() {
+  async function onForkActiveSession() {
     if (!activeThread) return;
-    forkThread(activeThread.id);
+    if (authPhase !== "ready" || !token.trim()) {
+      forkThread(activeThread.id);
+      return;
+    }
+    const runtimeName = activeRuntime?.name ?? selectedRuntime;
+    if (
+      runtimeName !== "codex" ||
+      isLocalDraftSessionID(activeThread.id) ||
+      isLegacyJobBackedSessionID(activeThread.id)
+    ) {
+      forkThread(activeThread.id);
+      return;
+    }
+    try {
+      const response = await forkCodexV2Session(token, activeThread.id, {
+        host_id: activeWorkspace?.hostID?.trim() || undefined,
+        path: activeWorkspace?.path?.trim() || undefined,
+        title: `Fork · ${activeThread.title}`,
+      });
+      const nextID =
+        extractThreadIDFromCodexSessionResponse(response) ||
+        response.session.id.trim();
+      await refreshProjectsFromSource(token, hosts, true, true);
+      if (nextID) {
+        activateThread(nextID);
+      }
+    } catch (error) {
+      addTimelineEntry(
+        {
+          kind: "system",
+          state: "error",
+          title: "Fork Failed",
+          body: String(error),
+        },
+        activeThread.id,
+      );
+    }
   }
 
   async function onEditAndResend(entry: TimelineEntry) {
