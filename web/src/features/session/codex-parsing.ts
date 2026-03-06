@@ -9,6 +9,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+function lowerTrimmedString(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
 export function extractThreadIDFromCodexSessionResponse(value: unknown): string {
   const record = asRecord(value);
   if (!record) return "";
@@ -122,15 +126,16 @@ function gatherMessageText(
 }
 
 function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
-  const eventType = typeof event.type === "string" ? event.type : "";
+  const eventType = lowerTrimmedString(event.type);
   if (eventType === "item.completed") {
     const item = asRecord(event.item);
     if (!item) return "";
-    const itemType = typeof item.type === "string" ? item.type : "";
-    const itemRole = typeof item.role === "string" ? item.role : "";
+    const itemType = lowerTrimmedString(item.type);
+    const itemRole = lowerTrimmedString(item.role);
     if (
       itemType !== "" &&
       itemType !== "agent_message" &&
+      itemType !== "agentmessage" &&
       itemType !== "assistant_message" &&
       itemType !== "message" &&
       itemRole !== "assistant"
@@ -144,6 +149,30 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
     const response = asRecord(event.response);
     if (!response) return "";
     return gatherMessageText(response).join("\n").trim();
+  }
+
+  if (eventType === "response_item") {
+    const payload = asRecord(event.payload);
+    if (!payload) return "";
+    const payloadType = lowerTrimmedString(payload.type);
+    const payloadRole = lowerTrimmedString(payload.role);
+    if (payloadType === "message" && payloadRole === "assistant") {
+      return gatherMessageText(payload).join("\n").trim();
+    }
+    return "";
+  }
+
+  if (eventType === "event_msg") {
+    const payload = asRecord(event.payload);
+    if (!payload) return "";
+    const payloadType = lowerTrimmedString(payload.type);
+    if (payloadType === "agent_message") {
+      return gatherMessageText(payload.message).join("\n").trim();
+    }
+    if (payloadType === "task_complete") {
+      return gatherMessageText(payload.last_agent_message).join("\n").trim();
+    }
+    return "";
   }
 
   return "";
