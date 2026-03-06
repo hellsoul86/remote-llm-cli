@@ -231,74 +231,45 @@ pre {
 .app-topbar {
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.94);
+  background: rgba(255, 255, 255, 0.82);
   box-shadow: var(--shadow-soft);
   backdrop-filter: blur(8px);
-  padding: 12px 14px;
+  padding: 10px 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
 }
 
-.topbar-title {
-  display: grid;
-  gap: 4px;
+.app-topbar.app-topbar-utility {
+  background: rgba(246, 248, 252, 0.9);
 }
 
-.topbar-eyebrow {
-  font-size: 0.62rem;
-  letter-spacing: 0.16em;
+.topbar-title {
+  display: grid;
+  gap: 3px;
+}
+
+.topbar-title h1 {
+  font-size: clamp(1rem, 1.6vw, 1.14rem);
+  color: #121a2a;
+  letter-spacing: -0.02em;
+}
+
+.topbar-context {
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
 
-.topbar-title h1 {
-  font-size: clamp(1.02rem, 1.8vw, 1.18rem);
-  color: #121a2a;
-  letter-spacing: -0.02em;
-}
-
 .topbar-controls {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
-}
-
-.mode-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: #f5f7fb;
-}
-
-.mode-btn {
-  border-radius: 999px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-soft);
-  padding: 6px 13px;
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.mode-btn:hover {
-  background: #eef2f8;
-}
-
-.mode-btn.active {
-  color: #f4f8ff;
-  background: linear-gradient(180deg, #25314a 0%, #121b2b 100%);
-}
-
-.mode-btn.active:hover {
-  background: linear-gradient(180deg, #25314a 0%, #121b2b 100%);
 }
 
 .sync-pill {
@@ -306,17 +277,9 @@ pre {
   border: 1px solid var(--line);
   background: #f5f7fa;
   color: var(--text-soft);
-  font-size: 0.64rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  font-family: var(--font-mono);
-  padding: 5px 10px;
-}
-
-.sync-pill.ok {
-  color: #166742;
-  border-color: #b8dfcb;
-  background: #eff9f4;
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  padding: 7px 11px;
 }
 
 .sync-pill.busy {
@@ -336,9 +299,17 @@ pre {
   border: 1px solid #e8c0c0;
   background: #fff3f3;
   color: #8d2f2f;
-  font-size: 0.78rem;
-  font-family: var(--font-mono);
+  font-size: 0.8rem;
   padding: 10px 12px;
+}
+
+.topbar-utility-btn {
+  color: var(--text);
+  background: rgba(243, 246, 251, 0.8);
+}
+
+.topbar-quiet-btn {
+  color: var(--text-soft);
 }
 
 .session-stage {
@@ -400,15 +371,7 @@ pre {
 .chat-head-main {
   min-width: 0;
   display: grid;
-  gap: 4px;
-}
-
-.chat-head-eyebrow {
-  font-size: 0.62rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  font-family: var(--font-mono);
+  gap: 5px;
 }
 
 .chat-head h1 {
@@ -445,11 +408,10 @@ pre {
   background: #f5f7fa;
   color: var(--text-soft);
   padding: 4px 10px;
-  font-size: 0.64rem;
-  letter-spacing: 0.04em;
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
   line-height: 1.2;
-  font-family: var(--font-mono);
-  text-transform: uppercase;
+  font-family: var(--font-sans);
 }
 
 .stream-pill.ok {
@@ -2024,14 +1986,6 @@ pre {
 
   .topbar-controls > * {
     width: 100%;
-  }
-
-  .mode-switch {
-    width: 100%;
-  }
-
-  .mode-btn {
-    flex: 1;
   }
 
   .sync-pill {
