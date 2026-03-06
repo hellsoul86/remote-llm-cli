@@ -442,7 +442,7 @@ func (b *Bridge) Respond(ctx context.Context, rawID json.RawMessage, result json
 	if err != nil {
 		return err
 	}
-	proc, err := b.currentProcess()
+	proc, connID, err := b.currentProcess()
 	if err != nil {
 		return err
 	}
@@ -455,7 +455,7 @@ func (b *Bridge) Respond(ctx context.Context, rawID json.RawMessage, result json
 		return respondCtx.Err()
 	case err := <-done:
 		if err != nil {
-			b.handleProcessDrop(b.currentConnID(), fmt.Errorf("write response: %w", err))
+			b.handleProcessDrop(connID, fmt.Errorf("write response: %w", err))
 		}
 		return err
 	}
