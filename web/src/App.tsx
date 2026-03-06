@@ -17,6 +17,7 @@ import {
 import {
   useSessionDomain,
 } from "./domains/session";
+import { AppChrome } from "./features/session/components/AppChrome";
 import { CommandPalette } from "./features/session/components/CommandPalette";
 import { OpsControlSidebar } from "./features/session/components/OpsControlSidebar";
 import { OpsInspectPane } from "./features/session/components/OpsInspectPane";
@@ -1252,50 +1253,16 @@ export function App() {
 
   return (
     <div className="workspace-shell">
-      <header className="app-topbar">
-        <div className="topbar-title">
-          <p className="topbar-eyebrow">remote-llm workspace</p>
-          <h1>Codex Control App</h1>
-        </div>
-        <div className="topbar-controls">
-          <div className="mode-switch">
-            <button
-              type="button"
-              className={appMode === "session" ? "mode-btn active" : "mode-btn"}
-              onClick={() => switchMode("session")}
-            >
-              Session
-            </button>
-            <button
-              type="button"
-              className={appMode === "ops" ? "mode-btn active" : "mode-btn"}
-              onClick={() => switchMode("ops")}
-            >
-              Ops
-            </button>
-          </div>
-          <span
-            className={`sync-pill ${isRefreshing ? "busy" : healthIsError ? "error" : "ok"}`}
-          >
-            {syncLabel}
-          </span>
-          <button
-            onClick={() => void onRefreshWorkspace()}
-            disabled={isRefreshing}
-          >
-            {isRefreshing ? "Syncing..." : "Sync"}
-          </button>
-          <button className="ghost" onClick={onLogout}>
-            Logout
-          </button>
-        </div>
-      </header>
-
-      {healthIsError ? (
-        <section className="workspace-alert">
-          Controller state degraded: {health}
-        </section>
-      ) : null}
+      <AppChrome
+        appMode={appMode}
+        onSwitchMode={switchMode}
+        isRefreshing={isRefreshing}
+        healthIsError={healthIsError}
+        health={health}
+        syncLabel={syncLabel}
+        onRefreshWorkspace={onRefreshWorkspace}
+        onLogout={onLogout}
+      />
 
       {appMode === "session" ? (
         <SessionStage
