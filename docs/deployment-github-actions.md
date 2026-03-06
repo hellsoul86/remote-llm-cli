@@ -143,3 +143,40 @@ Run manually with `workflow_dispatch` inputs:
 
 - Uploads `codex-v2-staging-soak-report` artifact (JSON).
 - Publishes summary (`session_id`, `stream`, `turns`, terminal run counts) in workflow step summary.
+
+## 6. Staging live Playwright workflow
+
+`Staging Live E2E` workflow (`.github/workflows/staging-live-e2e.yml`) runs the real web session suite against the deployed staging stack.
+
+### 6.1 Environment configuration (`staging`)
+
+Secrets:
+
+- `E2E_ACCESS_TOKEN`: optional dedicated staging access key for Playwright live e2e
+- `SOAK_ACCESS_TOKEN`: fallback access key when `E2E_ACCESS_TOKEN` is not set
+
+Variables:
+
+- `E2E_BASE_URL`: staging web URL
+  - example: `https://webcli.staging.royding.ai`
+- `VITE_API_BASE`: staging API base URL
+  - example: `https://webcli-api-staging.royding.ai`
+- `E2E_PROJECT_PATH`: optional default project path for live session creation
+  - default used by the suite: `/home/ecs-user`
+
+### 6.2 Trigger
+
+Run manually with `workflow_dispatch` inputs:
+
+- `grep` (optional Playwright grep filter)
+- `project_path` (optional override for the live project root)
+
+### 6.3 Behavior
+
+Per run:
+
+1. Install web dependencies
+2. Install Playwright Chromium
+3. Resolve staging token (`E2E_ACCESS_TOKEN` -> `SOAK_ACCESS_TOKEN` fallback)
+4. Run `npm run test:e2e:live`
+5. Upload Playwright traces/results as workflow artifacts

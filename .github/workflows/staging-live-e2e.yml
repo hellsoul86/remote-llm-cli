@@ -1,0 +1,95 @@
+name: Staging Live E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      grep:
+        description: Optional Playwright grep filter
+        required: false
+        type: string
+      project_path:
+        description: Optional project path override for live session creation
+        required: false
+        default: /home/ecs-user
+        type: string
+
+jobs:
+  live-e2e:
+    name: Run Playwright live staging codex parity smoke
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+    env:
+      E2E_BASE_URL: ${{ vars.E2E_BASE_URL }}
+      E2E_API_BASE: ${{ vars.VITE_API_BASE }}
+      INPUT_PROJECT_PATH: ${{ inputs.project_path }}
+      INPUT_GREP: ${{ inputs.grep }}
+      RAW_E2E_ACCESS_TOKEN: ${{ secrets.E2E_ACCESS_TOKEN }}
+      FALLBACK_E2E_ACCESS_TOKEN: ${{ secrets.SOAK_ACCESS_TOKEN }}
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Resolve live e2e environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="${RAW_E2E_ACCESS_TOKEN:-}"
+          if [ -z "$token" ]; then
+            token="${FALLBACK_E2E_ACCESS_TOKEN:-}"
+          fi
+          if [ -z "${E2E_BASE_URL:-}" ]; then
+            echo "::error::missing staging variable E2E_BASE_URL"
+            exit 1
+          fi
+          if [ -z "${E2E_API_BASE:-}" ]; then
+            echo "::error::missing staging variable VITE_API_BASE"
+            exit 1
+          fi
+          if [ -z "$token" ]; then
+            echo "::error::missing staging secret E2E_ACCESS_TOKEN or SOAK_ACCESS_TOKEN"
+            exit 1
+          fi
+          project_path="${INPUT_PROJECT_PATH:-/home/ecs-user}"
+          if [ -z "$project_path" ]; then
+            project_path="/home/ecs-user"
+          fi
+          echo "E2E_ACCESS_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "E2E_PROJECT_PATH=$project_path" >> "$GITHUB_ENV"
+
+      - name: Run live staging Playwright suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_GREP:-}" ]; then
+            npm run test:e2e:live -- --grep "$INPUT_GREP"
+          else
+            npm run test:e2e:live
+          fi
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-live-staging-artifacts
+          path: |
+            web/test-results
+            web/playwright-report
+          if-no-files-found: ignore

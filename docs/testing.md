@@ -33,9 +33,17 @@ This now covers:
 
 ```bash
 cd web
-E2E_BASE_URL="https://webcli-staging.royding.ai" \
+E2E_BASE_URL="https://webcli.staging.royding.ai" \
+E2E_API_BASE="https://webcli-api-staging.royding.ai" \
 E2E_ACCESS_TOKEN="rlm_xxx.yyy" \
+E2E_PROJECT_PATH="/home/ecs-user" \
 npm run test:e2e:live
+```
+
+Equivalent Make target:
+
+```bash
+make web-e2e-live
 ```
 
 ## CI checks
@@ -58,11 +66,15 @@ Protected branches (`staging`, `main`) must require at least:
 
 Post-merge push to `staging`/`main` runs deployment workflow (`Deploy`) when environment deploy config is present.
 
+For codex parity signoff on `staging`, also run the manual `Staging Live E2E` workflow against the deployed web/app pair.
+
 ## Notes
 
 - E2E smoke uses route-mocked API responses and validates async job submission/polling UX.
 - Additional UX-focused smoke is in `web/e2e/session-ux.spec.ts`.
-- Live e2e requires a real access token and does not intercept network requests.
+- Live e2e requires a real access token, API base, and does not intercept network requests.
+- `E2E_PROJECT_PATH` defaults to `/home/ecs-user` and can be overridden for a different staging project root.
+- GitHub Actions workflow `.github/workflows/staging-live-e2e.yml` runs the same live suite against the staging environment.
 - Regenerate pinned app-server fixtures with `make protocol-schema-sync`.
 - If Playwright browsers are missing locally, install with:
 

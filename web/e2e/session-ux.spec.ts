@@ -27,6 +27,14 @@ type MockOptions = {
   ignoreStreamAfterCursor?: boolean;
 };
 
+type MockSession = {
+  id: string;
+  project_id: string;
+  title: string;
+  updated_at: string;
+  created_at: string;
+};
+
 function buildLongAssistantReply(marker: string): string {
   const lines: string[] = [];
   for (let i = 0; i < 80; i += 1) {
@@ -73,13 +81,7 @@ async function mockSessionApi(
   const sessionOneStreamAfterValues: number[] = [];
 
   const nowISO = new Date().toISOString();
-  const sessions: Array<{
-    id: string;
-    project_id: string;
-    title: string;
-    updated_at: string;
-    created_at: string;
-  }> = [
+  const sessions: MockSession[] = [
     {
       id: "session_cli_1",
       project_id: "project_local_1__srv_work",
@@ -99,6 +101,7 @@ async function mockSessionApi(
         ]
       : []),
   ];
+  const archivedSessions: MockSession[] = [];
 
   const projectRecords: Array<{
     id: string;
@@ -121,6 +124,22 @@ async function mockSessionApi(
       updated_at: "2026-03-03T00:00:00Z",
     },
   ];
+
+  const sessionRecord = (sessionItem: MockSession) => {
+    const project =
+      projectRecords.find((item) => item.id === sessionItem.project_id) ??
+      projectRecords[0];
+    return {
+      id: sessionItem.id,
+      project_id: sessionItem.project_id,
+      host_id: "local_1",
+      path: project?.path ?? "/srv/work",
+      runtime: "codex",
+      title: sessionItem.title,
+      created_at: sessionItem.created_at,
+      updated_at: sessionItem.updated_at,
+    };
+  };
 
   type TurnState = {
     runID: string;
@@ -773,16 +792,7 @@ async function mockSessionApi(
     await route.fulfill({
       status: 200,
       json: {
-        sessions: filteredSessions.map((sessionItem) => ({
-          id: sessionItem.id,
-          project_id: sessionItem.project_id,
-          host_id: "local_1",
-          path: "/srv/work",
-          runtime: "codex",
-          title: sessionItem.title,
-          created_at: sessionItem.created_at,
-          updated_at: sessionItem.updated_at,
-        })),
+        sessions: filteredSessions.map((sessionItem) => sessionRecord(sessionItem)),
       },
     });
   });
@@ -813,16 +823,19 @@ async function mockSessionApi(
               workspace: "/srv/work",
             },
             ok: true,
-            sessions: [
-              {
-                session_id: "session_cli_1",
-                thread_name: "Session 1",
-                cwd: "/srv/work",
-                path: "/home/ecs-user/.codex/sessions/session_cli_1.jsonl",
-                updated_at: "2026-03-03T00:00:00Z",
+            sessions: sessions.map((sessionItem) => {
+              const project =
+                projectRecords.find((item) => item.id === sessionItem.project_id) ??
+                projectRecords[0];
+              return {
+                session_id: sessionItem.id,
+                thread_name: sessionItem.title,
+                cwd: project?.path ?? "/srv/work",
+                path: `/home/ecs-user/.codex/sessions/${sessionItem.id}.jsonl`,
+                updated_at: sessionItem.updated_at,
                 size_bytes: 128,
-              },
-            ],
+              };
+            }),
           },
         ],
       },
@@ -920,16 +933,13 @@ async function mockSessionApi(
     await route.fulfill({
       status: 200,
       json: {
-        session: {
+        session: sessionRecord({
           id: sessionID,
           project_id: project.id,
-          host_id: "local_1",
-          path: project.path,
-          runtime: "codex",
           title,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-        },
+        }),
         project,
         thread: {
           id: sessionID,
@@ -970,16 +980,13 @@ async function mockSessionApi(
     await route.fulfill({
       status: 200,
       json: {
-        session: {
+        session: sessionRecord({
           id: sessionID,
           project_id: project.id,
-          host_id: "local_1",
-          path: project.path,
-          runtime: "codex",
           title,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-        },
+        }),
         project,
         thread: {
           id: sessionID,
@@ -999,24 +1006,57 @@ async function mockSessionApi(
     const sessionID = decodeURIComponent(parts[4] ?? "").trim();
     const index = sessions.findIndex((item) => item.id === sessionID);
     const deleted = index >= 0 ? sessions.splice(index, 1)[0] : null;
+    if (deleted) {
+      archivedSessions.push({
+        ...deleted,
+        updated_at: new Date().toISOString(),
+      });
+    }
     await route.fulfill({
       status: 200,
       json: {
         archived: true,
         deleted: Boolean(deleted),
-        session: deleted
-          ? {
-              id: deleted.id,
-              project_id: deleted.project_id,
-              host_id: "local_1",
-              path: "/srv/work",
-              runtime: "codex",
-              title: deleted.title,
-              created_at: deleted.created_at,
-              updated_at: deleted.updated_at,
-            }
-          : undefined,
+        session: deleted ? sessionRecord(deleted) : undefined,
       },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/unarchive", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+    const archivedIndex = archivedSessions.findIndex((item) => item.id === sessionID);
+    const restored =
+      archivedIndex >= 0 ? archivedSessions.splice(archivedIndex, 1)[0] : null;
+    if (restored) {
+      sessions.push({
+        ...restored,
+        updated_at: new Date().toISOString(),
+      });
+    }
+    const current = restored ?? sessions.find((item) => item.id === sessionID) ?? null;
+    const project =
+      current
+        ? projectRecords.find((item) => item.id === current.project_id) ?? projectRecords[0]
+        : projectRecords[0];
+    await route.fulfill({
+      status: current ? 200 : 404,
+      json: current
+        ? {
+            restored: true,
+            session: sessionRecord(current),
+            project,
+            thread: {
+              id: current.id,
+              preview: current.title,
+            },
+          }
+        : { error: "session not found" },
     });
   });
 
@@ -2386,6 +2426,75 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
     () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
   ).toBe(true);
   await expect(page.locator(".session-alert")).toHaveCount(0);
+});
+
+test("archived session can be restored and survives reload", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SESSION_RESTORE_${Date.now()}`;
+  await mockSessionApi(page, `restore session ${marker}`, marker, {
+    streamPattern: "completion-once",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`archive and restore ${marker}`);
+  await composer.press("Enter");
+  await expect(
+    page.locator(".message.message-assistant pre", { hasText: marker }),
+  ).toHaveCount(1);
+
+  const activeSession = page.locator(".session-chip-tree.active").first();
+  const sessionID = (await activeSession.getAttribute("data-session-id")) ?? "";
+  expect(sessionID).not.toBe("");
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Archive session");
+    await dialog.accept();
+  });
+  await page
+    .locator(".chat-head-actions")
+    .getByRole("button", { name: "Archive", exact: true })
+    .click();
+  await expect(
+    page.locator(`.session-chip-tree[data-session-id="${sessionID}"]`),
+  ).toHaveCount(0);
+
+  const restoreResponse = await page.evaluate(
+    async ({ sessionID }) => {
+      const response = await fetch(
+        `/v2/codex/sessions/${encodeURIComponent(sessionID)}/unarchive`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer rlm_test.token",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ host_id: "local_1" }),
+        },
+      );
+      return {
+        ok: response.ok,
+        body: await response.json(),
+      };
+    },
+    { sessionID },
+  );
+  expect(restoreResponse.ok).toBeTruthy();
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  const restoredSession = page
+    .locator(`.session-chip-tree[data-session-id="${sessionID}"]`)
+    .first();
+  await expect(restoredSession).toBeVisible();
+  await restoredSession.click();
+  await expect(
+    page.locator(".message.message-assistant pre", { hasText: marker }),
+  ).toHaveCount(1);
+  await expect(page.getByText("Response Started")).toHaveCount(0);
+  await expect(page.getByText("Server Completed")).toHaveCount(0);
 });
 
 test("server replay ignores cursor but timeline stays deduped", async ({

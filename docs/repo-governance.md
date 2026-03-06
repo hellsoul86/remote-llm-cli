@@ -73,6 +73,7 @@ Workflows:
 - `.github/workflows/ci.yml`
 - `.github/workflows/pr-governance.yml`
 - `.github/workflows/deploy.yml` (post-merge deploy on `staging`/`main`)
+- `.github/workflows/staging-live-e2e.yml` (manual live parity evidence on staging)
 
 Branch protection on GitHub must match the exact required check names above.
 
@@ -80,4 +81,5 @@ Branch protection on GitHub must match the exact required check names above.
 
 - only pushes to protected branches (`staging`, `main`) trigger deployment
 - deploy must complete post-deploy smoke before the run is considered healthy
+- native parity signoff on `staging` also requires the manual `Staging Live E2E` workflow when issues call for real session-flow evidence
 - staging soak remains a manual longer-running validation, not a merge blocker

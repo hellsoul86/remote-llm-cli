@@ -18,8 +18,28 @@ function requireLiveEnv(baseURL: string | undefined, token: string): void {
   test.skip(!baseURL, "Playwright baseURL is not configured.");
 }
 
+function readLiveAPIBase(): string {
+  return (
+    process.env.E2E_API_BASE?.trim() ||
+    process.env.VITE_API_BASE?.trim() ||
+    ""
+  );
+}
+
+function readLiveProjectPath(): string {
+  return process.env.E2E_PROJECT_PATH?.trim() || "/home/ecs-user";
+}
+
+function requireLiveAPIBase(apiBase: string): void {
+  test.skip(!apiBase, "E2E_API_BASE (or VITE_API_BASE) is required for live API assertions.");
+}
+
 function composerInput(page: Page): Locator {
   return page.locator(".composer textarea");
+}
+
+function sessionChip(page: Page, sessionID: string): Locator {
+  return page.locator(`.session-chip-tree[data-session-id="${sessionID}"]`).first();
 }
 
 async function unlockSessionPage(page: Page, token: string): Promise<void> {
@@ -33,19 +53,19 @@ async function unlockSessionPage(page: Page, token: string): Promise<void> {
   await expect(composerInput(page)).toBeVisible({ timeout: 120_000 });
 }
 
-async function selectStableHomeProject(page: Page): Promise<void> {
-  const homeProject = page
+async function selectStableProject(page: Page, projectPath: string): Promise<void> {
+  const project = page
     .locator(".project-chip", {
-      has: page.locator(".project-chip-main em", { hasText: "/home/ecs-user" }),
+      has: page.locator(".project-chip-main em", { hasText: projectPath }),
     })
     .first();
-  if (await homeProject.isVisible().catch(() => false)) {
-    await homeProject.click();
+  if (await project.isVisible().catch(() => false)) {
+    await project.click();
   }
 }
 
-async function createFreshSession(page: Page): Promise<void> {
-  await selectStableHomeProject(page);
+async function createFreshSession(page: Page, projectPath: string): Promise<string> {
+  await selectStableProject(page, projectPath);
   await page.getByRole("button", { name: "New Session", exact: true }).click();
   const heading = page.locator(".chat-head h1");
   await expect
@@ -57,6 +77,11 @@ async function createFreshSession(page: Page): Promise<void> {
     )
     .toMatch(/^Session(?:\s+\d+)?$/);
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled({ timeout: 120_000 });
+  const activeSession = page.locator(".session-chip-tree.active").first();
+  await expect(activeSession).toBeVisible({ timeout: 30_000 });
+  const sessionID = (await activeSession.getAttribute("data-session-id")) ?? "";
+  expect(sessionID).not.toBe("");
+  return sessionID;
 }
 
 async function submitPrompt(page: Page, prompt: string): Promise<void> {
@@ -77,14 +102,85 @@ async function waitForAssistantMessageCountIncrease(messages: Locator, beforeCou
     .toBeGreaterThan(beforeCount);
 }
 
+async function waitForAssistantMessageWithMarker(page: Page, marker: string, timeout = 240_000): Promise<Locator> {
+  const assistantMessages = page.locator(".message.message-assistant pre", { hasText: marker });
+  await expect
+    .poll(
+      async () => assistantMessages.count(),
+      { timeout },
+    )
+    .toBeGreaterThan(0);
+  const latestAssistant = assistantMessages.last();
+  await expect
+    .poll(
+      async () => {
+        return ((await latestAssistant.textContent()) ?? "").trim();
+      },
+      { timeout },
+    )
+    .not.toBe("Thinking...");
+  return latestAssistant;
+}
+
+async function archiveSessionViaUI(page: Page): Promise<void> {
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Archive session");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "Archive", exact: true }).click();
+}
+
+async function archiveSessionViaAPI(
+  page: Page,
+  apiBase: string,
+  token: string,
+  sessionID: string,
+): Promise<void> {
+  const response = await page.request.post(
+    `${apiBase}/v2/codex/sessions/${encodeURIComponent(sessionID)}/archive`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      data: {},
+    },
+  );
+  const body = await response.json().catch(() => ({}));
+  expect(response.ok(), JSON.stringify(body)).toBeTruthy();
+  expect(body?.archived).toBe(true);
+}
+
+async function unarchiveSessionViaAPI(
+  page: Page,
+  apiBase: string,
+  token: string,
+  sessionID: string,
+): Promise<void> {
+  const response = await page.request.post(
+    `${apiBase}/v2/codex/sessions/${encodeURIComponent(sessionID)}/unarchive`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      data: {},
+    },
+  );
+  const body = await response.json().catch(() => ({}));
+  expect(response.ok(), JSON.stringify(body)).toBeTruthy();
+  expect(body?.session?.id ?? sessionID).toBe(sessionID);
+}
+
 test.describe.serial("live headless session flow (real API, no route mocking)", () => {
   test("desktop baseline: long reply + scroll pin + protocol hidden", async ({ page, baseURL }) => {
     const token = readLiveToken();
+    const projectPath = readLiveProjectPath();
     requireLiveEnv(baseURL, token);
 
     await page.setViewportSize({ width: 1366, height: 900 });
     await unlockSessionPage(page, token);
-    await createFreshSession(page);
+    await createFreshSession(page, projectPath);
 
     await expect(page.locator(".session-side")).toBeVisible();
     await expect(page.locator(".chat-pane")).toBeVisible();
@@ -141,11 +237,12 @@ test.describe.serial("live headless session flow (real API, no route mocking)", 
 
   test("session switch: background completion should surface alert/unread and preserve response", async ({ page, baseURL }) => {
     const token = readLiveToken();
+    const projectPath = readLiveProjectPath();
     requireLiveEnv(baseURL, token);
 
     await page.setViewportSize({ width: 1366, height: 900 });
     await unlockSessionPage(page, token);
-    await createFreshSession(page);
+    await createFreshSession(page, projectPath);
 
     const session1Chip = page.locator(".session-chip-tree.active").first();
     const session1ID = (await session1Chip.getAttribute("data-session-id")) ?? "";
@@ -182,6 +279,76 @@ test.describe.serial("live headless session flow (real API, no route mocking)", 
       )
       .not.toBe("Thinking...");
   });
+
+  test("refresh replay keeps a single assistant reply after reload", async ({ page, baseURL }) => {
+    const token = readLiveToken();
+    const apiBase = readLiveAPIBase();
+    const projectPath = readLiveProjectPath();
+    requireLiveEnv(baseURL, token);
+
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await unlockSessionPage(page, token);
+    const sessionID = await createFreshSession(page, projectPath);
+    const marker = `LIVE_REPLAY_${Date.now()}`;
+
+    try {
+      await submitPrompt(
+        page,
+        `Reply with exactly one short sentence containing marker ${marker} exactly once.`,
+      );
+      await waitForAssistantMessageWithMarker(page, marker);
+      await expect(
+        page.locator(".message.message-assistant pre", { hasText: marker }),
+      ).toHaveCount(1, { timeout: 240_000 });
+
+      await page.reload();
+      await unlockSessionPage(page, token);
+      await expect(sessionChip(page, sessionID)).toBeVisible({ timeout: 120_000 });
+      await sessionChip(page, sessionID).click();
+      await expect(
+        page.locator(".message.message-assistant pre", { hasText: marker }),
+      ).toHaveCount(1, { timeout: 120_000 });
+      await expect(page.locator(".session-alert")).toHaveCount(0);
+      await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
+    } finally {
+      if (apiBase) {
+        await archiveSessionViaAPI(page, apiBase, token, sessionID).catch(() => {});
+      }
+    }
+  });
+
+  test("archive and unarchive restore a session across reload", async ({ page, baseURL }) => {
+    const token = readLiveToken();
+    const apiBase = readLiveAPIBase();
+    const projectPath = readLiveProjectPath();
+    requireLiveEnv(baseURL, token);
+    requireLiveAPIBase(apiBase);
+
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await unlockSessionPage(page, token);
+    const sessionID = await createFreshSession(page, projectPath);
+    const marker = `LIVE_ARCHIVE_${Date.now()}`;
+
+    await submitPrompt(
+      page,
+      `Reply with exactly one short sentence containing marker ${marker} exactly once.`,
+    );
+    await waitForAssistantMessageWithMarker(page, marker);
+
+    await archiveSessionViaUI(page);
+    await expect(sessionChip(page, sessionID)).toHaveCount(0, { timeout: 120_000 });
+
+    await unarchiveSessionViaAPI(page, apiBase, token, sessionID);
+    await page.reload();
+    await unlockSessionPage(page, token);
+    await expect(sessionChip(page, sessionID)).toBeVisible({ timeout: 120_000 });
+    await sessionChip(page, sessionID).click();
+    await expect(
+      page.locator(".message.message-assistant pre", { hasText: marker }),
+    ).toHaveCount(1, { timeout: 120_000 });
+
+    await archiveSessionViaAPI(page, apiBase, token, sessionID).catch(() => {});
+  });
 });
 
 test.describe.serial("live headless mobile UX", () => {
@@ -189,10 +356,11 @@ test.describe.serial("live headless mobile UX", () => {
 
   test("mobile baseline: stacked layout + input behavior + send", async ({ page, baseURL }) => {
     const token = readLiveToken();
+    const projectPath = readLiveProjectPath();
     requireLiveEnv(baseURL, token);
 
     await unlockSessionPage(page, token);
-    await createFreshSession(page);
+    await createFreshSession(page, projectPath);
 
     const side = page.locator(".session-side");
     const chat = page.locator(".chat-pane");
