@@ -1834,6 +1834,10 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   await expect(page.locator(".chat-context")).toContainText(
     "local-default · /srv/work",
   );
+  await expect(page.locator(".pane-summary-copy")).toContainText("1 server · 1 project");
+  await expect(
+    page.getByText("Servers, project paths, and session history."),
+  ).toHaveCount(0);
   const sideBox = await sidebar.boundingBox();
   const chatBox = await chatPane.boundingBox();
   expect(sideBox).not.toBeNull();
@@ -2858,6 +2862,39 @@ test("project create and rename use project name as primary label", async ({
 
   await expect(
     page.locator(".project-chip-main strong", { hasText: "Demo App v2" }),
+  ).toBeVisible();
+});
+
+test("only the active project surfaces management actions", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PROJECT_ACTIONS_${Date.now()}`;
+  await mockSessionApi(page, `project actions ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByRole("button", { name: "New Project" }).click();
+  await page.getByPlaceholder("/path/to/project").fill("/srv/demo-app");
+  await page.getByPlaceholder("My Project").fill("Demo App");
+  await page.getByRole("button", { name: "Create" }).click();
+
+  const demoProjectNode = page.locator(".project-node", {
+    has: page.locator(".project-chip-main strong", { hasText: "Demo App" }),
+  });
+  const workProjectNode = page.locator(".project-node", {
+    has: page.locator(".project-chip-main strong", { hasText: "work" }),
+  });
+
+  await expect(
+    demoProjectNode.locator(".project-node-actions").getByRole("button", { name: "Rename" }),
+  ).toBeVisible();
+  await expect(
+    demoProjectNode.locator(".project-node-actions").getByRole("button", { name: "Archive" }),
+  ).toBeVisible();
+
+  await workProjectNode.locator(".project-chip").click();
+
+  await expect(demoProjectNode.locator(".project-node-actions")).toHaveCount(0);
+  await expect(
+    workProjectNode.locator(".project-node-actions").getByRole("button", { name: "Rename" }),
   ).toBeVisible();
 });
 
