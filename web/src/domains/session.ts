@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isLegacySessionNoiseEntry } from "./timeline-noise";
 
 export type TimelineKind = "user" | "assistant" | "system";
 export type TimelineState = "running" | "success" | "error";
@@ -217,29 +218,6 @@ function projectWorkspaceID(hostID: string, path: string): string {
   return `project_${hostID.trim()}::${path.trim()}`;
 }
 
-function isLegacyConnectionNoiseEntry(entry: TimelineEntry): boolean {
-  if (entry.kind !== "system") return false;
-  const title = entry.title.trim().toLowerCase();
-  const body = entry.body.trim();
-  const bodyLower = body.toLowerCase();
-  if (title === "connected" && bodyLower.startsWith("connected. hosts=")) {
-    return true;
-  }
-  if (title === "connection failed") {
-    return true;
-  }
-  if (title === "server completed") {
-    return true;
-  }
-  if (
-    (title === "failed" || title === "system") &&
-    /\b(done status=|completed exit=|queue_depth=)/.test(bodyLower)
-  ) {
-    return true;
-  }
-  return false;
-}
-
 function normalizeSession(raw: unknown, index: number): ConversationThread {
   const fallback = createSession(index);
   if (!raw || typeof raw !== "object") return fallback;
@@ -256,7 +234,7 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
           ...entry,
           createdAt: typeof entry.createdAt === "string" ? entry.createdAt : now
         }))
-        .filter((entry) => !isLegacyConnectionNoiseEntry(entry))
+        .filter((entry) => !isLegacySessionNoiseEntry(entry))
     : [];
   const sandbox = candidate.sandbox;
   const safeSandbox =
@@ -538,6 +516,9 @@ export function useSessionDomain() {
   }
 
   function addTimelineEntry(entry: Omit<TimelineEntry, "id" | "createdAt">, threadID = activeThreadID) {
+    if (isLegacySessionNoiseEntry(entry)) {
+      return;
+    }
     const createdAt = new Date().toISOString();
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,

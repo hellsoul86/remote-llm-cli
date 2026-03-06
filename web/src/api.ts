@@ -400,10 +400,26 @@ export type CodexV2TurnStartRequest = {
   host_id?: string;
   prompt?: string;
   input?: CodexV2TurnStartInputItem[];
+  mode?: "exec" | "resume" | "review";
+  resume_last?: boolean;
+  resume_session_id?: string;
+  review_uncommitted?: boolean;
+  review_base?: string;
+  review_commit?: string;
+  review_title?: string;
   model?: string;
   cwd?: string;
   approval_policy?: string;
   sandbox?: string;
+  search?: boolean;
+  profile?: string;
+  config?: string[];
+  enable?: string[];
+  disable?: string[];
+  add_dirs?: string[];
+  skip_git_repo_check?: boolean;
+  ephemeral?: boolean;
+  json_output?: boolean;
   metadata?: Record<string, string>;
 };
 
@@ -1011,6 +1027,33 @@ export async function listCodexV2PendingRequests(
   return body.requests as CodexV2PendingRequest[];
 }
 
+export async function resolveCodexV2PendingRequest(
+  token: string,
+  sessionID: string,
+  requestID: string,
+  request: {
+    decision?: unknown;
+    result?: unknown;
+    error?: { code: number; message: string; data?: unknown };
+  },
+): Promise<{ resolved: boolean; session_id: string; request_id: string }> {
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/requests/${encodeURIComponent(requestID)}/resolve`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request),
+    },
+  );
+  const body = await res.json();
+  if (!res.ok || body?.resolved !== true) {
+    throw new Error(
+      `resolve codex v2 pending request failed: ${res.status} ${JSON.stringify(body)}`,
+    );
+  }
+  return body as { resolved: boolean; session_id: string; request_id: string };
+}
+
 type StreamSessionEventsOptions = {
   after?: number;
   signal: AbortSignal;
@@ -1018,7 +1061,6 @@ type StreamSessionEventsOptions = {
 };
 
 export async function streamSessionEvents(token: string, sessionID: string, options: StreamSessionEventsOptions): Promise<void> {
-  const normalizedSessionID = sessionID.trim();
   const params = new URLSearchParams();
   if (typeof options.after === "number" && options.after > 0) {
     params.set("after", String(options.after));
@@ -1027,10 +1069,6 @@ export async function streamSessionEvents(token: string, sessionID: string, opti
   const fallbackURL = query
     ? `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream?${query}`
     : `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}/stream`;
-  if (/^session_cli_/i.test(normalizedSessionID)) {
-    await streamSessionEventsViaSSE(fallbackURL, token, options);
-    return;
-  }
   const wsError = await streamSessionEventsViaWS(token, sessionID, options);
   if (!wsError) {
     return;

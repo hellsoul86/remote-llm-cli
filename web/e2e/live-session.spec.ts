@@ -33,7 +33,19 @@ async function unlockSessionPage(page: Page, token: string): Promise<void> {
   await expect(composerInput(page)).toBeVisible({ timeout: 120_000 });
 }
 
+async function selectStableHomeProject(page: Page): Promise<void> {
+  const homeProject = page
+    .locator(".project-chip", {
+      has: page.locator(".project-chip-main em", { hasText: "/home/ecs-user" }),
+    })
+    .first();
+  if (await homeProject.isVisible().catch(() => false)) {
+    await homeProject.click();
+  }
+}
+
 async function createFreshSession(page: Page): Promise<void> {
+  await selectStableHomeProject(page);
   await page.getByRole("button", { name: "New Session", exact: true }).click();
   const heading = page.locator(".chat-head h1");
   await expect

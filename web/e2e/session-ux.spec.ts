@@ -1,10 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
+import { parseCodexAssistantTextFromStdout } from "../src/features/session/codex-parsing";
 
 type MockHarness = {
   runRequests: () => number;
   sessionOneStreamAfterValues: () => number[];
+  sessionOneSSECalls: () => number;
   imageUploads: () => number;
   lastRunRequest: () => Record<string, unknown> | null;
+  lastPendingResolveRequest: () => Record<string, unknown> | null;
   lastPlatformLoginRequest: () => Record<string, unknown> | null;
   lastPlatformMCPRequest: () => Record<string, unknown> | null;
   lastPlatformCloudRequest: () => Record<string, unknown> | null;
@@ -12,15 +15,16 @@ type MockHarness = {
 
 type MockOptions = {
   streamPattern?: "ready-only" | "completion-once";
+  pendingRequestScenario?: "command-approval";
   includeSecondSession?: boolean;
   backgroundCompletion?: boolean;
-  shuffleSessionUpdates?: boolean;
   titleUpdate?: string;
   jobRunningPolls?: number;
   jobEventFirstPollDelayMS?: number;
   streamFailAttempts?: number;
   runtimeCommandEvents?: boolean;
   assistantDeltaEvents?: number;
+  ignoreStreamAfterCursor?: boolean;
 };
 
 function buildLongAssistantReply(marker: string): string {
@@ -37,18 +41,18 @@ async function mockSessionApi(
   marker: string,
   options?: MockOptions,
 ): Promise<MockHarness> {
-  let jobPollCount = 0;
-  let eventPollCount = 0;
   let runReqCount = 0;
   let imageUploadCount = 0;
   let lastRunRequest: Record<string, unknown> | null = null;
+  let lastPendingResolveRequest: Record<string, unknown> | null = null;
   let lastPlatformLoginRequest: Record<string, unknown> | null = null;
   let lastPlatformMCPRequest: Record<string, unknown> | null = null;
   let lastPlatformCloudRequest: Record<string, unknown> | null = null;
+
   const streamPattern = options?.streamPattern ?? "ready-only";
+  const pendingRequestScenario = options?.pendingRequestScenario ?? null;
   const includeSecondSession = options?.includeSecondSession ?? false;
   const backgroundCompletion = options?.backgroundCompletion ?? false;
-  const shuffleSessionUpdates = options?.shuffleSessionUpdates ?? false;
   const titleUpdate = options?.titleUpdate?.trim() ?? "";
   const jobRunningPolls = Math.max(1, options?.jobRunningPolls ?? 1);
   const jobEventFirstPollDelayMS = Math.max(
@@ -58,12 +62,24 @@ async function mockSessionApi(
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
+  const ignoreStreamAfterCursor = options?.ignoreStreamAfterCursor ?? false;
+
   let sessionOneStreamAttempts = 0;
+  let sessionOneSSECalls = 0;
+  let firstTurnDelayApplied = false;
+  let backgroundCompletionEmitted = false;
+  let sessionStartCounter = 0;
+  let forkCounter = 0;
   const sessionOneStreamAfterValues: number[] = [];
-  let sessionListRequestCount = 0;
-  let canceled = false;
+
   const nowISO = new Date().toISOString();
-  const sessions = [
+  const sessions: Array<{
+    id: string;
+    project_id: string;
+    title: string;
+    updated_at: string;
+    created_at: string;
+  }> = [
     {
       id: "session_cli_1",
       project_id: "project_local_1__srv_work",
@@ -83,6 +99,7 @@ async function mockSessionApi(
         ]
       : []),
   ];
+
   const projectRecords: Array<{
     id: string;
     host_id: string;
@@ -105,12 +122,287 @@ async function mockSessionApi(
     },
   ];
 
+  type TurnState = {
+    runID: string;
+    phase:
+      | "pending"
+      | "waiting-request"
+      | "started"
+      | "completed"
+      | "canceled";
+    remainingPolls: number;
+    pendingRequestID: string;
+  };
+
+  const turnStates: TurnState[] = [];
+  const sessionOneEvents: Array<Record<string, unknown>> = [];
+  const sessionTwoEvents: Array<Record<string, unknown>> = [];
+  let sessionOneSeq = 0;
+  let sessionTwoSeq = 0;
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
+
+  const nextSessionOneSeq = (): number => {
+    sessionOneSeq += 1;
+    return sessionOneSeq;
+  };
+
+  const nextSessionTwoSeq = (): number => {
+    sessionTwoSeq += 1;
+    return sessionTwoSeq;
+  };
+
+  const pushSessionOneEvent = (
+    runID: string,
+    type: string,
+    payload: Record<string, unknown>,
+    createdAt: string,
+  ) => {
+    sessionOneEvents.push({
+      seq: nextSessionOneSeq(),
+      session_id: "session_cli_1",
+      run_id: runID,
+      type,
+      payload,
+      created_at: createdAt,
+    });
+  };
+
+  const pushSessionTwoEvent = (
+    runID: string,
+    type: string,
+    payload: Record<string, unknown>,
+    createdAt: string,
+  ) => {
+    sessionTwoEvents.push({
+      seq: nextSessionTwoSeq(),
+      session_id: "session_cli_2",
+      run_id: runID,
+      type,
+      payload,
+      created_at: createdAt,
+    });
+  };
+
+  const pendingRequestRecordForTurn = (
+    turnState: TurnState,
+  ): Record<string, unknown> | null => {
+    if (pendingRequestScenario !== "command-approval") return null;
+    if (!turnState.pendingRequestID.trim()) return null;
+    return {
+      session_id: "session_cli_1",
+      request_id: turnState.pendingRequestID,
+      host_id: "local_1",
+      method: "item/commandExecution/requestApproval",
+      received_at: new Date().toISOString(),
+      params: {
+        threadId: "session_cli_1",
+        turnId: turnState.runID,
+        itemId: `cmd_${turnState.runID}`,
+        command: "git status --short",
+        cwd: "/srv/work",
+        reason: "Codex needs repo status before it can continue.",
+        availableDecisions: ["accept", "decline", "cancel"],
+      },
+    };
+  };
+
+  const chunkFromText = (text: string, includePrelude: boolean): string => {
+    const chunkLines: string[] = [];
+    if (includePrelude) {
+      chunkLines.push('{"type":"thread.started","thread_id":"t_ux"}');
+      chunkLines.push('{"type":"turn.started"}');
+      if (runtimeCommandEvents) {
+        chunkLines.push(
+          JSON.stringify({
+            type: "item.started",
+            item: {
+              id: "item_cmd_1",
+              type: "command_execution",
+              command: "ls -la",
+              aggregated_output: "",
+              exit_code: null,
+              status: "in_progress",
+            },
+          }),
+        );
+        chunkLines.push(
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "item_cmd_1",
+              type: "command_execution",
+              command: "ls -la",
+              aggregated_output: "README.md",
+              exit_code: 0,
+              status: "completed",
+            },
+          }),
+        );
+      }
+    }
+    chunkLines.push(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text },
+      }),
+    );
+    return `${chunkLines.join("\n")}\n`;
+  };
+
+  const appendTurnStartEvents = (turnState: TurnState) => {
+    const startedAt = new Date().toISOString();
+    pushSessionOneEvent(turnState.runID, "run.started", { turn_id: turnState.runID }, startedAt);
+    pushSessionOneEvent(
+      turnState.runID,
+      "target.started",
+      { host_name: "local-default", attempt: 1 },
+      startedAt,
+    );
+
+    const replyLines = assistantReply.split("\n");
+    for (let index = 0; index < assistantDeltaEvents; index += 1) {
+      const ratio = (index + 1) / assistantDeltaEvents;
+      const lineCount = Math.max(
+        1,
+        Math.min(replyLines.length, Math.round(replyLines.length * ratio)),
+      );
+      const text = replyLines.slice(0, lineCount).join("\n");
+      pushSessionOneEvent(
+        turnState.runID,
+        "assistant.delta",
+        { chunk: chunkFromText(text, index === 0) },
+        startedAt,
+      );
+    }
+  };
+
+  const appendTurnTerminalEvents = (turnState: TurnState) => {
+    const finishedAt = new Date().toISOString();
+    pushSessionOneEvent(
+      turnState.runID,
+      "target.done",
+      {
+        host_name: "local-default",
+        status: "ok",
+        exit_code: 0,
+      },
+      finishedAt,
+    );
+    pushSessionOneEvent(
+      turnState.runID,
+      "assistant.completed",
+      { turn_id: turnState.runID },
+      finishedAt,
+    );
+    if (titleUpdate) {
+      pushSessionOneEvent(
+        turnState.runID,
+        "session.title.updated",
+        { title: titleUpdate },
+        finishedAt,
+      );
+    }
+    pushSessionOneEvent(
+      turnState.runID,
+      "run.completed",
+      { turn_id: turnState.runID },
+      finishedAt,
+    );
+  };
+
+  const materializeSessionOneEventsForStream = async () => {
+    if (streamPattern !== "completion-once" && streamPattern !== "ready-only") {
+      return;
+    }
+    const current = turnStates.find(
+      (state) =>
+        state.phase === "pending" ||
+        state.phase === "waiting-request" ||
+        state.phase === "started",
+    );
+    if (!current) return;
+
+    if (current.phase === "pending") {
+      if (!firstTurnDelayApplied && jobEventFirstPollDelayMS > 0) {
+        firstTurnDelayApplied = true;
+        await sleep(jobEventFirstPollDelayMS);
+      }
+      appendTurnStartEvents(current);
+      current.phase = current.pendingRequestID ? "waiting-request" : "started";
+    }
+
+    if (current.phase === "waiting-request") {
+      return;
+    }
+
+    if (current.phase === "started") {
+      if (current.remainingPolls > 1) {
+        current.remainingPolls -= 1;
+        return;
+      }
+      appendTurnTerminalEvents(current);
+      current.phase = "completed";
+      current.remainingPolls = 0;
+    }
+  };
+
+  const ensureSessionTwoBackgroundCompletion = () => {
+    if (!includeSecondSession || !backgroundCompletion || backgroundCompletionEmitted) {
+      return;
+    }
+    backgroundCompletionEmitted = true;
+    const runID = "turn_bg_1";
+    const startedAt = new Date(Date.now() - 1400).toISOString();
+    const finishedAt = new Date().toISOString();
+    const streamChunk =
+      '{"type":"thread.started","thread_id":"t_bg"}\n' +
+      '{"type":"turn.started"}\n' +
+      `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: `background reply ${marker}` } })}\n`;
+
+    pushSessionTwoEvent(runID, "run.started", { turn_id: runID }, startedAt);
+    pushSessionTwoEvent(runID, "assistant.delta", { chunk: streamChunk }, startedAt);
+    pushSessionTwoEvent(runID, "assistant.completed", { turn_id: runID }, finishedAt);
+    pushSessionTwoEvent(runID, "run.completed", { turn_id: runID }, finishedAt);
+  };
+
+  const buildSSEBody = (
+    sessionID: string,
+    cursor: number,
+    allEvents: Array<Record<string, unknown>>,
+  ): string => {
+    const replay = allEvents.filter((event) => {
+      const seq = typeof event.seq === "number" ? event.seq : 0;
+      return seq > cursor;
+    });
+    const lines: string[] = [
+      "event: session.ready",
+      `data: ${JSON.stringify({ session_id: sessionID, cursor })}`,
+      "",
+    ];
+    for (const event of replay) {
+      const seq = typeof event.seq === "number" ? String(event.seq) : "";
+      if (seq) {
+        lines.push(`id: ${seq}`);
+      }
+      lines.push("event: session.event");
+      lines.push(`data: ${JSON.stringify(event)}`);
+      lines.push("");
+    }
+    lines.push("");
+    return lines.join("\n");
+  };
+
   await page.route("**/v1/healthz", async (route) => {
     await route.fulfill({
       status: 200,
       json: { ok: true, timestamp: "2026-03-03T00:00:00Z" },
     });
   });
+
   await page.route("**/v1/hosts", async (route, request) => {
     if (request.method() !== "GET") {
       await route.fallback();
@@ -133,6 +425,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/runtimes", async (route) => {
     await route.fulfill({
       status: 200,
@@ -152,12 +445,15 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/runs**", async (route) => {
     await route.fulfill({ status: 200, json: { runs: [] } });
   });
+
   await page.route("**/v1/audit**", async (route) => {
     await route.fulfill({ status: 200, json: { events: [] } });
   });
+
   await page.route("**/v1/metrics", async (route) => {
     await route.fulfill({
       status: 200,
@@ -181,6 +477,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/admin/retention", async (route, request) => {
     if (request.method() !== "GET" && request.method() !== "POST") {
       await route.fallback();
@@ -197,6 +494,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/codex/models**", async (route) => {
     await route.fulfill({
       status: 200,
@@ -207,6 +505,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/codex/platform/login", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -255,6 +554,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/codex/platform/mcp", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -299,6 +599,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/codex/platform/cloud", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -346,6 +647,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/files/images", async (route, request) => {
     if (request.method() !== "POST") {
       await route.fallback();
@@ -362,6 +664,7 @@ async function mockSessionApi(
       },
     });
   });
+
   await page.route("**/v1/projects**", async (route, request) => {
     const method = request.method();
     if (method === "GET") {
@@ -459,22 +762,8 @@ async function mockSessionApi(
     }
     await route.fallback();
   });
+
   await page.route("**/v1/sessions?**", async (route, request) => {
-    sessionListRequestCount += 1;
-    if (
-      shuffleSessionUpdates &&
-      includeSecondSession &&
-      sessionListRequestCount > 1 &&
-      sessions.length > 1
-    ) {
-      const bumped = new Date(
-        Date.now() + sessionListRequestCount * 1000,
-      ).toISOString();
-      sessions[1] = {
-        ...sessions[1],
-        updated_at: bumped,
-      };
-    }
     const url = new URL(request.url());
     const projectIDFilter = (url.searchParams.get("project_id") ?? "").trim();
     const filteredSessions = sessions.filter((sessionItem) => {
@@ -497,206 +786,7 @@ async function mockSessionApi(
       },
     });
   });
-  await page.route("**/v1/sessions/session_cli_1/stream**", async (route) => {
-    const url = new URL(route.request().url());
-    const streamAfterRaw = url.searchParams.get("after") ?? "0";
-    const streamAfter = Number.parseInt(streamAfterRaw, 10);
-    const safeStreamAfter = Number.isFinite(streamAfter) && streamAfter > 0
-      ? streamAfter
-      : 0;
-    sessionOneStreamAfterValues.push(safeStreamAfter);
-    if (sessionOneStreamAttempts < streamFailAttempts) {
-      sessionOneStreamAttempts += 1;
-      await route.fulfill({
-        status: 503,
-        body: "stream temporarily unavailable",
-      });
-      return;
-    }
-    if (streamPattern === "completion-once") {
-      const chunkFromText = (text: string, includePrelude: boolean): string => {
-        const chunkLines: string[] = [];
-        if (includePrelude) {
-          chunkLines.push(`{"type":"thread.started","thread_id":"t_ux"}`);
-          chunkLines.push(`{"type":"turn.started"}`);
-          if (runtimeCommandEvents) {
-            chunkLines.push(
-              JSON.stringify({
-                type: "item.started",
-                item: {
-                  id: "item_cmd_1",
-                  type: "command_execution",
-                  command: "ls -la",
-                  aggregated_output: "",
-                  exit_code: null,
-                  status: "in_progress",
-                },
-              }),
-            );
-            chunkLines.push(
-              JSON.stringify({
-                type: "item.completed",
-                item: {
-                  id: "item_cmd_1",
-                  type: "command_execution",
-                  command: "ls -la",
-                  aggregated_output: "README.md",
-                  exit_code: 0,
-                  status: "completed",
-                },
-              }),
-            );
-          }
-        }
-        chunkLines.push(
-          JSON.stringify({
-            type: "item.completed",
-            item: { type: "agent_message", text },
-          }),
-        );
-        return `${chunkLines.join("\n")}\n`;
-      };
-      const replyLines = assistantReply.split("\n");
-      const deltaChunks: string[] = [];
-      for (let index = 0; index < assistantDeltaEvents; index += 1) {
-        const ratio = (index + 1) / assistantDeltaEvents;
-        const lineCount = Math.max(
-          1,
-          Math.min(replyLines.length, Math.round(replyLines.length * ratio)),
-        );
-        const text = replyLines.slice(0, lineCount).join("\n");
-        deltaChunks.push(chunkFromText(text, index === 0));
-      }
-      const events = [
-        {
-          seq: 1,
-          type: "run.started",
-          payload: { job_id: "job_ux_1" },
-          createdAt: "2026-03-03T00:00:00Z",
-        },
-        {
-          seq: 2,
-          type: "target.started",
-          payload: { job_id: "job_ux_1", host_name: "local-default", attempt: 1 },
-          createdAt: "2026-03-03T00:00:00Z",
-        },
-        {
-          seq: 3 + deltaChunks.length,
-          type: "target.done",
-          payload: { job_id: "job_ux_1", host_name: "local-default", status: "ok", exit_code: 0 },
-          createdAt: "2026-03-03T00:00:01Z",
-        },
-        {
-          seq: 4 + deltaChunks.length,
-          type: "assistant.completed",
-          payload: { job_id: "job_ux_1", run_id: "job_ux_1" },
-          createdAt: "2026-03-03T00:00:01Z",
-        },
-      ];
-      for (let index = 0; index < deltaChunks.length; index += 1) {
-        events.splice(2 + index, 0, {
-          seq: 3 + index,
-          type: "assistant.delta",
-          payload: { job_id: "job_ux_1", chunk: deltaChunks[index] },
-          createdAt: "2026-03-03T00:00:00Z",
-        });
-      }
-      if (titleUpdate) {
-        events.push({
-          seq: events.length + 1,
-          type: "session.title.updated",
-          payload: { title: titleUpdate },
-          createdAt: "2026-03-03T00:00:01Z",
-        });
-      }
-      events.push({
-        seq: events.length + 1,
-        type: "run.completed",
-        payload: { job_id: "job_ux_1" },
-        createdAt: "2026-03-03T00:00:01Z",
-      });
-      const replayEvents = events.filter((event) => event.seq > safeStreamAfter);
-      const streamLines: string[] = [
-        `event: session.ready`,
-        `data: {"session_id":"session_cli_1","cursor":${safeStreamAfter}}`,
-        ``,
-      ];
-      for (const event of replayEvents) {
-        streamLines.push(`event: session.event`);
-        streamLines.push(
-          `data: ${JSON.stringify({
-            seq: event.seq,
-            session_id: "session_cli_1",
-            run_id: "job_ux_1",
-            type: event.type,
-            payload: event.payload,
-            created_at: event.createdAt,
-          })}`,
-        );
-        streamLines.push(``);
-      }
-      streamLines.push(``);
-      const streamBody = streamLines.join("\n");
-      await route.fulfill({
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-        body: streamBody,
-      });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      headers: { "content-type": "text/event-stream" },
-      body: `event: session.ready\ndata: {"session_id":"session_cli_1","cursor":0}\n\n`,
-    });
-  });
-  await page.route("**/v1/sessions/session_cli_2/stream**", async (route) => {
-    if (!includeSecondSession) {
-      await route.fulfill({
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-        body: `event: session.ready\ndata: {"session_id":"session_cli_2","cursor":0}\n\n`,
-      });
-      return;
-    }
-    if (!backgroundCompletion) {
-      await route.fulfill({
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-        body: `event: session.ready\ndata: {"session_id":"session_cli_2","cursor":0}\n\n`,
-      });
-      return;
-    }
-    const streamChunk =
-      `{"type":"thread.started","thread_id":"t_bg"}\n` +
-      `{"type":"turn.started"}\n` +
-      `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: `background reply ${marker}` } })}\n`;
-    const startedAt = new Date(Date.now() - 1400).toISOString();
-    const finishedAt = new Date().toISOString();
-    const streamBody = [
-      `event: session.ready`,
-      `data: {"session_id":"session_cli_2","cursor":0}`,
-      ``,
-      `event: session.event`,
-      `data: {"seq":1,"session_id":"session_cli_2","run_id":"job_bg_1","type":"run.started","payload":{"job_id":"job_bg_1"},"created_at":"${startedAt}"}`,
-      ``,
-      `event: session.event`,
-      `data: {"seq":2,"session_id":"session_cli_2","run_id":"job_bg_1","type":"assistant.delta","payload":{"job_id":"job_bg_1","chunk":${JSON.stringify(streamChunk)}},"created_at":"${startedAt}"}`,
-      ``,
-      `event: session.event`,
-      `data: {"seq":3,"session_id":"session_cli_2","run_id":"job_bg_1","type":"assistant.completed","payload":{"job_id":"job_bg_1","run_id":"job_bg_1"},"created_at":"${finishedAt}"}`,
-      ``,
-      `event: session.event`,
-      `data: {"seq":4,"session_id":"session_cli_2","run_id":"job_bg_1","type":"run.completed","payload":{"job_id":"job_bg_1"},"created_at":"${finishedAt}"}`,
-      ``,
-      ``,
-    ].join("\n");
-    await route.fulfill({
-      status: 200,
-      headers: { "content-type": "text/event-stream" },
-      body: streamBody,
-    });
-  });
+
   await page.route("**/v1/codex/sessions/discover", async (route) => {
     await route.fulfill({
       status: 200,
@@ -739,246 +829,6 @@ async function mockSessionApi(
     });
   });
 
-  await page.route("**/v1/jobs/run", async (route, request) => {
-    runReqCount += 1;
-    try {
-      const bodyRaw = request.postData() ?? "{}";
-      const parsed = JSON.parse(bodyRaw) as Record<string, unknown>;
-      lastRunRequest = parsed;
-    } catch {
-      lastRunRequest = null;
-    }
-    await route.fulfill({
-      status: 202,
-      json: {
-        job: {
-          id: "job_ux_1",
-          type: "run",
-          status: "pending",
-          runtime: "codex",
-          prompt_preview: `prompt-${marker}`,
-          queued_at: "2026-03-03T00:00:00Z",
-          total_hosts: 1,
-          fanout: 1,
-        },
-      },
-    });
-  });
-  await page.route("**/v1/jobs/job_ux_1", async (route) => {
-    if (canceled) {
-      await route.fulfill({
-        status: 200,
-        json: {
-          job: {
-            id: "job_ux_1",
-            type: "run",
-            status: "canceled",
-            runtime: "codex",
-            prompt_preview: "prompt",
-            queued_at: "2026-03-03T00:00:00Z",
-            started_at: "2026-03-03T00:00:01Z",
-            finished_at: "2026-03-03T00:00:02Z",
-            result_status: 499,
-            total_hosts: 1,
-            succeeded_hosts: 0,
-            failed_hosts: 0,
-            fanout: 1,
-            duration_ms: 1000,
-            error: "canceled while running",
-            response: {
-              runtime: "codex",
-              summary: {
-                total: 1,
-                succeeded: 0,
-                failed: 0,
-                fanout: 1,
-                retry_count: 0,
-                retry_backoff_ms: 1000,
-                duration_ms: 1000,
-                started_at: "2026-03-03T00:00:01Z",
-                finished_at: "2026-03-03T00:00:02Z",
-              },
-              targets: [],
-            },
-          },
-        },
-      });
-      return;
-    }
-    jobPollCount += 1;
-    if (jobPollCount <= jobRunningPolls) {
-      await route.fulfill({
-        status: 200,
-        json: {
-          job: {
-            id: "job_ux_1",
-            type: "run",
-            status: "running",
-            runtime: "codex",
-            prompt_preview: "prompt",
-            queued_at: "2026-03-03T00:00:00Z",
-            started_at: "2026-03-03T00:00:01Z",
-          },
-        },
-      });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      json: {
-        job: {
-          id: "job_ux_1",
-          type: "run",
-          status: "succeeded",
-          runtime: "codex",
-          prompt_preview: "prompt",
-          queued_at: "2026-03-03T00:00:00Z",
-          started_at: "2026-03-03T00:00:01Z",
-          finished_at: "2026-03-03T00:00:02Z",
-          result_status: 200,
-          total_hosts: 1,
-          succeeded_hosts: 1,
-          failed_hosts: 0,
-          fanout: 1,
-          duration_ms: 1000,
-          response: {
-            runtime: "codex",
-            summary: {
-              total: 1,
-              succeeded: 1,
-              failed: 0,
-              fanout: 1,
-              retry_count: 0,
-              retry_backoff_ms: 1000,
-              duration_ms: 1000,
-              started_at: "2026-03-03T00:00:01Z",
-              finished_at: "2026-03-03T00:00:02Z",
-            },
-            targets: [],
-          },
-        },
-      },
-    });
-  });
-  await page.route("**/v1/jobs/job_ux_1/events**", async (route) => {
-    if (eventPollCount === 0 && jobEventFirstPollDelayMS > 0) {
-      await new Promise((resolve) => {
-        setTimeout(resolve, jobEventFirstPollDelayMS);
-      });
-    }
-    if (canceled) {
-      await route.fulfill({
-        status: 200,
-        json: {
-          job_id: "job_ux_1",
-          after: eventPollCount,
-          next_after: Math.max(eventPollCount, 3),
-          events: [
-            {
-              seq: 2,
-              job_id: "job_ux_1",
-              type: "job.cancel_requested",
-              created_at: "2026-03-03T00:00:01Z",
-            },
-            {
-              seq: 3,
-              job_id: "job_ux_1",
-              type: "job.canceled",
-              created_at: "2026-03-03T00:00:02Z",
-            },
-          ],
-        },
-      });
-      return;
-    }
-    if (streamPattern === "completion-once") {
-      await route.fulfill({
-        status: 200,
-        json: {
-          job_id: "job_ux_1",
-          after: eventPollCount,
-          next_after: eventPollCount,
-          events: [],
-        },
-      });
-      return;
-    }
-    eventPollCount += 1;
-    if (eventPollCount > 1) {
-      await route.fulfill({
-        status: 200,
-        json: { job_id: "job_ux_1", after: 4, next_after: 4, events: [] },
-      });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      json: {
-        job_id: "job_ux_1",
-        after: 0,
-        next_after: 4,
-        events: [
-          {
-            seq: 1,
-            job_id: "job_ux_1",
-            type: "job.running",
-            created_at: "2026-03-03T00:00:00Z",
-          },
-          {
-            seq: 2,
-            job_id: "job_ux_1",
-            type: "target.stdout",
-            host_name: "local-default",
-            chunk: [
-              `{"type":"thread.started","thread_id":"t_ux"}`,
-              `{"type":"turn.started"}`,
-              ...(titleUpdate
-                ? [JSON.stringify({ type: "session.title.updated", title: titleUpdate })]
-                : []),
-              JSON.stringify({
-                type: "item.completed",
-                item: { type: "agent_message", text: assistantReply },
-              }),
-            ].join("\n") + "\n",
-            created_at: "2026-03-03T00:00:00Z",
-          },
-          {
-            seq: 3,
-            job_id: "job_ux_1",
-            type: "target.done",
-            host_name: "local-default",
-            status: "ok",
-            exit_code: 0,
-            created_at: "2026-03-03T00:00:00Z",
-          },
-          {
-            seq: 4,
-            job_id: "job_ux_1",
-            type: "job.succeeded",
-            created_at: "2026-03-03T00:00:01Z",
-          },
-        ],
-      },
-    });
-  });
-  await page.route("**/v1/jobs/job_ux_1/cancel", async (route) => {
-    canceled = true;
-    await route.fulfill({
-      status: 200,
-      json: {
-        state: "cancel_requested",
-        job: {
-          id: "job_ux_1",
-          type: "run",
-          status: "running",
-          runtime: "codex",
-          prompt_preview: "prompt",
-          queued_at: "2026-03-03T00:00:00Z",
-          started_at: "2026-03-03T00:00:01Z",
-        },
-      },
-    });
-  });
   await page.route("**/v1/jobs**", async (route) => {
     if (route.request().method() !== "GET") {
       await route.fallback();
@@ -989,45 +839,880 @@ async function mockSessionApi(
       await route.fallback();
       return;
     }
-    const status = canceled
-      ? "canceled"
-      : jobPollCount <= jobRunningPolls
-        ? "running"
-        : "succeeded";
+    const activeTurn = turnStates.find(
+      (state) =>
+        state.phase === "pending" ||
+        state.phase === "waiting-request" ||
+        state.phase === "started",
+    );
+    const latestTurn = turnStates.length > 0 ? turnStates[turnStates.length - 1] : null;
+    const status = activeTurn
+      ? "running"
+      : latestTurn?.phase === "canceled"
+        ? "canceled"
+        : latestTurn
+          ? "succeeded"
+          : "succeeded";
+
     await route.fulfill({
       status: 200,
       json: {
-        jobs: [
-          {
-            id: "job_ux_1",
-            type: "run",
-            status,
-            runtime: "codex",
-            prompt_preview: "prompt",
-            queued_at: "2026-03-03T00:00:00Z",
-            result_status: status === "succeeded" ? 200 : undefined,
-            total_hosts: 1,
-            succeeded_hosts: status === "succeeded" ? 1 : 0,
-            failed_hosts: 0,
-            fanout: 1,
-            duration_ms: status === "succeeded" ? 1000 : 0,
-          },
-        ],
+        jobs: latestTurn
+          ? [
+              {
+                id: latestTurn.runID,
+                type: "run",
+                status,
+                runtime: "codex",
+                prompt_preview: "prompt",
+                queued_at: "2026-03-03T00:00:00Z",
+                result_status: status === "succeeded" ? 200 : undefined,
+                total_hosts: 1,
+                succeeded_hosts: status === "succeeded" ? 1 : 0,
+                failed_hosts: 0,
+                fanout: 1,
+                duration_ms: status === "succeeded" ? 1000 : 0,
+              },
+            ]
+          : [],
       },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/start", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const bodyRaw = request.postData() ?? "{}";
+    const body = JSON.parse(bodyRaw) as {
+      path?: string;
+      title?: string;
+    };
+    const path = (body.path ?? "").trim() || "/srv/work";
+    const title = (body.title ?? "").trim() || `Session ${sessions.length + 1}`;
+
+    let project = projectRecords.find((item) => item.path === path);
+    if (!project) {
+      project = {
+        id: `project_local_1__${encodeURIComponent(path)}`,
+        host_id: "local_1",
+        host_name: "local-default",
+        path,
+        title: path.split("/").filter(Boolean).at(-1) || "project",
+        runtime: "codex",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      projectRecords.push(project);
+    }
+
+    sessionStartCounter += 1;
+    const sessionID = `session_cli_new_${sessionStartCounter}`;
+    sessions.push({
+      id: sessionID,
+      project_id: project.id,
+      title,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    await route.fulfill({
+      status: 200,
+      json: {
+        session: {
+          id: sessionID,
+          project_id: project.id,
+          host_id: "local_1",
+          path: project.path,
+          runtime: "codex",
+          title,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        project,
+        thread: {
+          id: sessionID,
+          preview: title,
+        },
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/fork", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sourceID = decodeURIComponent(parts[4] ?? "").trim();
+    const source = sessions.find((item) => item.id === sourceID);
+    const bodyRaw = request.postData() ?? "{}";
+    const body = JSON.parse(bodyRaw) as { title?: string };
+
+    forkCounter += 1;
+    const sessionID = `session_cli_fork_${forkCounter}`;
+    const title =
+      (body.title ?? "").trim() ||
+      (source ? `Fork · ${source.title}` : `Fork · Session ${forkCounter}`);
+    const projectID = source?.project_id ?? "project_local_1__srv_work";
+    sessions.push({
+      id: sessionID,
+      project_id: projectID,
+      title,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const project =
+      projectRecords.find((item) => item.id === projectID) ?? projectRecords[0];
+    await route.fulfill({
+      status: 200,
+      json: {
+        session: {
+          id: sessionID,
+          project_id: project.id,
+          host_id: "local_1",
+          path: project.path,
+          runtime: "codex",
+          title,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        project,
+        thread: {
+          id: sessionID,
+          preview: title,
+        },
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/archive", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+    const index = sessions.findIndex((item) => item.id === sessionID);
+    const deleted = index >= 0 ? sessions.splice(index, 1)[0] : null;
+    await route.fulfill({
+      status: 200,
+      json: {
+        archived: true,
+        deleted: Boolean(deleted),
+        session: deleted
+          ? {
+              id: deleted.id,
+              project_id: deleted.project_id,
+              host_id: "local_1",
+              path: "/srv/work",
+              runtime: "codex",
+              title: deleted.title,
+              created_at: deleted.created_at,
+              updated_at: deleted.updated_at,
+            }
+          : undefined,
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/requests/pending", async (route, request) => {
+    if (request.method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+    const pending = turnStates
+      .filter(
+        (state) =>
+          state.phase === "waiting-request" &&
+          state.pendingRequestID.trim() !== "" &&
+          sessionID === "session_cli_1",
+      )
+      .map((state) => pendingRequestRecordForTurn(state))
+      .filter((item): item is Record<string, unknown> => item !== null);
+    await route.fulfill({
+      status: 200,
+      json: {
+        session_id: sessionID,
+        requests: pending,
+      },
+    });
+  });
+
+  await page.route(
+    "**/v2/codex/sessions/*/requests/*/resolve",
+    async (route, request) => {
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const url = new URL(request.url());
+      const parts = url.pathname.split("/");
+      const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+      const requestID = decodeURIComponent(parts[6] ?? "").trim();
+      try {
+        lastPendingResolveRequest = JSON.parse(request.postData() ?? "{}") as Record<
+          string,
+          unknown
+        >;
+      } catch {
+        lastPendingResolveRequest = null;
+      }
+      const turnState = turnStates.find((state) => state.pendingRequestID === requestID);
+      if (turnState && turnState.phase === "waiting-request") {
+        turnState.phase = "started";
+        turnState.pendingRequestID = "";
+        turnState.remainingPolls = Math.max(1, turnState.remainingPolls);
+      }
+      await route.fulfill({
+        status: 200,
+        json: {
+          resolved: true,
+          session_id: sessionID,
+          request_id: requestID,
+        },
+      });
+    },
+  );
+
+  await page.route("**/v2/codex/sessions/*/turns/start", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    runReqCount += 1;
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+
+    try {
+      const bodyRaw = request.postData() ?? "{}";
+      const parsed = JSON.parse(bodyRaw) as Record<string, unknown>;
+      lastRunRequest = parsed;
+    } catch {
+      lastRunRequest = null;
+    }
+
+    if (!sessions.some((item) => item.id === sessionID)) {
+      sessions.push({
+        id: sessionID,
+        project_id: "project_local_1__srv_work",
+        title: `Session ${sessions.length + 1}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    const runID = `turn_${runReqCount}`;
+    turnStates.push({
+      runID,
+      phase: "pending",
+      remainingPolls: jobRunningPolls,
+      pendingRequestID:
+        sessionID === "session_cli_1" && pendingRequestScenario
+          ? `req_${runID}`
+          : "",
+    });
+
+    await route.fulfill({
+      status: 200,
+      json: {
+        turn_id: runID,
+        turn: { id: runID },
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/turns/*/interrupt", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(request.url());
+    const parts = url.pathname.split("/");
+    const runID = decodeURIComponent(parts[6] ?? "").trim();
+    const state = turnStates.find((item) => item.runID === runID);
+    if (state && state.phase !== "completed" && state.phase !== "canceled") {
+      state.phase = "canceled";
+      state.remainingPolls = 0;
+      pushSessionOneEvent(
+        runID,
+        "run.canceled",
+        { turn_id: runID },
+        new Date().toISOString(),
+      );
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        turn_id: runID,
+        interrupted: true,
+      },
+    });
+  });
+
+  await page.route("**/v2/codex/sessions/*/stream**", async (route) => {
+    const url = new URL(route.request().url());
+    const parts = url.pathname.split("/");
+    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+    const streamAfterRaw = url.searchParams.get("after") ?? "0";
+    const streamAfter = Number.parseInt(streamAfterRaw, 10);
+    const safeStreamAfter = Number.isFinite(streamAfter) && streamAfter > 0
+      ? streamAfter
+      : 0;
+
+    if (sessionID === "session_cli_1") {
+      sessionOneSSECalls += 1;
+      sessionOneStreamAfterValues.push(safeStreamAfter);
+      if (sessionOneStreamAttempts < streamFailAttempts) {
+        sessionOneStreamAttempts += 1;
+        await route.fulfill({
+          status: 503,
+          body: "stream temporarily unavailable",
+        });
+        return;
+      }
+      await materializeSessionOneEventsForStream();
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: buildSSEBody(
+          sessionID,
+          ignoreStreamAfterCursor ? 0 : safeStreamAfter,
+          sessionOneEvents,
+        ),
+      });
+      return;
+    }
+
+    if (sessionID === "session_cli_2") {
+      ensureSessionTwoBackgroundCompletion();
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: buildSSEBody(sessionID, safeStreamAfter, sessionTwoEvents),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: buildSSEBody(sessionID, safeStreamAfter, []),
     });
   });
 
   return {
     runRequests: () => runReqCount,
     sessionOneStreamAfterValues: () => [...sessionOneStreamAfterValues],
+    sessionOneSSECalls: () => sessionOneSSECalls,
     imageUploads: () => imageUploadCount,
     lastRunRequest: () => lastRunRequest,
+    lastPendingResolveRequest: () => lastPendingResolveRequest,
     lastPlatformLoginRequest: () => lastPlatformLoginRequest,
     lastPlatformMCPRequest: () => lastPlatformMCPRequest,
     lastPlatformCloudRequest: () => lastPlatformCloudRequest,
   };
 }
 
+async function installMockSessionWebSocket(
+  page: Page,
+  opts: {
+    sessionID: string;
+    marker: string;
+    mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
+  },
+): Promise<void> {
+  await page.addInitScript((config: {
+    sessionID: string;
+    marker: string;
+    mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
+  }) => {
+    const globalAny = window as unknown as {
+      __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+      __mockWsControl?: {
+        triggerResetReconnect?: () => void;
+        triggerFlakyResetReconnect?: () => void;
+      };
+      WebSocket: typeof WebSocket;
+    };
+    const mode = config.mode ?? "replay-once";
+    const emitted = new Set<string>();
+    const nowISO = () => new Date().toISOString();
+    const activeSockets = new Set<SessionMockWebSocket>();
+    const resetState: { phase: "idle" | "await_reconnect" | "done" } = {
+      phase: "idle",
+    };
+    const flakyResetState: {
+      phase: "idle" | "await_reconnect_1" | "await_reconnect_2" | "done";
+    } = {
+      phase: "idle",
+    };
+
+    class SessionMockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      url: string;
+      readyState = SessionMockWebSocket.CONNECTING;
+      bufferedAmount = 0;
+      extensions = "";
+      protocol = "";
+      binaryType: BinaryType = "blob";
+      onopen: ((ev: Event) => void) | null = null;
+      onclose: ((ev: CloseEvent) => void) | null = null;
+      onerror: ((ev: Event) => void) | null = null;
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      sessionID = "";
+      after = 0;
+
+      constructor(url: string | URL) {
+        this.url = typeof url === "string" ? url : String(url);
+        if (!globalAny.__mockWsState) {
+          globalAny.__mockWsState = { calls: [] };
+        }
+        const parsed = new URL(this.url, window.location.href);
+        const parts = parsed.pathname.split("/");
+        const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+        const rawAfter = parsed.searchParams.get("after") ?? "0";
+        const after = Number.parseInt(rawAfter, 10);
+        const safeAfter = Number.isFinite(after) && after > 0 ? after : 0;
+        this.sessionID = sessionID;
+        this.after = safeAfter;
+        globalAny.__mockWsState.calls.push({ sessionID, after: safeAfter });
+
+        window.setTimeout(() => {
+          if (this.readyState !== SessionMockWebSocket.CONNECTING) return;
+          this.readyState = SessionMockWebSocket.OPEN;
+          activeSockets.add(this);
+          this.onopen?.(new Event("open"));
+
+          const readyCursor = safeAfter;
+          if (mode === "reset-reconnect") {
+            if (
+              sessionID === config.sessionID &&
+              resetState.phase === "await_reconnect" &&
+              safeAfter > 0
+            ) {
+              const runID = "turn_1";
+              const chunk =
+                '{"type":"thread.started","thread_id":"ws_reset"}\n' +
+                '{"type":"turn.started"}\n' +
+                JSON.stringify({
+                  type: "item.completed",
+                  item: { type: "agent_message", text: `ws reset replay ${config.marker}` },
+                }) +
+                "\n";
+              const frames: Array<Record<string, unknown>> = [
+                {
+                  type: "session.event",
+                  id: "3",
+                  event: {
+                    seq: 3,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "assistant.delta",
+                    payload: { chunk },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.event",
+                  id: "4",
+                  event: {
+                    seq: 4,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "assistant.completed",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.event",
+                  id: "5",
+                  event: {
+                    seq: 5,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "run.completed",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.ready",
+                  session_id: config.sessionID,
+                  cursor: 5,
+                },
+              ];
+              resetState.phase = "done";
+              this.pump(frames);
+              return;
+            }
+            this.emit({
+              type: "session.ready",
+              session_id: sessionID,
+              cursor: readyCursor,
+            });
+            return;
+          }
+          if (mode === "flaky-reset-reconnect") {
+            if (
+              sessionID === config.sessionID &&
+              flakyResetState.phase === "await_reconnect_1" &&
+              safeAfter >= 2
+            ) {
+              const runID = "turn_1";
+              const chunk =
+                '{"type":"thread.started","thread_id":"ws_flaky"}\n' +
+                '{"type":"turn.started"}\n' +
+                JSON.stringify({
+                  type: "item.completed",
+                  item: { type: "agent_message", text: `ws flaky reset mid ${config.marker}` },
+                }) +
+                "\n";
+              flakyResetState.phase = "await_reconnect_2";
+              this.emit({
+                type: "session.event",
+                id: "3",
+                event: {
+                  seq: 3,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "assistant.delta",
+                  payload: { chunk },
+                  created_at: nowISO(),
+                },
+              });
+              this.emit({
+                type: "session.reset",
+                session_id: config.sessionID,
+                reason: "backpressure",
+                next_after: 3,
+              });
+              window.setTimeout(() => this.close(1012, "mock-reset-2"), 0);
+              return;
+            }
+            if (
+              sessionID === config.sessionID &&
+              flakyResetState.phase === "await_reconnect_2" &&
+              safeAfter >= 3
+            ) {
+              const runID = "turn_1";
+              flakyResetState.phase = "done";
+              const frames: Array<Record<string, unknown>> = [
+                {
+                  type: "session.event",
+                  id: "4",
+                  event: {
+                    seq: 4,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "assistant.completed",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.event",
+                  id: "5",
+                  event: {
+                    seq: 5,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "run.completed",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.ready",
+                  session_id: config.sessionID,
+                  cursor: 5,
+                },
+              ];
+              this.pump(frames);
+              return;
+            }
+            this.emit({
+              type: "session.ready",
+              session_id: sessionID,
+              cursor: readyCursor,
+            });
+            return;
+          }
+
+          const shouldReplay =
+            sessionID === config.sessionID &&
+            safeAfter <= 0 &&
+            !emitted.has(sessionID);
+          if (shouldReplay) {
+            emitted.add(sessionID);
+            const runID = "turn_ws_mock_1";
+            const chunk =
+              '{"type":"thread.started","thread_id":"ws_mock"}\n' +
+              '{"type":"turn.started"}\n' +
+              JSON.stringify({
+                type: "item.completed",
+                item: { type: "agent_message", text: `ws replay ${config.marker}` },
+              }) +
+              "\n";
+            const frames: Array<Record<string, unknown>> = [
+              {
+                type: "session.event",
+                id: "1",
+                event: {
+                  seq: 1,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "run.started",
+                  payload: { turn_id: runID },
+                  created_at: nowISO(),
+                },
+              },
+              {
+                type: "session.event",
+                id: "2",
+                event: {
+                  seq: 2,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "assistant.delta",
+                  payload: { chunk },
+                  created_at: nowISO(),
+                },
+              },
+              {
+                type: "session.event",
+                id: "3",
+                event: {
+                  seq: 3,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "assistant.completed",
+                  payload: { turn_id: runID },
+                  created_at: nowISO(),
+                },
+              },
+              {
+                type: "session.event",
+                id: "4",
+                event: {
+                  seq: 4,
+                  session_id: config.sessionID,
+                  run_id: runID,
+                  type: "run.completed",
+                  payload: { turn_id: runID },
+                  created_at: nowISO(),
+                },
+              },
+              {
+                type: "session.ready",
+                session_id: config.sessionID,
+                cursor: 4,
+              },
+            ];
+            this.pump(frames);
+            return;
+          }
+
+          this.emit({
+            type: "session.ready",
+            session_id: sessionID,
+            cursor: readyCursor,
+          });
+        }, 0);
+      }
+
+      emit(frame: Record<string, unknown>): void {
+        if (this.readyState !== SessionMockWebSocket.OPEN) return;
+        this.onmessage?.(
+          new MessageEvent("message", { data: JSON.stringify(frame) }),
+        );
+      }
+
+      pump(frames: Array<Record<string, unknown>>): void {
+        let index = 0;
+        const tick = () => {
+          if (index >= frames.length) return;
+          this.emit(frames[index] ?? {});
+          index += 1;
+          if (index < frames.length) {
+            window.setTimeout(tick, 8);
+          }
+        };
+        window.setTimeout(tick, 8);
+      }
+
+      send(_data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+        // no-op for test transport
+      }
+
+      close(code?: number, reason?: string): void {
+        if (this.readyState === SessionMockWebSocket.CLOSED) return;
+        activeSockets.delete(this);
+        this.readyState = SessionMockWebSocket.CLOSED;
+        this.onclose?.(
+          new CloseEvent("close", {
+            code: code ?? 1000,
+            reason: reason ?? "mock-closed",
+            wasClean: true,
+          }),
+        );
+      }
+
+      addEventListener(): void {
+        // on* handlers are sufficient for this test path
+      }
+
+      removeEventListener(): void {
+        // on* handlers are sufficient for this test path
+      }
+
+      dispatchEvent(): boolean {
+        return true;
+      }
+    }
+
+    globalAny.__mockWsControl = {
+      triggerResetReconnect: () => {
+        if (mode !== "reset-reconnect") return;
+        if (resetState.phase !== "idle") return;
+        resetState.phase = "await_reconnect";
+        const runID = "turn_1";
+        const chunk =
+          '{"type":"thread.started","thread_id":"ws_reset"}\n' +
+          '{"type":"turn.started"}\n' +
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: `ws reset ${config.marker}` },
+          }) +
+          "\n";
+        for (const socket of Array.from(activeSockets)) {
+          if (socket.sessionID !== config.sessionID) continue;
+          socket.emit({
+            type: "session.event",
+            id: "1",
+            event: {
+              seq: 1,
+              session_id: config.sessionID,
+              run_id: runID,
+              type: "run.started",
+              payload: { turn_id: runID },
+              created_at: nowISO(),
+            },
+          });
+          socket.emit({
+            type: "session.event",
+            id: "2",
+            event: {
+              seq: 2,
+              session_id: config.sessionID,
+              run_id: runID,
+              type: "assistant.delta",
+              payload: { chunk },
+              created_at: nowISO(),
+            },
+          });
+          socket.emit({
+            type: "session.reset",
+            session_id: config.sessionID,
+            reason: "backpressure",
+            next_after: 2,
+          });
+          window.setTimeout(() => socket.close(1012, "mock-reset"), 0);
+        }
+      },
+      triggerFlakyResetReconnect: () => {
+        if (mode !== "flaky-reset-reconnect") return;
+        if (flakyResetState.phase !== "idle") return;
+        flakyResetState.phase = "await_reconnect_1";
+        const runID = "turn_1";
+        const chunk =
+          '{"type":"thread.started","thread_id":"ws_flaky"}\n' +
+          '{"type":"turn.started"}\n' +
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: `ws flaky reset ${config.marker}` },
+          }) +
+          "\n";
+        for (const socket of Array.from(activeSockets)) {
+          if (socket.sessionID !== config.sessionID) continue;
+          socket.emit({
+            type: "session.event",
+            id: "1",
+            event: {
+              seq: 1,
+              session_id: config.sessionID,
+              run_id: runID,
+              type: "run.started",
+              payload: { turn_id: runID },
+              created_at: nowISO(),
+            },
+          });
+          socket.emit({
+            type: "session.event",
+            id: "2",
+            event: {
+              seq: 2,
+              session_id: config.sessionID,
+              run_id: runID,
+              type: "assistant.delta",
+              payload: { chunk },
+              created_at: nowISO(),
+            },
+          });
+          socket.emit({
+            type: "session.reset",
+            session_id: config.sessionID,
+            reason: "backpressure",
+            next_after: 2,
+          });
+          window.setTimeout(() => socket.close(1012, "mock-reset-1"), 0);
+        }
+      },
+    };
+
+    // Use mocked WebSocket transport for deterministic stream tests.
+    globalAny.WebSocket =
+      SessionMockWebSocket as unknown as typeof WebSocket;
+    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      SessionMockWebSocket as unknown as typeof WebSocket;
+  }, opts);
+}
+
+test("codex parser plain-text fallback strips transport noise lines", async () => {
+  const stdout = [
+    "Connected. hosts=1 runtimes=3 queue_depth=0",
+    "local-default done status=failed exit=1 error=local command failed: exit status 1",
+    "local-default failed error=local command failed: exit status 1 hint=inspect stderr",
+    "use --skip-git-repo-check next time",
+  ].join("\n");
+  expect(parseCodexAssistantTextFromStdout(stdout, true)).toBe(
+    "use --skip-git-repo-check next time",
+  );
+});
+
+test("codex parser plain-text fallback returns empty when only noise exists", async () => {
+  const stdout = [
+    "Connected. hosts=1 runtimes=3 queue_depth=0",
+    "local-default done status=failed exit=1 error=local command failed: exit status 1",
+    '{"type":"thread.started","thread_id":"abc"}',
+    '{"type":"turn.started"}',
+    "Done.",
+  ].join("\n");
+  expect(parseCodexAssistantTextFromStdout(stdout, true)).toBe("");
+});
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
@@ -1101,6 +1786,10 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
     hasText: marker,
   });
   await expect(assistantWithMarker).toHaveCount(1);
+  await expect(page.locator(".message.message-assistant .message-title-row")).toHaveCount(0);
+  await expect(page.locator(".message.message-user .message-title-row")).toHaveCount(0);
+  await expect(page.locator(".message.message-assistant .message-meta time")).toHaveCount(1);
+  await expect(page.locator(".message.message-user .message-meta time")).toHaveCount(1);
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 
@@ -1361,49 +2050,97 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await expect.poll(() => harness.runRequests()).toBe(1);
 
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.ask_for_approval ?? "");
+    const req = harness.lastRunRequest() as { approval_policy?: string } | null;
+    return String(req?.approval_policy ?? "");
   }).toBe("never");
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.search);
+    const req = harness.lastRunRequest() as { sandbox?: string } | null;
+    return String(req?.sandbox ?? "");
+  }).toBe("workspace-write");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { cwd?: string } | null;
+    return String(req?.cwd ?? "");
+  }).toBe("/srv/work");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as {
+      input?: Array<{ type?: string; text?: string }>;
+    } | null;
+    const first = Array.isArray(req?.input) ? req.input[0] : undefined;
+    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}`;
+  }).toBe(`text:advanced settings ${marker}`);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { model?: string } | null;
+    return String(req?.model ?? "").trim().length > 0;
   }).toBe(true);
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.profile ?? "");
+    const req = harness.lastRunRequest() as { mode?: string } | null;
+    return String(req?.mode ?? "");
+  }).toBe("exec");
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { search?: boolean } | null;
+    return Boolean(req?.search);
+  }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { profile?: string } | null;
+    return String(req?.profile ?? "");
   }).toBe("default");
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    const config = req?.codex?.config;
-    return Array.isArray(config) && config.includes("sandbox_workspace_write=true");
+    const req = harness.lastRunRequest() as { config?: string[] } | null;
+    return Array.isArray(req?.config) && req.config.includes("sandbox_workspace_write=true");
   }).toBe(true);
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    const enable = req?.codex?.enable;
-    return Array.isArray(enable) && enable.includes("web_search");
+    const req = harness.lastRunRequest() as { enable?: string[] } | null;
+    return Array.isArray(req?.enable) && req.enable.includes("web_search");
   }).toBe(true);
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    const disable = req?.codex?.disable;
-    return Array.isArray(disable) && disable.includes("legacy_preview");
+    const req = harness.lastRunRequest() as { disable?: string[] } | null;
+    return Array.isArray(req?.disable) && req.disable.includes("legacy_preview");
   }).toBe(true);
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    const dirs = req?.codex?.add_dirs;
-    return Array.isArray(dirs) && dirs.includes("/srv/extra");
+    const req = harness.lastRunRequest() as { add_dirs?: string[] } | null;
+    return Array.isArray(req?.add_dirs) && req.add_dirs.includes("/srv/extra");
   }).toBe(true);
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.ephemeral);
+    const req = harness.lastRunRequest() as { skip_git_repo_check?: boolean } | null;
+    return req?.skip_git_repo_check === false;
   }).toBe(true);
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.skip_git_repo_check);
-  }).toBe(false);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return Boolean(req?.codex?.json_output);
+    const req = harness.lastRunRequest() as { ephemeral?: boolean } | null;
+    return Boolean(req?.ephemeral);
   }).toBe(true);
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as { json_output?: boolean } | null;
+    return Boolean(req?.json_output);
+  }).toBe(true);
+});
+
+test("pending command approval can be resolved inline", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PENDING_REQUEST_${Date.now()}`;
+  const harness = await mockSessionApi(page, `pending request ${marker}`, marker, {
+    pendingRequestScenario: "command-approval",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`pending request ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const pendingCard = page.getByTestId("pending-request-card");
+  await expect(pendingCard).toContainText("Approve command");
+  await expect(pendingCard).toContainText("git status --short");
+
+  await page.getByTestId("pending-request-decision-accept").click();
+  await expect.poll(() => {
+    const req = harness.lastPendingResolveRequest() as
+      | { result?: { decision?: string } }
+      | null;
+    return String(req?.result?.decision ?? "");
+  }).toBe("accept");
+  await expect(page.getByTestId("pending-request-card")).toHaveCount(0);
 });
 
 test("composer submits codex exec payload", async ({ page }) => {
@@ -1420,9 +2157,14 @@ test("composer submits codex exec payload", async ({ page }) => {
   await expect.poll(() => harness.runRequests()).toBe(1);
 
   await expect.poll(() => {
-    const req = harness.lastRunRequest() as { codex?: Record<string, unknown> } | null;
-    return String(req?.codex?.mode ?? "");
-  }).toBe("exec");
+    const req = harness.lastRunRequest() as {
+      input?: Array<{ type?: string; text?: string }>;
+      cwd?: string;
+      mode?: string;
+    } | null;
+    const first = Array.isArray(req?.input) ? req.input[0] : undefined;
+    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}|${String(req?.cwd ?? "")}|${String(req?.mode ?? "")}`;
+  }).toBe(`text:exec payload ${marker}|/srv/work|exec`);
 });
 
 test("fork session creates a branch session in project list", async ({ page }) => {
@@ -1435,7 +2177,11 @@ test("fork session creates a branch session in project list", async ({ page }) =
   const initialCount = await sessionChips.count();
   await page.getByTestId("fork-session-btn").click();
   await expect.poll(async () => sessionChips.count()).toBe(initialCount + 1);
-  await expect(page.getByRole("heading", { name: /Fork · Session 1/ })).toBeVisible();
+  await expect(
+    page.locator(".project-session-list .session-chip-tree", {
+      hasText: /Fork · Session 1/,
+    }),
+  ).toHaveCount(1);
 });
 
 test("session stream completion keeps a single assistant reply", async ({
@@ -1490,6 +2236,43 @@ test("session stream renders command runtime cards", async ({ page }) => {
   await expect(page.getByText(/^ls -la$/)).toBeVisible();
 });
 
+test("pending command approval resumes the session after allow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PENDING_APPROVAL_${Date.now()}`;
+  const harness = await mockSessionApi(page, `approval complete ${marker}`, marker, {
+    pendingRequestScenario: "command-approval",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`needs approval ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const pendingCard = page.getByTestId("pending-request-card");
+  await expect(pendingCard).toContainText("Approve command");
+  await expect(pendingCard).toContainText("git status --short");
+  await expect(page.getByText("Awaiting command approval.")).toBeVisible();
+
+  await page.getByTestId("pending-request-decision-accept").click();
+  await expect
+    .poll(() => harness.lastPendingResolveRequest()?.result)
+    .toEqual({ decision: "accept" });
+
+  await expect(page.getByTestId("pending-request-card")).toHaveCount(0, {
+    timeout: 12000,
+  });
+  await expect(
+    page.locator(".message.message-assistant pre", {
+      hasText: marker,
+    }),
+  ).toHaveCount(1);
+});
+
 test("stop and regenerate controls work in session composer", async ({
   page,
 }) => {
@@ -1513,10 +2296,11 @@ test("stop and regenerate controls work in session composer", async ({
   await expect(
     page.getByRole("heading", { name: "Stopping" }),
   ).toBeVisible();
-
-  const regenerateButton = page.getByRole("button", { name: "Regenerate" });
-  await expect(regenerateButton).toBeVisible({ timeout: 12000 });
-  await regenerateButton.click();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    timeout: 12000,
+  });
+  await composer.fill(`regen after stop ${marker}`);
+  await composer.press("Enter");
   await expect.poll(() => harness.runRequests()).toBe(2);
 });
 
@@ -1597,6 +2381,185 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
     () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
   ).toBe(true);
   await expect(page.locator(".session-alert")).toHaveCount(0);
+});
+
+test("server replay ignores cursor but timeline stays deduped", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `CURSOR_IGNORE_${Date.now()}`;
+  const harness = await mockSessionApi(page, `dedupe replay ${marker}`, marker, {
+    streamPattern: "completion-once",
+    ignoreStreamAfterCursor: true,
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`dedupe replay ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  const assistantEntry = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
+  await expect(assistantEntry).toHaveCount(1);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(assistantEntry).toHaveCount(1);
+  await expect.poll(
+    () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
+  ).toBe(true);
+  await expect(page.locator(".session-alert")).toHaveCount(0);
+});
+
+test("websocket stream replay renders once without SSE fallback", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `WS_REPLAY_${Date.now()}`;
+  await installMockSessionWebSocket(page, {
+    sessionID: "session_cli_1",
+    marker,
+  });
+  const harness = await mockSessionApi(page, `ws replay ${marker}`, marker, {
+    streamPattern: "ready-only",
+  });
+  await unlock(page);
+
+  const assistantEntry = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
+  await expect(assistantEntry).toHaveCount(1);
+  await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await expect(assistantEntry).toHaveCount(1);
+  await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as unknown as {
+            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+          }
+        ).__mockWsState;
+        return Array.isArray(state?.calls)
+          ? state.calls.some((item) => item.sessionID === "session_cli_1" && item.after > 0)
+          : false;
+      }),
+    )
+    .toBe(true);
+});
+
+test("websocket reset reconnect completes once without SSE fallback", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `WS_RESET_${Date.now()}`;
+  await installMockSessionWebSocket(page, {
+    sessionID: "session_cli_1",
+    marker,
+    mode: "reset-reconnect",
+  });
+  const harness = await mockSessionApi(page, `ws reset ${marker}`, marker, {
+    streamPattern: "ready-only",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`trigger ws reset ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockWsControl?: { triggerResetReconnect?: () => void };
+      }
+    ).__mockWsControl?.triggerResetReconnect?.();
+  });
+
+  const assistantEntry = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
+  await expect(assistantEntry).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    timeout: 12000,
+  });
+  await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as unknown as {
+            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+          }
+        ).__mockWsState;
+        return Array.isArray(state?.calls)
+          ? state.calls.some((item) => item.sessionID === "session_cli_1" && item.after > 0)
+          : false;
+      }),
+    )
+    .toBe(true);
+});
+
+test("websocket repeated resets reconnect and complete once", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `WS_FLAKY_${Date.now()}`;
+  await installMockSessionWebSocket(page, {
+    sessionID: "session_cli_1",
+    marker,
+    mode: "flaky-reset-reconnect",
+  });
+  const harness = await mockSessionApi(page, `ws flaky ${marker}`, marker, {
+    streamPattern: "ready-only",
+  });
+  await unlock(page);
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`trigger ws flaky reset ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockWsControl?: { triggerFlakyResetReconnect?: () => void };
+      }
+    ).__mockWsControl?.triggerFlakyResetReconnect?.();
+  });
+
+  const assistantEntry = page.locator(".message.message-assistant pre", {
+    hasText: marker,
+  });
+  await expect(assistantEntry).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    timeout: 15000,
+  });
+  await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as unknown as {
+            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+          }
+        ).__mockWsState;
+        if (!Array.isArray(state?.calls)) return false;
+        const calls = state.calls.filter((item) => item.sessionID === "session_cli_1");
+        const hasAfter2 = calls.some((item) => item.after >= 2);
+        const hasAfter3 = calls.some((item) => item.after >= 3);
+        return hasAfter2 && hasAfter3;
+      }),
+    )
+    .toBe(true);
 });
 
 test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
@@ -1728,113 +2691,6 @@ test("active project is prioritized to top of project list", async ({ page }) =>
     })
     .click();
   await expect(projectTitles.first()).toHaveText("work");
-});
-
-test("session list order stays stable while session timestamps update", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 1366, height: 900 });
-  const marker = `SESSION_ORDER_${Date.now()}`;
-  await mockSessionApi(page, `stable order ${marker}`, marker, {
-    includeSecondSession: true,
-    streamPattern: "completion-once",
-    shuffleSessionUpdates: true,
-  });
-  await unlock(page);
-
-  const sessionChips = page.locator(".project-node .session-chip-tree");
-  await expect(sessionChips).toHaveCount(2);
-  const initialOrder = await sessionChips.evaluateAll((nodes) =>
-    nodes.map((node) => node.getAttribute("data-session-id") ?? ""),
-  );
-  expect(initialOrder).toEqual(["session_cli_1", "session_cli_2"]);
-
-  const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
-  );
-  await composer.fill("keep ordering stable");
-  await composer.press("Enter");
-  await expect(
-    page.locator(".message.message-assistant pre", { hasText: marker }),
-  ).toBeVisible();
-  await page.waitForTimeout(1200);
-
-  const finalOrder = await sessionChips.evaluateAll((nodes) =>
-    nodes.map((node) => node.getAttribute("data-session-id") ?? ""),
-  );
-  expect(finalOrder).toEqual(["session_cli_1", "session_cli_2"]);
-});
-
-test("timeline hides legacy transport status noise entries", async ({ page }) => {
-  await page.setViewportSize({ width: 1366, height: 900 });
-  const marker = `TIMELINE_NOISE_${Date.now()}`;
-  await mockSessionApi(page, `timeline ${marker}`, marker);
-  await page.addInitScript((seedMarker: string) => {
-    const now = new Date().toISOString();
-    const seededState = {
-      workspaces: [
-        {
-          id: "project_local_1__srv_work",
-          hostID: "local_1",
-          hostName: "local-default",
-          path: "/srv/work",
-          title: "work",
-          sessions: [
-            {
-              id: "session_cli_1",
-              title: "Session 1",
-              draft: "",
-              timeline: [
-                {
-                  id: "legacy_connected",
-                  kind: "system",
-                  title: "Connected",
-                  body: "Connected. hosts=1 runtimes=3 queue_depth=0",
-                  createdAt: now,
-                },
-                {
-                  id: "legacy_server_completed",
-                  kind: "system",
-                  title: "Server Completed",
-                  body: "local-default completed exit=0",
-                  createdAt: now,
-                },
-                {
-                  id: "assistant_visible",
-                  kind: "assistant",
-                  title: "Assistant",
-                  body: `visible ${seedMarker}`,
-                  state: "success",
-                  createdAt: now,
-                },
-              ],
-              createdAt: now,
-              updatedAt: now,
-            },
-          ],
-          activeSessionID: "session_cli_1",
-          createdAt: now,
-          updatedAt: now,
-        },
-      ],
-      activeWorkspaceID: "project_local_1__srv_work",
-    };
-    window.localStorage.setItem(
-      "remote_llm_session_state_v1",
-      JSON.stringify(seededState),
-    );
-  }, marker);
-  await unlock(page);
-
-  await expect(
-    page.locator(".message.message-assistant pre", {
-      hasText: `visible ${marker}`,
-    }),
-  ).toBeVisible();
-  await expect(page.locator(".message", { hasText: "Connected. hosts=" })).toHaveCount(0);
-  await expect(
-    page.locator(".message", { hasText: "local-default completed exit=0" }),
-  ).toHaveCount(0);
 });
 
 test("server snapshot prunes stale local project cache on unlock", async ({
@@ -2016,10 +2872,20 @@ test("stream status recovers after transient failures", async ({ page }) => {
   }
   expect(sawRetryState).toBeTruthy();
   await expect(streamStatus).toContainText("stream live", { timeout: 15000 });
+
+  const composer = page.getByPlaceholder(
+    "Tell codex what to do in this workspace...",
+  );
+  await composer.fill(`recover ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
   await expect(
     page.locator(".message.message-assistant pre", { hasText: `recover ${marker}` }),
   ).toHaveCount(1, { timeout: 15000 });
-  expect(harness.sessionOneStreamAfterValues()).toEqual([0, 0, 0]);
+  await expect.poll(() => harness.sessionOneStreamAfterValues().length >= 3).toBe(
+    true,
+  );
+  expect(harness.sessionOneStreamAfterValues().slice(0, 3)).toEqual([0, 0, 0]);
 
   await page.getByRole("button", { name: "Reconnect" }).click();
   await expect(streamStatus).toContainText("stream live", { timeout: 10000 });

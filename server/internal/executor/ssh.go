@@ -237,12 +237,17 @@ func StartInteractiveViaSSH(ctx context.Context, h model.Host, spec runtime.Comm
 	if isLocalHostMode(h) {
 		localCmd := renderRemoteCommand(spec, workdir)
 		command = "local sh -lc " + shellQuote(localCmd)
-		cmd = exec.CommandContext(ctx, "sh", "-lc", localCmd)
+		cmd = exec.Command("sh", "-lc", localCmd)
 	} else {
 		remoteCmd := renderRemoteCommand(spec, workdir)
 		sshArgs := buildSSHArgs(h, remoteCmd)
 		command = "ssh " + strings.Join(sshArgs, " ")
-		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
+		cmd = exec.Command("ssh", sshArgs...)
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
 	}
 
 	stdin, err := cmd.StdinPipe()

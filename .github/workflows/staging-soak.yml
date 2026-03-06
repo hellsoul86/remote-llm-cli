@@ -1,0 +1,123 @@
+name: Staging Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Soak duration (Go duration format, e.g. 2h, 24h)
+        required: true
+        default: 2h
+      reconnect_window:
+        description: Intentional stream reconnect window
+        required: true
+        default: 30s
+      prompt_interval:
+        description: Interval to enqueue synthetic turns
+        required: true
+        default: 2m
+      model:
+        description: Optional model override
+        required: false
+        type: string
+      archive_on_exit:
+        description: Archive probe session after soak
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  soak:
+    name: Run Codex v2 Staging Soak
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+    env:
+      SOAK_API_BASE: ${{ vars.SOAK_API_BASE != '' && vars.SOAK_API_BASE || vars.VITE_API_BASE }}
+      SOAK_ACCESS_TOKEN: ${{ secrets.SOAK_ACCESS_TOKEN }}
+      SOAK_HOST_ID: ${{ vars.SOAK_HOST_ID }}
+      SOAK_PROJECT_PATH: ${{ vars.SOAK_PROJECT_PATH }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Validate soak configuration
+        run: |
+          set -euo pipefail
+          if [ -z "${SOAK_API_BASE}" ]; then
+            echo "::error::missing staging variable SOAK_API_BASE (or fallback VITE_API_BASE)"
+            exit 1
+          fi
+          if [ -z "${SOAK_ACCESS_TOKEN}" ]; then
+            echo "::error::missing staging secret SOAK_ACCESS_TOKEN"
+            exit 1
+          fi
+          if [ -z "${SOAK_HOST_ID}" ]; then
+            echo "::error::missing staging variable SOAK_HOST_ID"
+            exit 1
+          fi
+          if [ -z "${SOAK_PROJECT_PATH}" ]; then
+            echo "::error::missing staging variable SOAK_PROJECT_PATH"
+            exit 1
+          fi
+
+      - name: Run soak probe
+        working-directory: server
+        env:
+          DURATION: ${{ inputs.duration }}
+          RECONNECT_WINDOW: ${{ inputs.reconnect_window }}
+          PROMPT_INTERVAL: ${{ inputs.prompt_interval }}
+          MODEL: ${{ inputs.model }}
+          ARCHIVE_ON_EXIT: ${{ inputs.archive_on_exit }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../dist/soak
+          report_path="../dist/soak/codex-v2-soak-${GITHUB_RUN_ID}.json"
+
+          archive_flag=""
+          if [ "${ARCHIVE_ON_EXIT}" = "true" ]; then
+            archive_flag="-archive-on-exit"
+          fi
+
+          go run ./cmd/remote-llm-soak \
+            -api "${SOAK_API_BASE}" \
+            -token "${SOAK_ACCESS_TOKEN}" \
+            -host-id "${SOAK_HOST_ID}" \
+            -path "${SOAK_PROJECT_PATH}" \
+            -duration "${DURATION}" \
+            -reconnect-window "${RECONNECT_WINDOW}" \
+            -prompt-interval "${PROMPT_INTERVAL}" \
+            -model "${MODEL}" \
+            ${archive_flag} \
+            -out "${report_path}"
+
+          echo "SOAK_REPORT_PATH=${report_path}" >> "${GITHUB_ENV}"
+
+      - name: Summarize soak report
+        run: |
+          set -euo pipefail
+          if [ ! -f "${SOAK_REPORT_PATH}" ]; then
+            echo "::error::soak report missing: ${SOAK_REPORT_PATH}"
+            exit 1
+          fi
+          jq '{session_id, duration_sec, stream, turns, run_terminal_counts}' "${SOAK_REPORT_PATH}" | tee /tmp/soak-summary.json
+          {
+            echo "## Codex v2 Staging Soak Summary"
+            echo
+            echo '```json'
+            cat /tmp/soak-summary.json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload soak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-v2-staging-soak-report
+          path: ${{ env.SOAK_REPORT_PATH }}
+          if-no-files-found: error
