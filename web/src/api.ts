@@ -429,6 +429,15 @@ export type CodexV2SessionResponse = {
   thread?: Record<string, unknown>;
 };
 
+export type CodexV2SessionSyncResponse = {
+  session: SessionRecord;
+  thread?: Record<string, unknown>;
+  recovered_events: number;
+  run_id?: string;
+  status?: string;
+  assistant_text?: string;
+};
+
 export type CodexV2SessionArchiveResponse = {
   archived: boolean;
   deleted?: boolean;
@@ -973,6 +982,23 @@ export async function setCodexV2SessionName(
     throw new Error(`set codex v2 session name failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+export async function syncCodexV2Session(
+  token: string,
+  sessionID: string,
+  request?: CodexV2SessionActionRequest,
+): Promise<CodexV2SessionSyncResponse> {
+  const res = await fetch(`${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/sync`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(request ?? {}),
+  });
+  const body = await res.json();
+  if (!res.ok || !body?.session) {
+    throw new Error(`sync codex v2 session failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return body as CodexV2SessionSyncResponse;
 }
 
 export async function startCodexV2Turn(

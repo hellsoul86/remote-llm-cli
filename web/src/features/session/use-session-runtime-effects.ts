@@ -2,19 +2,24 @@ import { type MutableRefObject, useEffect } from "react";
 import {
   discoverCodexModels,
   getRunJob,
+  syncCodexV2Session,
   type Host,
   type RunJobRecord,
   type RuntimeInfo,
 } from "../../api";
+import type { WorkspaceDirectory } from "../../domains/session";
 import type { SessionStreamRuntimeState } from "./session-stream-controller";
+import type { SessionStreamHealth } from "./stream-types";
 
 type UseSessionRuntimeEffectsArgs = {
   authPhase: "checking" | "locked" | "ready";
   token: string;
   appMode: "session" | "ops";
+  workspaces: WorkspaceDirectory[];
 
   sessionStreamTargetIDs: string[];
   sessionStreamStateRef: MutableRefObject<Map<string, SessionStreamRuntimeState>>;
+  sessionStreamHealthByID: Record<string, SessionStreamHealth>;
   streamAuthTokenRef: MutableRefObject<string>;
   stopAllSessionStreams: () => void;
   startSessionStream: (sessionID: string, authToken: string) => void;
@@ -100,6 +105,61 @@ export function useSessionRuntimeEffects(args: UseSessionRuntimeEffectsArgs) {
       canceled = true;
     };
   }, [args.authPhase, args.token, args.activeSessionHostID, args.runtimes]);
+
+  useEffect(() => {
+    if (args.authPhase !== "ready" || !args.token.trim()) return;
+    if (args.appMode !== "session") return;
+
+    let canceled = false;
+    const inflight = new Set<string>();
+    const recover = async () => {
+      const now = Date.now();
+      const candidates: string[] = [];
+      for (const workspace of args.workspaces) {
+        for (const thread of workspace.sessions) {
+          if (!thread.activeJobID.trim()) continue;
+          const streamState = args.sessionStreamStateRef.current.get(thread.id);
+          const health = args.sessionStreamHealthByID[thread.id];
+          const lastEventAt = Math.max(
+            streamState?.lastEventAt ?? 0,
+            health?.lastEventAt ?? 0,
+          );
+          if (lastEventAt > 0 && now - lastEventAt < 12_000) continue;
+          candidates.push(thread.id);
+        }
+      }
+      await Promise.all(
+        candidates.map(async (sessionID) => {
+          if (inflight.has(sessionID)) return;
+          inflight.add(sessionID);
+          try {
+            await syncCodexV2Session(args.token, sessionID);
+          } catch {
+            // best-effort: live stream remains primary
+          } finally {
+            inflight.delete(sessionID);
+          }
+        }),
+      );
+    };
+
+    void recover();
+    const timer = window.setInterval(() => {
+      if (canceled) return;
+      void recover();
+    }, 5000);
+
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    args.authPhase,
+    args.token,
+    args.appMode,
+    args.workspaces,
+    args.sessionStreamHealthByID,
+  ]);
 
   useEffect(() => {
     if (args.authPhase !== "ready" || !args.token.trim()) return;
