@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hellsoul86/remote-llm-cli/server/internal/codexrpc"
@@ -86,6 +87,27 @@ type codexV2ResolveRequestBody struct {
 
 type codexV2ThreadResult struct {
 	Thread map[string]any `json:"thread,omitempty"`
+}
+
+type codexV2SessionSyncResult struct {
+	Session         model.SessionRecord `json:"session"`
+	Thread          map[string]any      `json:"thread,omitempty"`
+	RecoveredEvents int                 `json:"recovered_events"`
+	RunID           string              `json:"run_id,omitempty"`
+	Status          string              `json:"status,omitempty"`
+	AssistantText   string              `json:"assistant_text,omitempty"`
+}
+
+type codexThreadSyncSnapshot struct {
+	Title         string
+	RunID         string
+	Status        string
+	AssistantText string
+}
+
+type codexSessionEventSnapshot struct {
+	AssistantText string
+	TerminalState string
 }
 
 func (s *Server) handleCodexV2SessionStart(w http.ResponseWriter, r *http.Request) {
@@ -386,6 +408,125 @@ func (s *Server) handleCodexV2SessionSetName(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session": saved,
+	})
+}
+
+func (s *Server) handleCodexV2SessionSync(w http.ResponseWriter, r *http.Request) {
+	threadID := strings.TrimSpace(r.PathValue("id"))
+	if threadID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session id"})
+		return
+	}
+
+	var req codexV2SessionActionRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	session, host, err := s.resolveCodexV2SessionHost(threadID, req.HostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	project, err := s.resolveCodexV2SessionProject(session, host, req.ProjectID, req.Path, req.Title)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	bridge, err := s.codexBridgeForHost(host)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+
+	var rpcResp codexV2ThreadResult
+	if err := bridge.Call(r.Context(), "thread/read", map[string]any{
+		"threadId":     threadID,
+		"includeTurns": true,
+	}, &rpcResp); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+
+	snapshot := extractCodexThreadSyncSnapshot(rpcResp.Thread)
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = snapshot.Title
+	}
+	session, err = s.upsertCodexV2Session(threadID, host, project, title)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	recovered := 0
+	known := s.summarizeCodexSessionEvents(threadID, snapshot.RunID)
+	now := time.Now().UTC()
+	if snapshot.Title != "" && snapshot.Title != session.Title {
+		if _, err := s.appendDirectSessionEvent(threadID, snapshot.RunID, "session.title.updated", map[string]any{
+			"title": snapshot.Title,
+		}, now); err == nil {
+			recovered += 1
+		}
+		session.Title = snapshot.Title
+	}
+	if snapshot.AssistantText != "" && snapshot.AssistantText != known.AssistantText {
+		if _, err := s.appendDirectSessionEvent(
+			threadID,
+			snapshot.RunID,
+			"assistant.delta",
+			codexAssistantCompletedPayload(snapshot.RunID, snapshot.AssistantText),
+			now,
+		); err == nil {
+			recovered += 1
+		}
+	}
+	if snapshot.Status != "" && snapshot.Status != "running" && snapshot.Status != known.TerminalState {
+		eventType := ""
+		switch snapshot.Status {
+		case "succeeded":
+			eventType = "run.completed"
+		case "failed":
+			eventType = "run.failed"
+		case "canceled":
+			eventType = "run.canceled"
+		}
+		if eventType != "" {
+			if _, err := s.appendDirectSessionEvent(
+				threadID,
+				snapshot.RunID,
+				eventType,
+				codexRunLifecyclePayload(snapshot.RunID, nil),
+				now,
+			); err == nil {
+				recovered += 1
+			}
+		}
+	}
+
+	if snapshot.RunID != "" {
+		session.LastRunID = snapshot.RunID
+	}
+	if snapshot.Status != "" {
+		session.LastStatus = snapshot.Status
+	}
+	if snapshot.Title != "" {
+		session.Title = snapshot.Title
+	}
+	if recovered > 0 || snapshot.RunID != "" || snapshot.Status != "" || snapshot.Title != "" {
+		session.UpdatedAt = now
+		if saved, saveErr := s.store.UpsertSession(session); saveErr == nil {
+			session = saved
+		}
+	}
+
+	writeJSON(w, http.StatusOK, codexV2SessionSyncResult{
+		Session:         session,
+		Thread:          rpcResp.Thread,
+		RecoveredEvents: recovered,
+		RunID:           snapshot.RunID,
+		Status:          snapshot.Status,
+		AssistantText:   snapshot.AssistantText,
 	})
 }
 
@@ -968,15 +1109,30 @@ func (s *Server) ensureCodexBridgeSubscription(host model.Host, bridge *codexrpc
 	s.codexBridgeSub[hostID] = stopAll
 	s.mu.Unlock()
 
+	var restartOnce sync.Once
+	restart := func() {
+		restartOnce.Do(func() {
+			stopAll()
+			s.mu.Lock()
+			if s.codexBridgeSub != nil {
+				delete(s.codexBridgeSub, hostID)
+			}
+			s.mu.Unlock()
+			s.ensureCodexBridgeSubscription(host, bridge)
+		})
+	}
+
 	go func() {
 		for event := range notifications {
 			s.persistCodexNotification(hostID, event.Method, event.Params, event.ReceivedAt)
 		}
+		restart()
 	}()
 	go func() {
 		for req := range requests {
 			s.persistCodexServerRequest(hostID, req)
 		}
+		restart()
 	}()
 }
 
@@ -1472,6 +1628,183 @@ func dropOldestCodexNotificationEntry(entries map[string]time.Time) {
 	if oldestKey != "" {
 		delete(entries, oldestKey)
 	}
+}
+
+func (s *Server) appendDirectSessionEvent(
+	sessionID string,
+	runID string,
+	eventType string,
+	payload any,
+	createdAt time.Time,
+) (model.SessionEvent, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	eventType = strings.TrimSpace(eventType)
+	if sessionID == "" || eventType == "" {
+		return model.SessionEvent{}, errors.New("session_id and event_type are required")
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return model.SessionEvent{}, err
+	}
+	persisted, err := s.store.AppendSessionEvent(model.SessionEvent{
+		SessionID: sessionID,
+		RunID:     strings.TrimSpace(runID),
+		Type:      eventType,
+		Payload:   rawPayload,
+		CreatedAt: createdAt,
+	})
+	if err != nil {
+		return model.SessionEvent{}, err
+	}
+	s.publishSessionEvent(persisted)
+	return persisted, nil
+}
+
+func codexAssistantCompletedPayload(runID string, text string) map[string]any {
+	item := map[string]any{
+		"type": "item.completed",
+		"item": map[string]any{
+			"type": "agent_message",
+			"text": strings.TrimSpace(text),
+		},
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		raw = []byte(`{"type":"item.completed","item":{"type":"agent_message","text":""}}`)
+	}
+	out := map[string]any{
+		"chunk": string(raw) + "\n",
+	}
+	if runID = strings.TrimSpace(runID); runID != "" {
+		out["turn_id"] = runID
+	}
+	return out
+}
+
+func extractCodexThreadSyncSnapshot(thread map[string]any) codexThreadSyncSnapshot {
+	out := codexThreadSyncSnapshot{}
+	if title := strings.TrimSpace(asString(thread["name"])); title != "" {
+		out.Title = title
+	} else {
+		out.Title = deriveCodexThreadTitle(thread, "")
+	}
+	turns, ok := thread["turns"].([]any)
+	if !ok || len(turns) == 0 {
+		return out
+	}
+	lastTurn, ok := turns[len(turns)-1].(map[string]any)
+	if !ok {
+		return out
+	}
+	out.RunID = strings.TrimSpace(asString(lastTurn["id"]))
+	out.Status = codexStatusFromTurnStatus(lastTurn["status"])
+	out.AssistantText = extractCodexAssistantTextFromTurn(lastTurn)
+	return out
+}
+
+func codexStatusFromTurnStatus(raw any) string {
+	switch strings.ToLower(strings.TrimSpace(asString(raw))) {
+	case "completed":
+		return "succeeded"
+	case "failed":
+		return "failed"
+	case "interrupted":
+		return "canceled"
+	case "inprogress":
+		return "running"
+	default:
+		return ""
+	}
+}
+
+func extractCodexAssistantTextFromTurn(turn map[string]any) string {
+	items, ok := turn["items"].([]any)
+	if !ok || len(items) == 0 {
+		return ""
+	}
+	latest := ""
+	final := ""
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(asString(item["type"]))) != "agentmessage" {
+			continue
+		}
+		text := strings.TrimSpace(asString(item["text"]))
+		if text == "" {
+			continue
+		}
+		latest = text
+		if strings.EqualFold(strings.TrimSpace(asString(item["phase"])), "final_answer") {
+			final = text
+		}
+	}
+	if final != "" {
+		return final
+	}
+	return latest
+}
+
+func (s *Server) summarizeCodexSessionEvents(sessionID string, runID string) codexSessionEventSnapshot {
+	events := s.store.ListSessionEvents(strings.TrimSpace(sessionID), 0, 2000)
+	normalizedRunID := strings.TrimSpace(runID)
+	out := codexSessionEventSnapshot{}
+	var deltas strings.Builder
+	for _, event := range events {
+		if normalizedRunID != "" && strings.TrimSpace(event.RunID) != normalizedRunID {
+			continue
+		}
+		switch strings.TrimSpace(event.Type) {
+		case "assistant.delta":
+			var payload map[string]any
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			chunk := asString(payload["chunk"])
+			for _, rawLine := range strings.Split(chunk, "\n") {
+				line := strings.TrimSpace(rawLine)
+				if line == "" {
+					continue
+				}
+				var parsed map[string]any
+				if err := json.Unmarshal([]byte(line), &parsed); err != nil {
+					continue
+				}
+				switch strings.TrimSpace(asString(parsed["type"])) {
+				case "item.agent_message.delta":
+					deltas.WriteString(asString(parsed["delta"]))
+				case "item.completed":
+					item, ok := parsed["item"].(map[string]any)
+					if !ok {
+						continue
+					}
+					itemType := strings.ToLower(strings.TrimSpace(asString(item["type"])))
+					if itemType != "agent_message" && itemType != "agentmessage" && itemType != "assistant_message" && itemType != "message" {
+						continue
+					}
+					if text := strings.TrimSpace(asString(item["text"])); text != "" {
+						out.AssistantText = text
+						deltas.Reset()
+					}
+				}
+			}
+		case "run.completed":
+			out.TerminalState = "succeeded"
+		case "run.failed":
+			out.TerminalState = "failed"
+		case "run.canceled":
+			out.TerminalState = "canceled"
+		}
+	}
+	if out.AssistantText == "" {
+		out.AssistantText = strings.TrimSpace(deltas.String())
+	}
+	return out
 }
 
 func asString(v any) string {

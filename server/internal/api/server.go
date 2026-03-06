@@ -174,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v2/codex/sessions/{id}/archive", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionArchive)))
 	mux.Handle("POST /v2/codex/sessions/{id}/unarchive", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionUnarchive)))
 	mux.Handle("POST /v2/codex/sessions/{id}/name", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionSetName)))
+	mux.Handle("POST /v2/codex/sessions/{id}/sync", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionSync)))
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/start", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnStart)))
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/interrupt", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnInterrupt)))
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/steer", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnSteer)))
