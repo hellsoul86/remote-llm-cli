@@ -12,6 +12,7 @@ go test ./...
 2. Web type/build check:
 
 ```bash
+make protocol-schema-validate
 cd web
 npm run build
 ```
@@ -24,6 +25,7 @@ npm run test:e2e:smoke
 ```
 
 This now covers:
+- pinned Codex app-server schema surface validation
 - async session/job behavior (mocked API)
 - session UX baseline (desktop/mobile layout + key interaction behavior)
 
@@ -61,6 +63,7 @@ Post-merge push to `staging`/`main` runs deployment workflow (`Deploy`) when env
 - E2E smoke uses route-mocked API responses and validates async job submission/polling UX.
 - Additional UX-focused smoke is in `web/e2e/session-ux.spec.ts`.
 - Live e2e requires a real access token and does not intercept network requests.
+- Regenerate pinned app-server fixtures with `make protocol-schema-sync`.
 - If Playwright browsers are missing locally, install with:
 
 ```bash

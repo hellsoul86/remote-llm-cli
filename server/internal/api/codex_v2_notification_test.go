@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hellsoul86/remote-llm-cli/server/internal/codexrpc"
 	"github.com/hellsoul86/remote-llm-cli/server/internal/model"
 )
 
@@ -110,6 +112,228 @@ func TestPersistCodexNotificationNormalizesThreadTitleEvents(t *testing.T) {
 	}
 	if title := asString(payload["title"]); title != "better title" {
 		t.Fatalf("payload title=%q want=better title", title)
+	}
+}
+
+func TestPersistCodexNotificationNormalizesOfficialThreadNameUpdate(t *testing.T) {
+	srv, httpSrv, _, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_codex_thread_name"
+	upsertCodexTestSession(t, srv, sessionID)
+
+	params := json.RawMessage(`{"threadId":"session_codex_thread_name","threadName":"  official title  "}`)
+	srv.persistCodexNotification("host_1", "thread/name/updated", params, time.Now().UTC())
+
+	events := srv.store.ListSessionEvents(sessionID, 0, 20)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got=%d", len(events))
+	}
+	if events[0].Type != "session.title.updated" {
+		t.Fatalf("unexpected event type: %q", events[0].Type)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode event payload: %v", err)
+	}
+	if title := asString(payload["title"]); title != "official title" {
+		t.Fatalf("payload title=%q want=official title", title)
+	}
+}
+
+func TestPersistCodexNotificationNormalizesRunLifecycleEvents(t *testing.T) {
+	srv, httpSrv, _, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	testCases := []struct {
+		name        string
+		sessionID   string
+		method      string
+		raw         string
+		wantType    string
+		wantStatus  string
+		wantRunID   string
+		wantErrPart string
+	}{
+		{
+			name:       "turn started",
+			sessionID:  "session_codex_turn_started",
+			method:     "turn/started",
+			raw:        `{"threadId":"session_codex_turn_started","turn":{"id":"turn_started_1","threadId":"session_codex_turn_started"}}`,
+			wantType:   "run.started",
+			wantStatus: "running",
+			wantRunID:  "turn_started_1",
+		},
+		{
+			name:       "turn interrupted",
+			sessionID:  "session_codex_turn_interrupted",
+			method:     "turn/interrupted",
+			raw:        `{"threadId":"session_codex_turn_interrupted","turn":{"id":"turn_interrupted_1","threadId":"session_codex_turn_interrupted"}}`,
+			wantType:   "run.canceled",
+			wantStatus: "canceled",
+			wantRunID:  "turn_interrupted_1",
+		},
+		{
+			name:        "error",
+			sessionID:   "session_codex_error",
+			method:      "error",
+			raw:         `{"threadId":"session_codex_error","turnId":"turn_error_1","error":{"message":"boom"},"willRetry":false}`,
+			wantType:    "run.failed",
+			wantStatus:  "",
+			wantRunID:   "turn_error_1",
+			wantErrPart: "boom",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			upsertCodexTestSession(t, srv, tc.sessionID)
+			srv.persistCodexNotification("host_1", tc.method, json.RawMessage(tc.raw), time.Now().UTC())
+
+			events := srv.store.ListSessionEvents(tc.sessionID, 0, 20)
+			if len(events) != 1 {
+				t.Fatalf("expected 1 event, got=%d", len(events))
+			}
+			if events[0].Type != tc.wantType {
+				t.Fatalf("event type=%q want=%q", events[0].Type, tc.wantType)
+			}
+			if events[0].RunID != tc.wantRunID {
+				t.Fatalf("run_id=%q want=%q", events[0].RunID, tc.wantRunID)
+			}
+
+			var payload map[string]any
+			if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+				t.Fatalf("decode event payload: %v", err)
+			}
+			if turnID := asString(payload["turn_id"]); turnID != tc.wantRunID {
+				t.Fatalf("payload turn_id=%q want=%q", turnID, tc.wantRunID)
+			}
+			if tc.wantErrPart != "" {
+				rawErr, err := json.Marshal(payload["error"])
+				if err != nil {
+					t.Fatalf("marshal payload error: %v", err)
+				}
+				if !strings.Contains(string(rawErr), tc.wantErrPart) {
+					t.Fatalf("payload error=%s want part=%q", string(rawErr), tc.wantErrPart)
+				}
+			}
+
+			session, ok := srv.store.GetSession(tc.sessionID)
+			if !ok {
+				t.Fatalf("session %q not found", tc.sessionID)
+			}
+			if tc.wantStatus != "" && session.LastStatus != tc.wantStatus {
+				t.Fatalf("session status=%q want=%q", session.LastStatus, tc.wantStatus)
+			}
+			if tc.wantStatus != "" && session.LastRunID != tc.wantRunID {
+				t.Fatalf("session last_run_id=%q want=%q", session.LastRunID, tc.wantRunID)
+			}
+		})
+	}
+}
+
+func TestPersistCodexNotificationNormalizesItemStarted(t *testing.T) {
+	srv, httpSrv, _, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	const sessionID = "session_codex_item_started"
+	upsertCodexTestSession(t, srv, sessionID)
+
+	params := json.RawMessage(`{"threadId":"session_codex_item_started","turnId":"turn_item_1","item":{"id":"item_1","type":"agent_message","status":"in_progress"}}`)
+	srv.persistCodexNotification("host_1", "item/started", params, time.Now().UTC())
+
+	events := srv.store.ListSessionEvents(sessionID, 0, 20)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got=%d", len(events))
+	}
+	if events[0].Type != "assistant.delta" {
+		t.Fatalf("unexpected event type: %q", events[0].Type)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode event payload: %v", err)
+	}
+	chunk := asString(payload["chunk"])
+	if chunk == "" || !containsAll(chunk, `"type":"item.started"`, `"turnId":"turn_item_1"`) {
+		t.Fatalf("unexpected chunk=%q", chunk)
+	}
+}
+
+func TestPersistCodexServerRequestLifecycleTracksCriticalMethods(t *testing.T) {
+	srv, httpSrv, _, _ := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	testCases := []struct {
+		name      string
+		sessionID string
+		method    string
+		params    string
+	}{
+		{
+			name:      "command approval",
+			sessionID: "session_codex_pending_1",
+			method:    "item/commandExecution/requestApproval",
+			params:    `{"threadId":"session_codex_pending_1","command":"ls -la","availableDecisions":["accept","decline"]}`,
+		},
+		{
+			name:      "file approval",
+			sessionID: "session_codex_pending_2",
+			method:    "item/fileChange/requestApproval",
+			params:    `{"threadId":"session_codex_pending_2","grantRoot":"/tmp","availableDecisions":["accept","acceptForSession","decline"]}`,
+		},
+		{
+			name:      "tool input",
+			sessionID: "session_codex_pending_3",
+			method:    "item/tool/requestUserInput",
+			params:    `{"threadId":"session_codex_pending_3","questions":[{"id":"q1","header":"Name","question":"Who?"}]}`,
+		},
+		{
+			name:      "mcp elicitation",
+			sessionID: "session_codex_pending_4",
+			method:    "mcpServer/elicitation/request",
+			params:    `{"threadId":"session_codex_pending_4","serverName":"github","mode":"form","requestedSchema":{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"]}}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			upsertCodexTestSession(t, srv, tc.sessionID)
+
+			req := codexrpc.ServerRequest{
+				ID:         "req_" + strings.ReplaceAll(tc.method, "/", "_"),
+				Method:     tc.method,
+				RawID:      json.RawMessage(`"req_test"`),
+				Params:     json.RawMessage(tc.params),
+				ReceivedAt: time.Now().UTC(),
+			}
+			srv.persistCodexServerRequest("host_1", req)
+
+			pending := srv.listCodexPendingRequests(tc.sessionID)
+			if len(pending) != 1 {
+				t.Fatalf("expected 1 pending request, got=%d", len(pending))
+			}
+			if pending[0].Method != tc.method {
+				t.Fatalf("pending method=%q want=%q", pending[0].Method, tc.method)
+			}
+
+			events := srv.store.ListSessionEvents(tc.sessionID, 0, 20)
+			if len(events) != 1 {
+				t.Fatalf("expected 1 session event, got=%d", len(events))
+			}
+			if events[0].Type != "codexrpc.serverRequest."+strings.ReplaceAll(tc.method, "/", ".") {
+				t.Fatalf("event type=%q", events[0].Type)
+			}
+
+			resolved := json.RawMessage(fmt.Sprintf(`{"threadId":%q,"requestId":%q}`, tc.sessionID, req.ID))
+			srv.persistCodexNotification("host_1", "serverRequest/resolved", resolved, time.Now().UTC())
+
+			pending = srv.listCodexPendingRequests(tc.sessionID)
+			if len(pending) != 0 {
+				t.Fatalf("expected pending requests to be cleared, got=%d", len(pending))
+			}
+		})
 	}
 }
 
