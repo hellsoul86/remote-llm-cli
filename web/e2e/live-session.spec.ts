@@ -2,6 +2,10 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const EMPTY_ASSISTANT_FALLBACK = "No assistant output captured.";
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function readLiveToken(): string {
   return (
     process.env.E2E_ACCESS_TOKEN?.trim() ||
@@ -63,9 +67,10 @@ async function unlockSessionPage(page: Page, token: string): Promise<void> {
 
 async function selectStableProject(page: Page, projectPath: string): Promise<void> {
   const filter = page.getByPlaceholder("Filter projects or sessions");
+  const exactPath = new RegExp(`^${escapeRegExp(projectPath)}$`);
   await filter.fill(projectPath);
   const projectNode = page.locator(".project-node", {
-    has: page.locator(".project-chip-main em", { hasText: projectPath }),
+    has: page.locator(".project-chip-main em", { hasText: exactPath }),
   }).first();
   await expect(projectNode).toBeVisible({ timeout: 120_000 });
   const projectChip = projectNode.locator(".project-chip").first();
