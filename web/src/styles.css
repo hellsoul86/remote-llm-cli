@@ -1130,14 +1130,15 @@ pre {
 .inspect-block {
   border: 1px solid #e2e7f0;
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.96);
-  padding: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 10px;
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .focus-block {
   border-color: #d7deea;
+  background: rgba(249, 251, 254, 0.94);
 }
 
 .inspect-block h3 {
@@ -1145,25 +1146,28 @@ pre {
 }
 
 .compact-session-meta {
-  gap: 10px;
+  gap: 7px;
+  border: 0;
+  background: transparent;
+  padding: 2px 2px 0;
 }
 
 .pane-title-line {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
 .pane-title-copy {
   display: grid;
-  gap: 3px;
+  gap: 2px;
 }
 
 .pane-title-actions {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
@@ -1173,6 +1177,22 @@ pre {
   font-size: 0.76rem;
 }
 
+.pane-summary-copy {
+  font-family: var(--font-mono);
+  letter-spacing: 0.01em;
+}
+
+.sidebar-command-hint {
+  font-family: var(--font-mono);
+  letter-spacing: 0.01em;
+}
+
+.rail-action-btn {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.64rem;
+}
+
 .project-create-form {
   display: grid;
   gap: 8px;
@@ -1180,6 +1200,10 @@ pre {
   border-radius: var(--radius-sm);
   background: #f7f9fc;
   padding: 10px;
+}
+
+.project-create-form-inline {
+  background: rgba(247, 249, 252, 0.88);
 }
 
 .project-create-field {
@@ -1212,29 +1236,31 @@ pre {
   border-radius: var(--radius-sm);
   font-size: 0.76rem;
   padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.84);
 }
 
 .project-tree {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   min-height: 0;
   overflow: visible;
 }
 
 .project-host-group {
-  border: 1px solid #e2e7f0;
-  border-radius: var(--radius-sm);
-  background: #f7f9fc;
-  padding: 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .project-host-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding: 2px 2px 0;
 }
 
 .project-host-headline {
@@ -1244,12 +1270,12 @@ pre {
 }
 
 .project-host-head strong {
-  font-size: 0.81rem;
+  font-size: 0.79rem;
   color: #25344e;
 }
 
 .project-host-head small {
-  font-size: 0.7rem;
+  font-size: 0.67rem;
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
@@ -1257,38 +1283,38 @@ pre {
 .host-toggle {
   border-radius: 999px;
   font-size: 0.66rem;
-  padding: 4px 8px;
+  padding: 3px 8px;
   white-space: nowrap;
 }
 
 .project-node {
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .project-chip {
   width: 100%;
-  border: 1px solid #dfe5ef;
-  border-radius: 14px;
-  background: #ffffff;
+  border: 1px solid #e3e8f1;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.88);
   color: #22334f;
-  padding: 10px 11px;
+  padding: 8px 10px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
   text-align: left;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
 }
 
 .project-chip:hover {
-  background: #f7f9fd;
+  background: #fbfcfe;
 }
 
 .project-chip.active {
-  border-color: #b9c9e5;
-  background: #f1f5fd;
-  box-shadow: inset 0 0 0 1px rgba(162, 184, 225, 0.3);
+  border-color: #c7d4ea;
+  background: #f4f7fd;
+  box-shadow: inset 0 0 0 1px rgba(171, 188, 220, 0.24);
 }
 
 .project-chip-main {
@@ -1301,7 +1327,7 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
 }
 
 .project-chip-main em {
@@ -1309,50 +1335,51 @@ pre {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-style: normal;
-  font-size: 0.67rem;
+  font-size: 0.65rem;
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
 
 .project-chip small {
-  font-size: 0.7rem;
+  font-size: 0.66rem;
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
 
 .project-node-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 6px;
+  justify-content: flex-start;
+  gap: 5px;
   flex-wrap: wrap;
+  padding-left: 8px;
 }
 
 .project-archive-btn {
-  padding: 4px 8px;
+  padding: 3px 7px;
   border-radius: var(--radius-xs);
-  font-size: 0.67rem;
+  font-size: 0.64rem;
 }
 
 .project-session-list {
   display: grid;
-  gap: 6px;
-  padding-left: 10px;
-  border-left: 1px solid #e5eaf2;
+  gap: 5px;
+  padding-left: 8px;
+  border-left: 1px solid #e8edf4;
 }
 
 .session-chip-tree {
   width: 100%;
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: 10px;
   background: rgba(255, 255, 255, 0.78);
   color: #273956;
   text-align: left;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
-  font-size: 0.79rem;
+  gap: 8px;
+  padding: 6px 9px;
+  font-size: 0.75rem;
 }
 
 .session-chip-tree:hover {
@@ -1382,7 +1409,7 @@ pre {
 .session-chip-state {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .session-chip-badge {
@@ -1390,8 +1417,8 @@ pre {
   border: 1px solid #dbe2ee;
   background: #f7f9fd;
   color: #61728f;
-  padding: 2px 6px;
-  font-size: 0.62rem;
+  padding: 1px 5px;
+  font-size: 0.58rem;
   line-height: 1.15;
   font-family: var(--font-mono);
 }
@@ -1417,7 +1444,7 @@ pre {
 
 .notification-center {
   display: grid;
-  gap: 8px;
+  gap: 7px;
 }
 
 .notification-head {
@@ -1437,7 +1464,7 @@ pre {
 .notification-list {
   display: grid;
   gap: 6px;
-  max-height: 220px;
+  max-height: 180px;
   overflow: auto;
 }
 
@@ -1446,9 +1473,9 @@ pre {
   text-align: left;
   border-radius: var(--radius-sm);
   border: 1px solid #e0e6f1;
-  background: #f8fbff;
+  background: rgba(248, 251, 255, 0.92);
   color: #2d3e5c;
-  padding: 8px 10px;
+  padding: 7px 9px;
   display: grid;
   gap: 3px;
 }
@@ -1471,9 +1498,32 @@ pre {
   margin: 0;
 }
 
-.shortcut-stack {
-  display: grid;
-  gap: 4px;
+.sidebar-meta-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-meta-head strong {
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #5f708a;
+  font-family: var(--font-mono);
+}
+
+.sidebar-meta-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.sidebar-meta-btn {
+  padding: 4px 9px;
+  font-size: 0.66rem;
 }
 
 .command-palette-backdrop {

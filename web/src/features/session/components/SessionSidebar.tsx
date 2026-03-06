@@ -112,35 +112,54 @@ export function SessionSidebar({
   onClearSessionAlerts,
   onOpenSessionFromAlert,
 }: SessionSidebarProps) {
+  const serverCount = sessionTreeHosts.length;
+  const projectCount = sessionTreeHosts.reduce(
+    (sum, hostNode) => sum + hostNode.projects.length,
+    0,
+  );
+
   return (
     <aside className="session-side codex-sidebar">
       <section className="inspect-block focus-block">
         <div className="pane-title-line">
           <div className="pane-title-copy">
             <h3>Projects</h3>
-            <p className="pane-subtle-light">
-              Servers, project paths, and session history.
+            <p className="pane-subtle-light pane-summary-copy">
+              {serverCount} server{serverCount === 1 ? "" : "s"} · {projectCount} project
+              {projectCount === 1 ? "" : "s"}
             </p>
           </div>
           <div className="pane-title-actions">
             <button
               type="button"
-              className="ghost new-thread"
+              className="ghost rail-action-btn"
+              aria-label="New Project"
               onClick={onOpenProjectComposer}
             >
-              New Project
+              + Project
             </button>
             <button
               type="button"
-              className="ghost new-thread"
+              className="ghost rail-action-btn"
+              aria-label="New Session"
               onClick={onCreateThread}
             >
-              New Session
+              + Session
             </button>
           </div>
         </div>
+        <p className="pane-subtle-light sidebar-command-hint">
+          Cmd/Ctrl+K palette · Enter send · Shift+Enter newline
+        </p>
+        <label className="tree-filter">
+          <input
+            value={projectFilter}
+            onChange={(event) => setProjectFilter(event.target.value)}
+            placeholder="Filter projects or sessions"
+          />
+        </label>
         {projectComposerOpen ? (
-          <form className="project-create-form" onSubmit={onCreateProject}>
+          <form className="project-create-form project-create-form-inline" onSubmit={onCreateProject}>
             <label className="project-create-field">
               <span>Server</span>
               <select
@@ -198,14 +217,6 @@ export function SessionSidebar({
           </form>
         ) : null}
 
-        <label className="tree-filter">
-          <input
-            value={projectFilter}
-            onChange={(event) => setProjectFilter(event.target.value)}
-            placeholder="Filter projects or sessions"
-          />
-        </label>
-
         <div className="project-tree">
           {sessionTreeHosts.length === 0 ? (
             <p className="pane-subtle-light">No servers/projects discovered yet.</p>
@@ -253,38 +264,40 @@ export function SessionSidebar({
                               : `${projectNode.sessions.length}`}
                           </small>
                         </button>
-                        <div className="project-node-actions">
-                          <button
-                            type="button"
-                            className="ghost project-archive-btn"
-                            disabled={!authReady || !hasToken || upsertingProjectID !== ""}
-                            onClick={() => onRenameProject(projectNode)}
-                          >
-                            {upsertingProjectID === projectNode.id ? "Saving..." : "Rename"}
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost danger-ghost project-archive-btn"
-                            disabled={
-                              !authReady ||
-                              !hasToken ||
-                              upsertingProjectID !== "" ||
-                              deletingProjectID === projectNode.id ||
-                              deletingProjectID !== ""
-                            }
-                            title="Archive project (empty only)"
-                            onClick={() =>
-                              onArchiveProject(
-                                projectNode.id,
-                                projectNode.hostID,
-                                projectNode.path,
-                                projectNode.sessions.length,
-                              )
-                            }
-                          >
-                            {deletingProjectID === projectNode.id ? "Archiving..." : "Archive"}
-                          </button>
-                        </div>
+                        {projectNode.id === activeWorkspaceID ? (
+                          <div className="project-node-actions">
+                            <button
+                              type="button"
+                              className="ghost project-archive-btn"
+                              disabled={!authReady || !hasToken || upsertingProjectID !== ""}
+                              onClick={() => onRenameProject(projectNode)}
+                            >
+                              {upsertingProjectID === projectNode.id ? "Saving..." : "Rename"}
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost danger-ghost project-archive-btn"
+                              disabled={
+                                !authReady ||
+                                !hasToken ||
+                                upsertingProjectID !== "" ||
+                                deletingProjectID === projectNode.id ||
+                                deletingProjectID !== ""
+                              }
+                              title="Archive project (empty only)"
+                              onClick={() =>
+                                onArchiveProject(
+                                  projectNode.id,
+                                  projectNode.hostID,
+                                  projectNode.path,
+                                  projectNode.sessions.length,
+                                )
+                              }
+                            >
+                              {deletingProjectID === projectNode.id ? "Archiving..." : "Archive"}
+                            </button>
+                          </div>
+                        ) : null}
                         <div className="project-session-list">
                           {projectNode.sessions.length === 0 ? (
                             <p className="pane-subtle-light compact-empty">
@@ -354,29 +367,31 @@ export function SessionSidebar({
       </section>
 
       <section className="inspect-block compact-session-meta">
-        <div className="shortcut-stack">
-          <p className="pane-subtle-light">
-            Ctrl/Cmd+K command palette · Enter send · Shift+Enter newline
-          </p>
-          <p className="pane-subtle-light">
-            Ctrl/Cmd+Shift+N new session · P pin focused session
-          </p>
+        <div className="sidebar-meta-head">
+          <strong>Notifications</strong>
+          <div className="sidebar-meta-actions">
+            <button
+              type="button"
+              className="ghost sidebar-meta-btn"
+              onClick={onEnableNotifications}
+            >
+              {notificationPermission === "granted" ? "Alerts on" : "Enable alerts"}
+            </button>
+            <button
+              type="button"
+              className="ghost sidebar-meta-btn"
+              onClick={onToggleAlertsExpanded}
+              disabled={sessionAlerts.length === 0}
+            >
+              Recent {sessionAlerts.length > 0 ? `(${sessionAlerts.length})` : ""}
+            </button>
+          </div>
         </div>
-        <div className="ops-actions-row">
-          <button type="button" className="ghost" onClick={onEnableNotifications}>
-            Alerts: {notificationPermission}
-          </button>
-          <button
-            type="button"
-            className="ghost"
-            onClick={onToggleAlertsExpanded}
-            disabled={sessionAlerts.length === 0}
-          >
-            Notifications {sessionAlerts.length > 0 ? `(${sessionAlerts.length})` : ""}
-          </button>
-        </div>
+        <p className="pane-subtle-light sidebar-command-hint">
+          Ctrl/Cmd+Shift+N new session · P pin focused session
+        </p>
         {sessionAlerts.length === 0 ? (
-          <p className="pane-subtle-light">No notifications yet.</p>
+          <p className="pane-subtle-light">No recent notifications.</p>
         ) : sessionAlertsExpanded ? (
           <div className="notification-center">
             <div className="notification-head">
@@ -402,7 +417,11 @@ export function SessionSidebar({
                 ))}
             </div>
           </div>
-        ) : null}
+        ) : (
+          <p className="pane-subtle-light">
+            Recent completions stay tucked away until you need them.
+          </p>
+        )}
       </section>
     </aside>
   );
