@@ -239,12 +239,19 @@ test.describe.serial("live headless session flow (real API, no route mocking)", 
       await expect
         .poll(
           async () => {
-            return page.locator(".message.message-assistant pre", { hasText: marker }).count();
+            const current = ((await latestAssistant.textContent()) ?? "").trim();
+            const lines = current
+              .split("\n")
+              .filter((line) => line.trim() !== "");
+            return lines.length;
           },
           { timeout: 120_000 }
         )
-        .toBeGreaterThan(0);
-      const lineCount = latestText.split("\n").filter((line) => line.trim() !== "").length;
+        .toBeGreaterThanOrEqual(20);
+      latestText = ((await latestAssistant.textContent()) ?? "").trim();
+      const lineCount = latestText
+        .split("\n")
+        .filter((line) => line.trim() !== "").length;
       expect(lineCount >= 20).toBeTruthy();
 
       const timelineMetrics = await page.locator(".timeline").evaluate((el) => ({
