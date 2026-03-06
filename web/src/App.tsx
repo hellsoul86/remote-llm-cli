@@ -20,13 +20,8 @@ import {
 import { CommandPalette } from "./features/session/components/CommandPalette";
 import { OpsControlSidebar } from "./features/session/components/OpsControlSidebar";
 import { SessionComposer } from "./features/session/components/SessionComposer";
-import { OpsAuditTimelinePanel } from "./features/session/components/OpsAuditTimelinePanel";
 import { SessionHeader } from "./features/session/components/SessionHeader";
-import { OpsActiveJobPanel } from "./features/session/components/OpsActiveJobPanel";
-import { OpsCodexPlatformPanel } from "./features/session/components/OpsCodexPlatformPanel";
-import { OpsHostFormPanel } from "./features/session/components/OpsHostFormPanel";
-import { OpsRecentJobsPanel } from "./features/session/components/OpsRecentJobsPanel";
-import { OpsRecentRunsPanel } from "./features/session/components/OpsRecentRunsPanel";
+import { OpsInspectPane } from "./features/session/components/OpsInspectPane";
 import { SessionSidebar } from "./features/session/components/SessionSidebar";
 import { SessionTimeline } from "./features/session/components/SessionTimeline";
 import { TokenGate } from "./features/session/components/TokenGate";
@@ -1515,104 +1510,91 @@ export function App() {
             opsNoticeIsError={opsNoticeIsError}
           />
 
-          <aside className="inspect-pane">
-            {isRefreshing ? (
-              <section className="inspect-block">
-                <h3>Loading</h3>
-                <p className="pane-subtle-light">
-                  Refreshing hosts, queue, runs, and audit timeline...
-                </p>
-              </section>
-            ) : null}
-
-            <OpsCodexPlatformPanel
-              hosts={hosts}
-              platformHostID={platformHostID}
-              onPlatformHostChange={setPlatformHostID}
-              platformBusySection={platformBusySection}
-              platformNotice={platformNotice}
-              onRunPlatformLogin={onRunPlatformLogin}
-              platformLoginResult={platformLoginResult}
-              platformMCPAction={platformMCPAction}
-              onPlatformMCPActionChange={setPlatformMCPAction}
-              platformMCPName={platformMCPName}
-              onPlatformMCPNameChange={setPlatformMCPName}
-              platformMCPURL={platformMCPURL}
-              onPlatformMCPURLChange={setPlatformMCPURL}
-              platformMCPCommand={platformMCPCommand}
-              onPlatformMCPCommandChange={setPlatformMCPCommand}
-              platformMCPEnvCSV={platformMCPEnvCSV}
-              onPlatformMCPEnvCSVChange={setPlatformMCPEnvCSV}
-              platformMCPBearerTokenEnvVar={platformMCPBearerTokenEnvVar}
-              onPlatformMCPBearerTokenEnvVarChange={setPlatformMCPBearerTokenEnvVar}
-              platformMCPScopeCSV={platformMCPScopeCSV}
-              onPlatformMCPScopeCSVChange={setPlatformMCPScopeCSV}
-              onRunPlatformMCP={onRunPlatformMCP}
-              platformMCPResult={platformMCPResult}
-              platformCloudAction={platformCloudAction}
-              onPlatformCloudActionChange={setPlatformCloudAction}
-              platformCloudTaskID={platformCloudTaskID}
-              onPlatformCloudTaskIDChange={setPlatformCloudTaskID}
-              platformCloudEnvID={platformCloudEnvID}
-              onPlatformCloudEnvIDChange={setPlatformCloudEnvID}
-              platformCloudQuery={platformCloudQuery}
-              onPlatformCloudQueryChange={setPlatformCloudQuery}
-              platformCloudAttempts={platformCloudAttempts}
-              onPlatformCloudAttemptsChange={setPlatformCloudAttempts}
-              platformCloudBranch={platformCloudBranch}
-              onPlatformCloudBranchChange={setPlatformCloudBranch}
-              platformCloudLimit={platformCloudLimit}
-              onPlatformCloudLimitChange={setPlatformCloudLimit}
-              platformCloudCursor={platformCloudCursor}
-              onPlatformCloudCursorChange={setPlatformCloudCursor}
-              platformCloudAttempt={platformCloudAttempt}
-              onPlatformCloudAttemptChange={setPlatformCloudAttempt}
-              onRunPlatformCloud={onRunPlatformCloud}
-              platformCloudResult={platformCloudResult}
-            />
-
-            <OpsActiveJobPanel
-              activeJob={activeJob}
-              activeJobThreadID={activeJobThreadID}
-              activeProgress={activeProgress}
-            />
-
-            <OpsRecentJobsPanel
-              opsJobStatusFilter={opsJobStatusFilter}
-              onOpsJobStatusFilterChange={setOpsJobStatusFilter}
-              opsJobTypeFilter={opsJobTypeFilter}
-              onOpsJobTypeFilterChange={setOpsJobTypeFilter}
-              filteredOpsJobs={filteredOpsJobs}
-              onSelectActiveJob={(job) => {
+          <OpsInspectPane
+            isRefreshing={isRefreshing}
+            platformPanelProps={{
+              hosts,
+              platformHostID,
+              onPlatformHostChange: setPlatformHostID,
+              platformBusySection,
+              platformNotice,
+              onRunPlatformLogin,
+              platformLoginResult,
+              platformMCPAction,
+              onPlatformMCPActionChange: setPlatformMCPAction,
+              platformMCPName,
+              onPlatformMCPNameChange: setPlatformMCPName,
+              platformMCPURL,
+              onPlatformMCPURLChange: setPlatformMCPURL,
+              platformMCPCommand,
+              onPlatformMCPCommandChange: setPlatformMCPCommand,
+              platformMCPEnvCSV,
+              onPlatformMCPEnvCSVChange: setPlatformMCPEnvCSV,
+              platformMCPBearerTokenEnvVar,
+              onPlatformMCPBearerTokenEnvVarChange: setPlatformMCPBearerTokenEnvVar,
+              platformMCPScopeCSV,
+              onPlatformMCPScopeCSVChange: setPlatformMCPScopeCSV,
+              onRunPlatformMCP,
+              platformMCPResult,
+              platformCloudAction,
+              onPlatformCloudActionChange: setPlatformCloudAction,
+              platformCloudTaskID,
+              onPlatformCloudTaskIDChange: setPlatformCloudTaskID,
+              platformCloudEnvID,
+              onPlatformCloudEnvIDChange: setPlatformCloudEnvID,
+              platformCloudQuery,
+              onPlatformCloudQueryChange: setPlatformCloudQuery,
+              platformCloudAttempts,
+              onPlatformCloudAttemptsChange: setPlatformCloudAttempts,
+              platformCloudBranch,
+              onPlatformCloudBranchChange: setPlatformCloudBranch,
+              platformCloudLimit,
+              onPlatformCloudLimitChange: setPlatformCloudLimit,
+              platformCloudCursor,
+              onPlatformCloudCursorChange: setPlatformCloudCursor,
+              platformCloudAttempt,
+              onPlatformCloudAttemptChange: setPlatformCloudAttempt,
+              onRunPlatformCloud,
+              platformCloudResult,
+            }}
+            activeJobPanelProps={{
+              activeJob,
+              activeJobThreadID,
+              activeProgress,
+            }}
+            recentJobsPanelProps={{
+              opsJobStatusFilter,
+              onOpsJobStatusFilterChange: setOpsJobStatusFilter,
+              opsJobTypeFilter,
+              onOpsJobTypeFilterChange: setOpsJobTypeFilter,
+              filteredOpsJobs,
+              onSelectActiveJob: (job) => {
                 setActiveJobID(job.id);
                 setActiveJob(job);
-              }}
-              onCancelJob={onCancelJob}
-            />
-
-            <OpsRecentRunsPanel
-              opsRunStatusFilter={opsRunStatusFilter}
-              onOpsRunStatusFilterChange={setOpsRunStatusFilter}
-              filteredOpsRuns={filteredOpsRuns}
-            />
-
-            <OpsAuditTimelinePanel
-              opsAuditMethodFilter={opsAuditMethodFilter}
-              onOpsAuditMethodFilterChange={setOpsAuditMethodFilter}
-              opsAuditStatusFilter={opsAuditStatusFilter}
-              onOpsAuditStatusFilterChange={setOpsAuditStatusFilter}
-              filteredAuditEvents={filteredAuditEvents}
-            />
-
-            <OpsHostFormPanel
-              editingHostID={editingHostID}
-              hostForm={hostForm}
-              onHostFormChange={setHostForm}
-              addingHost={addingHost}
-              onSubmit={onAddHost}
-              onCancelEdit={onCancelHostEdit}
-            />
-          </aside>
+              },
+              onCancelJob,
+            }}
+            recentRunsPanelProps={{
+              opsRunStatusFilter,
+              onOpsRunStatusFilterChange: setOpsRunStatusFilter,
+              filteredOpsRuns,
+            }}
+            auditTimelinePanelProps={{
+              opsAuditMethodFilter,
+              onOpsAuditMethodFilterChange: setOpsAuditMethodFilter,
+              opsAuditStatusFilter,
+              onOpsAuditStatusFilterChange: setOpsAuditStatusFilter,
+              filteredAuditEvents,
+            }}
+            hostFormPanelProps={{
+              editingHostID,
+              hostForm,
+              onHostFormChange: setHostForm,
+              addingHost,
+              onSubmit: onAddHost,
+              onCancelEdit: onCancelHostEdit,
+            }}
+          />
         </div>
       )}
 
