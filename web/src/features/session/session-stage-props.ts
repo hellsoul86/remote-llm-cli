@@ -36,6 +36,8 @@ type BuildSessionStagePropsDeps = {
   reviewBase: SessionReviewPaneProps["reviewBase"];
   reviewCommit: SessionReviewPaneProps["reviewCommit"];
   reviewTitle: SessionReviewPaneProps["reviewTitle"];
+  reviewTurnDiff: SessionReviewPaneProps["turnDiff"];
+  reviewPatchDelta: SessionReviewPaneProps["patchDelta"];
   reviewChanges: SessionReviewPaneProps["changes"];
   reviewFindings: SessionReviewPaneProps["findings"];
   onSetReviewMode: SessionReviewPaneProps["onSetMode"];
@@ -114,6 +116,8 @@ export function buildSessionStageProps(
         reviewBase: deps.reviewBase,
         reviewCommit: deps.reviewCommit,
         reviewTitle: deps.reviewTitle,
+        turnDiff: deps.reviewTurnDiff,
+        patchDelta: deps.reviewPatchDelta,
         changes: deps.reviewChanges,
         findings: deps.reviewFindings,
         onClose: deps.onToggleReviewPane,

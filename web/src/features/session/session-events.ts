@@ -119,12 +119,25 @@ export function normalizeSessionEvent(
       };
       eventType = "assistant.delta";
     } else if (
+      method === "turn/diff/updated" ||
+      method === "item/filechange/outputdelta"
+    ) {
+      const diffEvent = {
+        type: method.replace(/\//g, "."),
+        ...payload,
+      };
+      payload = {
+        ...payload,
+        chunk: `${JSON.stringify(diffEvent)}\n`,
+      };
+      eventType = "assistant.delta";
+    } else if (
       method === "item/started" ||
       method === "item/updated" ||
       method === "item/completed"
     ) {
       const itemEvent = {
-        type: method.replace("/", "."),
+        type: method.replace(/\//g, "."),
         ...payload,
       };
       payload = {

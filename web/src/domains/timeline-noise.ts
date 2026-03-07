@@ -72,6 +72,8 @@ export function isSecondarySurfaceTimelineEntry(
   const title = entry.title.trim().toLowerCase();
   return (
     /^command (started|completed|failed)$/.test(title) ||
-    /^patch (started|applied|failed)$/.test(title)
+    /^patch (started|applied|failed)$/.test(title) ||
+    title === "review diff updated" ||
+    title === "patch diff delta"
   );
 }

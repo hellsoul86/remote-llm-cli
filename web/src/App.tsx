@@ -83,7 +83,11 @@ import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
 import {
   createSessionRunEventHandlers,
 } from "./features/session/session-run-events";
-import { parseCodexFileChangesBody } from "./features/session/codex-parsing";
+import {
+  parseCodexFileChangesBody,
+  parseCodexPatchDeltaBody,
+  parseCodexTurnDiffBody,
+} from "./features/session/codex-parsing";
 import {
   createSessionStreamController,
   type SessionStreamRuntimeState,
@@ -467,6 +471,28 @@ export function App() {
         })),
     [activeTimeline],
   );
+  const reviewTurnDiff = useMemo(() => {
+    for (let index = activeTimeline.length - 1; index >= 0; index -= 1) {
+      const entry = activeTimeline[index];
+      if (!entry || entry.kind !== "system") continue;
+      if (entry.title.trim().toLowerCase() !== "review diff updated") continue;
+      const diff = parseCodexTurnDiffBody(entry.body);
+      if (diff.trim()) return diff;
+    }
+    return "";
+  }, [activeTimeline]);
+  const reviewPatchDelta = useMemo(() => {
+    return activeTimeline
+      .filter(
+        (entry) =>
+          entry.kind === "system" &&
+          entry.title.trim().toLowerCase() === "patch diff delta",
+      )
+      .map((entry) => parseCodexPatchDeltaBody(entry.body))
+      .filter((value) => value.trim() !== "")
+      .slice(-12)
+      .join("\n");
+  }, [activeTimeline]);
   const reviewChanges = useMemo(() => {
     const out: Array<{
       id: string;
@@ -1557,6 +1583,8 @@ export function App() {
     reviewBase: activeThread?.reviewBase ?? "",
     reviewCommit: activeThread?.reviewCommit ?? "",
     reviewTitle: activeThread?.reviewTitle ?? "",
+    reviewTurnDiff,
+    reviewPatchDelta,
     reviewChanges,
     reviewFindings,
     onSetReviewMode: onSetActiveThreadReviewMode,

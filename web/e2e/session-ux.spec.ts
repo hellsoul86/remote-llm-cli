@@ -25,6 +25,7 @@ type MockOptions = {
   streamFailAttempts?: number;
   runtimeCommandEvents?: boolean;
   runtimeFileChangeEvents?: boolean;
+  protocolDiffEvents?: boolean;
   assistantDeltaEvents?: number;
   ignoreStreamAfterCursor?: boolean;
 };
@@ -72,8 +73,27 @@ async function mockSessionApi(
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   const runtimeFileChangeEvents = options?.runtimeFileChangeEvents ?? false;
+  const protocolDiffEvents = options?.protocolDiffEvents ?? false;
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
   const ignoreStreamAfterCursor = options?.ignoreStreamAfterCursor ?? false;
+
+  const appDiffText = [
+    "--- a/src/app.ts",
+    "+++ b/src/app.ts",
+    "@@ -1,4 +1,4 @@",
+    " export function App() {",
+    '-  return "legacy shell";',
+    '+  return "native workbench";',
+    " }",
+  ].join("\n");
+  const docsDiffText = [
+    "--- /dev/null",
+    "+++ b/docs/review-plan.md",
+    "@@ -0,0 +1,3 @@",
+    "+# Review plan",
+    "+- move shell chrome out of the conversation",
+    "+- keep diffs in the review pane",
+  ].join("\n");
 
   let sessionOneStreamAttempts = 0;
   let sessionOneSSECalls = 0;
@@ -266,27 +286,12 @@ async function mockSessionApi(
                 {
                   kind: "update",
                   path: "src/app.ts",
-                  diff: [
-                    "--- a/src/app.ts",
-                    "+++ b/src/app.ts",
-                    "@@ -1,4 +1,4 @@",
-                    " export function App() {",
-                    '-  return "legacy shell";',
-                    '+  return "native workbench";',
-                    " }",
-                  ].join("\n"),
+                  diff: appDiffText,
                 },
                 {
                   kind: "create",
                   path: "docs/review-plan.md",
-                  diff: [
-                    "--- /dev/null",
-                    "+++ b/docs/review-plan.md",
-                    "@@ -0,0 +1,3 @@",
-                    "+# Review plan",
-                    "+- move shell chrome out of the conversation",
-                    "+- keep diffs in the review pane",
-                  ].join("\n"),
+                  diff: docsDiffText,
                 },
               ],
             },
@@ -333,6 +338,38 @@ async function mockSessionApi(
         turnState.runID,
         "assistant.delta",
         { chunk: chunkFromText(text, index === 0) },
+        startedAt,
+      );
+    }
+
+    if (protocolDiffEvents) {
+      pushSessionEvent(
+        turnState.sessionID,
+        turnState.runID,
+        "codexrpc.turn.diff.updated",
+        {
+          method: "turn/diff/updated",
+          params: {
+            threadId: turnState.sessionID,
+            turnId: turnState.runID,
+            diff: [appDiffText, "", docsDiffText].join("\n"),
+          },
+        },
+        startedAt,
+      );
+      pushSessionEvent(
+        turnState.sessionID,
+        turnState.runID,
+        "codexrpc.item.filechange.outputdelta",
+        {
+          method: "item/fileChange/outputDelta",
+          params: {
+            threadId: turnState.sessionID,
+            turnId: turnState.runID,
+            itemId: "item_patch_1",
+            delta: "@@ streaming patch output @@\n+native workbench\n",
+          },
+        },
         startedAt,
       );
     }
@@ -2476,6 +2513,34 @@ test("review pane scopes notes to the selected file and lets the reviewer dismis
     .click();
   await expect(page.getByTestId("review-file-findings")).toHaveCount(0);
   await expect(page.getByTestId("review-restore-dismissed")).toBeVisible();
+});
+
+test("review pane consumes app-server diff notifications before file cards settle", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_PROTOCOL_DIFF_${Date.now()}`;
+  const harness = await mockSessionApi(page, `protocol diff ${marker}`, marker, {
+    protocolDiffEvents: true,
+  });
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await page.getByTestId("review-mode-review").click();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`consume protocol diff ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect(page.getByTestId("review-turn-diff")).toContainText(
+    "+++ b/docs/review-plan.md",
+  );
+  await expect(page.getByTestId("review-turn-diff")).toContainText(
+    '+  return "native workbench";',
+  );
 });
 
 test("fork session creates a branch session in project list", async ({ page }) => {

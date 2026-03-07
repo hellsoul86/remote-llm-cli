@@ -272,6 +272,8 @@ export type ParsedCodexFileChange = {
 };
 
 const CODEX_FILE_CHANGE_METADATA_PREFIX = "__codex_file_changes__:";
+const CODEX_TURN_DIFF_METADATA_PREFIX = "__codex_turn_diff__:";
+const CODEX_PATCH_DELTA_METADATA_PREFIX = "__codex_patch_delta__:";
 
 function normalizeCodexFileChange(raw: unknown): ParsedCodexFileChange | null {
   const change = asRecord(raw);
@@ -365,6 +367,64 @@ export function parseCodexFileChangesBody(
     .filter((change) => change.path !== "");
 }
 
+function encodeCodexMetadata(prefix: string, payload: unknown): string {
+  return `${prefix}${encodeURIComponent(JSON.stringify(payload))}`;
+}
+
+function decodeCodexMetadata<T>(prefix: string, body: string): T | null {
+  const markerLine = body
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith(prefix));
+  if (!markerLine) return null;
+  const encoded = markerLine.slice(prefix.length);
+  try {
+    return JSON.parse(decodeURIComponent(encoded)) as T;
+  } catch {
+    return null;
+  }
+}
+
+export function parseCodexTurnDiffBody(body: string): string {
+  const parsed = decodeCodexMetadata<{ diff?: string }>(
+    CODEX_TURN_DIFF_METADATA_PREFIX,
+    body,
+  );
+  const diff =
+    typeof parsed?.diff === "string" ? parsed.diff.trim() : "";
+  if (diff) return diff;
+  return body
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(
+      (line) =>
+        line.trim() !== "" &&
+        !line.trim().startsWith(CODEX_TURN_DIFF_METADATA_PREFIX),
+    )
+    .join("\n")
+    .trim();
+}
+
+export function parseCodexPatchDeltaBody(body: string): string {
+  const parsed = decodeCodexMetadata<{ delta?: string }>(
+    CODEX_PATCH_DELTA_METADATA_PREFIX,
+    body,
+  );
+  const delta =
+    typeof parsed?.delta === "string" ? parsed.delta : "";
+  if (delta.trim()) return delta;
+  return body
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(
+      (line) =>
+        line.trim() !== "" &&
+        !line.trim().startsWith(CODEX_PATCH_DELTA_METADATA_PREFIX),
+    )
+    .join("\n")
+    .trim();
+}
+
 export function buildCodexRuntimeCardFromEvent(
   event: Record<string, unknown>,
   runID: string,
@@ -403,6 +463,43 @@ export function buildCodexRuntimeCardFromEvent(
       title: "Approval Required",
       body: message,
       state: "error",
+    };
+  }
+
+  if (
+    eventType === "turn.diff.updated" ||
+    eventType === "item.filechange.outputdelta"
+  ) {
+    const diff =
+      typeof event.diff === "string"
+        ? event.diff.trim()
+        : typeof event.delta === "string"
+          ? event.delta
+          : "";
+    if (!diff.trim()) {
+      return null;
+    }
+    const itemID =
+      typeof event.itemId === "string" && event.itemId.trim() !== ""
+        ? event.itemId.trim()
+        : "turn";
+    return {
+      key:
+        eventType === "turn.diff.updated"
+          ? `${runID}:turn-diff:${diff.length}:${diff.slice(0, 80)}`
+          : `${runID}:patch-delta:${itemID}:${diff.length}:${diff.slice(0, 80)}`,
+      title:
+        eventType === "turn.diff.updated"
+          ? "Review Diff Updated"
+          : "Patch Diff Delta",
+      body:
+        eventType === "turn.diff.updated"
+          ? encodeCodexMetadata(CODEX_TURN_DIFF_METADATA_PREFIX, { diff })
+          : encodeCodexMetadata(CODEX_PATCH_DELTA_METADATA_PREFIX, {
+              itemId: itemID,
+              delta: diff,
+            }),
+      state: "running",
     };
   }
 

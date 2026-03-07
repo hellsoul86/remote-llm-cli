@@ -30,6 +30,8 @@ type SessionReviewPaneProps = {
   reviewBase: string;
   reviewCommit: string;
   reviewTitle: string;
+  turnDiff: string;
+  patchDelta: string;
   changes: ReviewChange[];
   findings: ReviewFinding[];
   onClose: () => void;
@@ -103,6 +105,8 @@ export function SessionReviewPane({
   reviewBase,
   reviewCommit,
   reviewTitle,
+  turnDiff,
+  patchDelta,
   changes,
   findings,
   onClose,
@@ -257,6 +261,47 @@ export function SessionReviewPane({
           Review
         </button>
       </div>
+
+      <section className="review-pane-block review-diff-overview-block">
+        <div className="review-pane-copy">
+          <strong>Turn diff</strong>
+          <p>
+            Consume aggregated diff updates from the Codex app-server stream before
+            they are materialized as file cards.
+          </p>
+        </div>
+        {turnDiff.trim() ? (
+          <div className="review-diff-view" data-testid="review-turn-diff">
+            {parseDiffLines(turnDiff).map((line, index) => (
+              <code
+                key={`turn-diff:${index}`}
+                className={`review-diff-line review-diff-${line.kind}`}
+              >
+                {line.text}
+              </code>
+            ))}
+          </div>
+        ) : patchDelta.trim() ? (
+          <div className="review-diff-view" data-testid="review-patch-delta">
+            {patchDelta
+              .split("\n")
+              .filter((line) => line.trim() !== "")
+              .map((line, index) => (
+                <code
+                  key={`patch-delta:${index}`}
+                  className="review-diff-line review-diff-context"
+                >
+                  {line}
+                </code>
+              ))}
+          </div>
+        ) : (
+          <p className="review-empty-copy" data-testid="review-turn-diff-empty">
+            Codex turn-level diff updates will appear here as soon as the app-server
+            starts streaming them.
+          </p>
+        )}
+      </section>
 
       <section className="review-pane-block review-changes-block">
         <div className="review-pane-copy">
