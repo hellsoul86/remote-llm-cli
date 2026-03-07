@@ -410,7 +410,10 @@ export function App() {
   const activeStreamLastError =
     activeSessionStreamHealth?.lastError.trim() ?? "";
   const canReconnectActiveStream =
-    authPhase === "ready" && token.trim() !== "" && activeThreadID.trim() !== "";
+    authPhase === "ready" &&
+    token.trim() !== "" &&
+    activeThreadID.trim() !== "" &&
+    activeStreamState !== "live";
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
@@ -673,7 +676,6 @@ export function App() {
   }, [auditEvents, opsAuditMethodFilter, opsAuditStatusFilter]);
   const healthIsError = health.startsWith("error");
   const opsNoticeIsError = /fail|error|degraded/i.test(opsNotice);
-  const syncLabel = isRefreshing ? "syncing" : "live";
 
   useEffect(() => {
     tokenRef.current = token;
@@ -1378,12 +1380,12 @@ export function App() {
     <div className="workspace-shell">
       <AppChrome
         appMode={appMode}
-        onSwitchMode={switchMode}
         isRefreshing={isRefreshing}
         healthIsError={healthIsError}
         health={health}
-        syncLabel={syncLabel}
         onRefreshWorkspace={onRefreshWorkspace}
+        onOpenUtilities={() => switchMode("ops")}
+        onReturnToSession={() => switchMode("session")}
         onLogout={onLogout}
       />
 

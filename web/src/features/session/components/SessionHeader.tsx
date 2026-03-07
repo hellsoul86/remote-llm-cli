@@ -23,40 +23,53 @@ export function SessionHeader({
   canReconnect,
   onReconnect,
 }: SessionHeaderProps) {
+  const statusCopy =
+    streamCopy === "live"
+      ? "Connected"
+      : streamCopy === "connecting"
+        ? "Connecting"
+        : streamCopy.startsWith("reconnecting")
+          ? streamCopy.replace("reconnecting", "Reconnecting")
+          : streamCopy.startsWith("stream error")
+            ? streamCopy.replace("stream error", "Needs attention")
+            : streamCopy === "offline"
+              ? "Offline"
+              : streamCopy;
+
   return (
     <header className="chat-head">
       <div className="chat-head-main">
-        <p className="chat-head-eyebrow">Session</p>
         <h1>{title || "Session"}</h1>
         <p className="chat-context">{context}</p>
       </div>
       <div className="chat-head-side">
         <div className="chat-head-status">
-        <span
-          className={`stream-pill ${streamTone}`}
-          data-testid="stream-status"
-          title={streamLastError || `stream ${streamCopy}`}
-        >
-          stream {streamCopy}
-        </span>
+          <span
+            className={`stream-pill ${streamTone}`}
+            data-testid="stream-status"
+            title={streamLastError || statusCopy}
+          >
+            {statusCopy}
+          </span>
         </div>
         <div className="chat-head-actions">
-        <button
-          type="button"
-          className="ghost danger-ghost stream-reconnect-btn"
-          disabled={!canArchive}
-          onClick={onArchive}
-        >
-          {archiving ? "Archiving..." : "Archive"}
-        </button>
-        <button
-          type="button"
-          className="ghost stream-reconnect-btn"
-          disabled={!canReconnect}
-          onClick={onReconnect}
-        >
-          Reconnect
-        </button>
+          <button
+            type="button"
+            className="ghost danger-ghost stream-reconnect-btn"
+            disabled={!canArchive}
+            onClick={onArchive}
+          >
+            {archiving ? "Archiving..." : "Archive"}
+          </button>
+          {canReconnect ? (
+            <button
+              type="button"
+              className="ghost stream-reconnect-btn"
+              onClick={onReconnect}
+            >
+              Retry
+            </button>
+          ) : null}
         </div>
       </div>
     </header>

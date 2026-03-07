@@ -1946,6 +1946,23 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   expect(scrollGap <= 48).toBeTruthy();
 });
 
+test("top shell keeps utilities secondary to the active session workspace", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SHELL_REDUCTION_${Date.now()}`;
+  await mockSessionApi(page, `shell reduction ${marker}`, marker);
+  await unlock(page);
+
+  const topbar = page.locator(".app-topbar");
+  await expect(topbar.getByRole("button", { name: "Utilities", exact: true })).toBeVisible();
+  await expect(topbar.getByRole("button", { name: "Session", exact: true })).toHaveCount(0);
+  await expect(topbar.getByRole("button", { name: "Ops", exact: true })).toHaveCount(0);
+  await expect(topbar.getByRole("button", { name: "Refresh", exact: true })).toHaveCount(0);
+  await expect(topbar.getByRole("button", { name: "Lock", exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("stream-status")).toContainText("Connected");
+});
+
 test("jump-to-latest appears when timeline grows off-bottom", async ({
   page,
 }) => {
@@ -2108,7 +2125,7 @@ test("ops codex platform auth panel runs status action", async ({ page }) => {
   const harness = await mockSessionApi(page, `platform auth ${marker}`, marker);
   await unlock(page);
 
-  await page.getByRole("button", { name: "Ops", exact: true }).click();
+  await page.getByRole("button", { name: "Utilities", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Codex Platform" })).toBeVisible();
 
   await page.getByTestId("platform-login-status-btn").click();
@@ -2127,7 +2144,7 @@ test("ops codex platform mcp/cloud controls map requests", async ({ page }) => {
   const harness = await mockSessionApi(page, `platform req ${marker}`, marker);
   await unlock(page);
 
-  await page.getByRole("button", { name: "Ops", exact: true }).click();
+  await page.getByRole("button", { name: "Utilities", exact: true }).click();
 
   await page.getByTestId("platform-mcp-action-select").selectOption("add");
   await page.getByTestId("platform-mcp-name-input").fill("memory");
@@ -3150,14 +3167,16 @@ test("stream status recovers after transient failures", async ({ page }) => {
   let sawRetryState = false;
   for (let index = 0; index < 16; index += 1) {
     const text = (await streamStatus.innerText()).toLowerCase();
-    if (text.includes("reconnecting") || text.includes("stream error")) {
+    if (text.includes("reconnecting") || text.includes("needs attention")) {
       sawRetryState = true;
       break;
     }
     await page.waitForTimeout(500);
   }
   expect(sawRetryState).toBeTruthy();
-  await expect(streamStatus).toContainText("stream live", { timeout: 15000 });
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(streamStatus).toContainText("Connected", { timeout: 15000 });
 
   const composer = page.getByPlaceholder(
     "Tell codex what to do in this workspace...",
@@ -3173,8 +3192,7 @@ test("stream status recovers after transient failures", async ({ page }) => {
   );
   expect(harness.sessionOneStreamAfterValues().slice(0, 3)).toEqual([0, 0, 0]);
 
-  await page.getByRole("button", { name: "Reconnect" }).click();
-  await expect(streamStatus).toContainText("stream live", { timeout: 10000 });
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
 });
 
 test("pinning session reorders tree and persists across reload", async ({ page }) => {
