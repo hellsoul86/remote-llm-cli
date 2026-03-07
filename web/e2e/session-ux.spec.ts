@@ -2294,7 +2294,7 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   await expect(chatPane).toBeVisible();
   await expect(page.locator(".chat-context")).toContainText("/srv/work");
   await expect(page.locator(".pane-summary-copy").first()).toContainText(
-    "1 project across 1",
+    "1 project · recent threads",
   );
   await expect(
     page.getByText("Servers, project paths, and session history."),
@@ -2315,7 +2315,7 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
     page.getByText("No matching projects or threads."),
   ).toBeVisible();
   await projectFilter.fill("");
-  await expect(page.locator(".project-host-pill").first()).toBeVisible();
+  await expect(page.locator(".project-host-pill")).toHaveCount(0);
 
   const composer = page.getByPlaceholder(
     "Ask Codex to work in this project...",
@@ -2382,6 +2382,7 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
   await unlock(page);
 
   const topbar = page.locator(".app-topbar");
+  await expect(topbar.getByRole("button", { name: "Sidebar", exact: true })).toBeVisible();
   await expect(topbar.getByRole("button", { name: "Tools", exact: true })).toBeVisible();
   await expect(
     topbar.getByRole("button", { name: "Session", exact: true }),
@@ -2397,6 +2398,23 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
   ).toHaveCount(0);
   await expect(page).toHaveTitle(/Codex$/);
   await expect(page.getByTestId("stream-status")).toContainText("Live");
+});
+
+test("sidebar toggles from topbar and Cmd/Ctrl+B", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SIDEBAR_TOGGLE_${Date.now()}`;
+  await mockSessionApi(page, `sidebar toggle ${marker}`, marker);
+  await unlock(page);
+
+  await expect(page.locator(".session-side")).toBeVisible();
+  await page.getByRole("button", { name: "Sidebar", exact: true }).click();
+  await expect(page.locator(".session-side")).toHaveCount(0);
+
+  await page.keyboard.press("Control+b");
+  await expect(page.locator(".session-side")).toBeVisible();
+  await expect(
+    page.getByPlaceholder("Search projects or threads"),
+  ).toBeVisible();
 });
 
 test("jump-to-latest appears when timeline grows off-bottom", async ({
@@ -3815,7 +3833,7 @@ test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
 
   await revisitWorkspace(page);
   await expect(projectFilter).toHaveValue("session 2");
-  await expect(page.locator(".project-host-pill").first()).toBeVisible();
+  await expect(page.locator(".project-host-pill")).toHaveCount(0);
 });
 
 test("project create and rename use project name as primary label", async ({

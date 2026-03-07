@@ -112,11 +112,13 @@ export function SessionSidebar({
   onClearSessionAlerts,
   onOpenSessionFromAlert,
 }: SessionSidebarProps) {
-  const serverCount = sessionTreeHosts.length;
   const projectCount = sessionTreeHosts.reduce(
     (sum, hostNode) => sum + hostNode.projects.length,
     0,
   );
+  const showHostPicker = hosts.length > 1;
+  const showHostPill = (hostName: string) =>
+    sessionTreeHosts.length > 1 || hostName.trim() !== "local-default";
   const visibleProjects = filteredSessionTreeHosts.flatMap((hostNode) =>
     hostNode.projects.map((projectNode) => ({
       hostName: hostNode.hostName,
@@ -156,20 +158,22 @@ export function SessionSidebar({
               </button>
             </div>
             <form className="project-create-form" onSubmit={onCreateProject}>
-              <label className="project-create-field">
-                <span>Host</span>
-                <select
-                  value={projectFormHostID}
-                  onChange={(event) => setProjectFormHostID(event.target.value)}
-                  disabled={!authReady || !hasToken || upsertingProjectID !== ""}
-                >
-                  {hosts.map((host) => (
-                    <option key={host.id} value={host.id}>
-                      {host.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {showHostPicker ? (
+                <label className="project-create-field">
+                  <span>Host</span>
+                  <select
+                    value={projectFormHostID}
+                    onChange={(event) => setProjectFormHostID(event.target.value)}
+                    disabled={!authReady || !hasToken || upsertingProjectID !== ""}
+                  >
+                    {hosts.map((host) => (
+                      <option key={host.id} value={host.id}>
+                        {host.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <label className="project-create-field">
                 <span>Path</span>
                 <input
@@ -220,8 +224,7 @@ export function SessionSidebar({
           <div className="pane-title-copy">
             <h3>Projects</h3>
             <p className="pane-subtle-light pane-summary-copy">
-              {projectCount} project{projectCount === 1 ? "" : "s"} across {serverCount}
-              &nbsp;host{serverCount === 1 ? "" : "s"}
+              {projectCount} project{projectCount === 1 ? "" : "s"} · recent threads
             </p>
           </div>
           <div className="pane-title-actions">
@@ -244,7 +247,7 @@ export function SessionSidebar({
           </div>
         </div>
         <p className="pane-subtle-light sidebar-command-hint">
-          Cmd/Ctrl+K palette · project-first workbench
+          Cmd/Ctrl+B sidebar · Cmd/Ctrl+K palette
         </p>
         <label className="tree-filter">
           <input
@@ -283,9 +286,11 @@ export function SessionSidebar({
                     <em>{projectNode.path}</em>
                   </span>
                   <span className="project-chip-side">
-                    <small className="project-host-pill" title={hostAddress || hostName}>
-                      {hostName}
-                    </small>
+                    {showHostPill(hostName) ? (
+                      <small className="project-host-pill" title={hostAddress || hostName}>
+                        {hostName}
+                      </small>
+                    ) : null}
                     <small>
                       {projectNode.sessions.length === 0
                         ? "empty"
@@ -395,7 +400,7 @@ export function SessionSidebar({
 
       <section className="inspect-block compact-session-meta">
         <div className="sidebar-meta-head">
-          <strong>Background</strong>
+          <strong>Activity</strong>
           <div className="sidebar-meta-actions">
             <button
               type="button"
@@ -415,7 +420,7 @@ export function SessionSidebar({
           </div>
         </div>
         <p className="pane-subtle-light sidebar-command-hint">
-          Ctrl/Cmd+Shift+N new thread · P pin focused thread
+          Ctrl/Cmd+Shift+N new thread · P pin thread
         </p>
         {sessionAlerts.length === 0 ? (
           <p className="pane-subtle-light">No recent completions.</p>

@@ -315,6 +315,16 @@ pre {
   background: rgba(244, 246, 250, 0.88);
 }
 
+.topbar-sidebar-btn {
+  color: #334155;
+}
+
+.topbar-sidebar-btn.active {
+  border-color: #cdd8ea;
+  background: #eef3fb;
+  color: #183252;
+}
+
 .topbar-quiet-btn {
   color: var(--text-soft);
 }
@@ -331,6 +341,14 @@ pre {
     minmax(280px, 316px)
     minmax(560px, 1fr)
     minmax(300px, 340px);
+}
+
+.session-stage.session-stage-sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.session-stage.session-stage-review-open.session-stage-sidebar-collapsed {
+  grid-template-columns: minmax(560px, 1fr) minmax(300px, 340px);
 }
 
 .ops-stage {
@@ -3195,6 +3213,20 @@ pre {
   padding: 2px 8px;
 }
 
+.composer-input-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.composer-inline-action {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.69rem;
+  color: #6b778d;
+}
+
 .project-session-list {
   padding-left: 8px;
   margin-left: 10px;
@@ -3202,6 +3234,10 @@ pre {
 
 @media (max-width: 960px) {
   .composer-context-strip {
+    width: 100%;
+  }
+
+  .composer-input-tools {
     width: 100%;
   }
 

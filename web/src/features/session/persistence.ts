@@ -84,10 +84,12 @@ export function persistCompletedRuns(set: Set<string>) {
 
 export function loadSessionTreePrefs(): SessionTreePrefs {
   if (typeof window === "undefined") {
-    return { projectFilter: "", collapsedHostIDs: [] };
+    return { projectFilter: "", collapsedHostIDs: [], sidebarCollapsed: false };
   }
   const raw = window.localStorage.getItem(SESSION_TREE_PREFS_KEY);
-  if (!raw) return { projectFilter: "", collapsedHostIDs: [] };
+  if (!raw) {
+    return { projectFilter: "", collapsedHostIDs: [], sidebarCollapsed: false };
+  }
   try {
     const parsed = JSON.parse(raw) as Partial<SessionTreePrefs>;
     const projectFilter =
@@ -97,9 +99,10 @@ export function loadSessionTreePrefs(): SessionTreePrefs {
           (item): item is string => typeof item === "string" && item.trim() !== "",
         )
       : [];
-    return { projectFilter, collapsedHostIDs };
+    const sidebarCollapsed = Boolean(parsed.sidebarCollapsed);
+    return { projectFilter, collapsedHostIDs, sidebarCollapsed };
   } catch {
-    return { projectFilter: "", collapsedHostIDs: [] };
+    return { projectFilter: "", collapsedHostIDs: [], sidebarCollapsed: false };
   }
 }
 

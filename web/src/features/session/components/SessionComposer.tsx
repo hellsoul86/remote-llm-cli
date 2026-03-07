@@ -228,24 +228,6 @@ export function SessionComposer({
               <option value="danger-full-access">danger-full-access</option>
             </select>
           </label>
-          <button
-            type="button"
-            className="ghost advanced-toggle-btn composer-pill"
-            data-testid="fork-session-btn"
-            onClick={onForkSession}
-            disabled={!activeThread || activeThreadBusy}
-          >
-            Fork
-          </button>
-          <button
-            type="button"
-            className="ghost advanced-toggle-btn composer-pill"
-            data-testid="advanced-toggle-btn"
-            onClick={onToggleSessionAdvanced}
-            disabled={!activeThread}
-          >
-            {sessionAdvancedOpen ? "Hide More" : "More"}
-          </button>
         </div>
         {!hasSessionModelChoices ? (
           <small className="pane-subtle-light">No models discovered on this server.</small>
@@ -487,25 +469,45 @@ export function SessionComposer({
 
       <div className="composer-input-shell">
         <div className="composer-input-topbar">
-          <label
-            className={`ghost composer-attach-btn file-chip ${
-              uploadingImage || !activeThread || activeThreadBusy ? "disabled" : ""
-            }`}
-          >
-            <input
-              type="file"
-              accept="image/*"
-              disabled={uploadingImage || !activeThread || activeThreadBusy}
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (!file) return;
-                if (!activeThread) return;
-                onUploadImage(file, activeThread.id);
-                event.currentTarget.value = "";
-              }}
-            />
-            {uploadingImage ? "Uploading..." : "Attach Image"}
-          </label>
+          <div className="composer-input-tools">
+            <label
+              className={`ghost composer-attach-btn file-chip ${
+                uploadingImage || !activeThread || activeThreadBusy ? "disabled" : ""
+              }`}
+            >
+              <input
+                type="file"
+                accept="image/*"
+                disabled={uploadingImage || !activeThread || activeThreadBusy}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (!file) return;
+                  if (!activeThread) return;
+                  onUploadImage(file, activeThread.id);
+                  event.currentTarget.value = "";
+                }}
+              />
+              {uploadingImage ? "Uploading..." : "Attach Image"}
+            </label>
+            <button
+              type="button"
+              className="ghost composer-inline-action"
+              data-testid="fork-session-btn"
+              onClick={onForkSession}
+              disabled={!activeThread || activeThreadBusy}
+            >
+              Fork
+            </button>
+            <button
+              type="button"
+              className="ghost composer-inline-action"
+              data-testid="advanced-toggle-btn"
+              onClick={onToggleSessionAdvanced}
+              disabled={!activeThread}
+            >
+              {sessionAdvancedOpen ? "Hide More" : "More"}
+            </button>
+          </div>
           <span className="shortcut-hint composer-shortcut-hint">
             / commands · @ context · paste image
           </span>

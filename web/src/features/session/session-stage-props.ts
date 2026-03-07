@@ -14,6 +14,7 @@ type SessionTimelineProps = ComponentProps<typeof SessionTimeline>;
 
 type BuildSessionStagePropsDeps = {
   sidebarProps: SessionStageProps["sidebarProps"];
+  sidebarCollapsed: boolean;
   composerProps: SessionStageProps["composerProps"];
   headerProjectTitle: string;
   headerProjectPath: string;
@@ -181,6 +182,7 @@ export function buildSessionStageProps(
 
   return {
     sidebarProps: deps.sidebarProps,
+    sidebarCollapsed: deps.sidebarCollapsed,
     headerProps,
     timelineProps,
     composerProps: deps.composerProps,

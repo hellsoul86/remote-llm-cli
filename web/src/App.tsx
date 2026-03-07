@@ -281,6 +281,9 @@ export function App() {
   const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
     sessionTreePrefs.collapsedHostIDs,
   );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    sessionTreePrefs.sidebarCollapsed,
+  );
   const [treeCursorSessionID, setTreeCursorSessionID] = useState("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -883,6 +886,7 @@ export function App() {
     commandPaletteOpen,
     onOpenCommandPalette: () => openCommandPalette(),
     onCloseCommandPalette: () => closeCommandPalette(),
+    onToggleSidebar: () => setSidebarCollapsed((prev) => !prev),
     onCreateThreadAndFocus: createThreadAndFocus,
     onSwitchThreadByOffset: switchThreadByOffset,
     terminalDrawerOpen,
@@ -1046,8 +1050,9 @@ export function App() {
     persistSessionTreePrefs({
       projectFilter,
       collapsedHostIDs,
+      sidebarCollapsed,
     });
-  }, [projectFilter, collapsedHostIDs]);
+  }, [projectFilter, collapsedHostIDs, sidebarCollapsed]);
 
   useEffect(() => {
     if (sessionTreeHosts.length === 0) return;
@@ -1690,6 +1695,7 @@ export function App() {
         : "Exec";
   const sessionStageProps = buildSessionStageProps({
     sidebarProps: sessionSidebarProps,
+    sidebarCollapsed,
     composerProps: sessionComposerProps,
     headerProjectTitle: activeWorkspace?.title?.trim() || "Untitled Project",
     headerProjectPath: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
@@ -1770,9 +1776,11 @@ export function App() {
     <div className="workspace-shell">
       <AppChrome
         appMode={appMode}
+        sidebarCollapsed={sidebarCollapsed}
         isRefreshing={isRefreshing}
         healthIsError={healthIsError}
         health={health}
+        onToggleSidebar={() => setSidebarCollapsed((prev) => !prev)}
         onRefreshWorkspace={onRefreshWorkspace}
         onOpenUtilities={() => switchMode("ops")}
         onReturnToSession={() => switchMode("session")}

@@ -1,8 +1,10 @@
 type AppChromeProps = {
   appMode: "session" | "ops";
+  sidebarCollapsed: boolean;
   isRefreshing: boolean;
   healthIsError: boolean;
   health: string;
+  onToggleSidebar: () => void;
   onRefreshWorkspace: () => Promise<void>;
   onOpenUtilities: () => void;
   onReturnToSession: () => void;
@@ -11,9 +13,11 @@ type AppChromeProps = {
 
 export function AppChrome({
   appMode,
+  sidebarCollapsed,
   isRefreshing,
   healthIsError,
   health,
+  onToggleSidebar,
   onRefreshWorkspace,
   onOpenUtilities,
   onReturnToSession,
@@ -63,13 +67,22 @@ export function AppChrome({
             </button>
           </>
         ) : (
-          <button
-            type="button"
-            className="ghost topbar-utility-btn"
-            onClick={onOpenUtilities}
-          >
-            Tools
-          </button>
+          <>
+            <button
+              type="button"
+              className={`ghost topbar-sidebar-btn${sidebarCollapsed ? " active" : ""}`}
+              onClick={onToggleSidebar}
+            >
+              Sidebar
+            </button>
+            <button
+              type="button"
+              className="ghost topbar-utility-btn"
+              onClick={onOpenUtilities}
+            >
+              Tools
+            </button>
+          </>
         )}
       </div>
     </header>
