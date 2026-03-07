@@ -19,6 +19,7 @@ type ReviewChange = {
   state: TimelineState;
   title: string;
   summary: string;
+  diff: string;
   timestamp: string;
 };
 
@@ -53,6 +54,46 @@ function pathTokens(path: string): string[] {
 function findingMatchesChange(finding: ReviewFinding, change: ReviewChange): boolean {
   const haystack = `${finding.title}\n${finding.body}`.toLowerCase();
   return pathTokens(change.path).some((token) => haystack.includes(token));
+}
+
+type DiffLine = {
+  kind: "header" | "hunk" | "add" | "remove" | "context";
+  text: string;
+};
+
+function parseDiffLines(diff: string): DiffLine[] {
+  return diff
+    .split("\n")
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line !== "")
+    .map((line) => {
+      if (line.startsWith("@@")) {
+        return { kind: "hunk", text: line };
+      }
+      if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+        return { kind: "header", text: line };
+      }
+      if (line.startsWith("+")) {
+        return { kind: "add", text: line };
+      }
+      if (line.startsWith("-")) {
+        return { kind: "remove", text: line };
+      }
+      return { kind: "context", text: line };
+    });
+}
+
+function diffStats(diff: string): { added: number; removed: number; hunks: number } {
+  const lines = parseDiffLines(diff);
+  let added = 0;
+  let removed = 0;
+  let hunks = 0;
+  for (const line of lines) {
+    if (line.kind === "hunk") hunks += 1;
+    if (line.kind === "add") added += 1;
+    if (line.kind === "remove") removed += 1;
+  }
+  return { added, removed, hunks };
 }
 
 export function SessionReviewPane({
@@ -149,6 +190,12 @@ export function SessionReviewPane({
   const selectedChangeReviewed =
     selectedChange !== null && reviewedChangeIDs.includes(selectedChange.id);
   const reviewedChangeCount = reviewedChangeIDs.length;
+  const selectedChangeDiffStats = selectedChange
+    ? diffStats(selectedChange.diff)
+    : { added: 0, removed: 0, hunks: 0 };
+  const selectedChangeDiffLines = selectedChange
+    ? parseDiffLines(selectedChange.diff)
+    : [];
 
   const dismissFinding = (findingID: string) => {
     setDismissedNoteIDs((current) =>
@@ -284,9 +331,48 @@ export function SessionReviewPane({
                 <div className="review-change-detail-meta">
                   <span>{selectedChange.title}</span>
                   <span>{selectedChangeFindings.length} linked notes</span>
+                  {selectedChange.diff.trim() ? (
+                    <>
+                      <span>+{selectedChangeDiffStats.added}</span>
+                      <span>-{selectedChangeDiffStats.removed}</span>
+                      <span>{selectedChangeDiffStats.hunks} hunks</span>
+                    </>
+                  ) : null}
                 </div>
                 <p className="review-change-summary-title">{selectedChange.title}</p>
                 <pre>{selectedChange.summary}</pre>
+                <div className="review-inline-thread">
+                  <div className="review-subsection-head">
+                    <strong>Patch</strong>
+                    <span>
+                      {selectedChange.diff.trim()
+                        ? `${selectedChangeDiffLines.length} lines`
+                        : "No diff"}
+                    </span>
+                  </div>
+                  {selectedChange.diff.trim() ? (
+                    <div
+                      className="review-diff-view"
+                      data-testid="review-change-diff"
+                    >
+                      {selectedChangeDiffLines.map((line, index) => (
+                        <code
+                          key={`${selectedChange.id}:diff:${index}`}
+                          className={`review-diff-line review-diff-${line.kind}`}
+                        >
+                          {line.text}
+                        </code>
+                      ))}
+                    </div>
+                  ) : (
+                    <p
+                      className="review-empty-copy"
+                      data-testid="review-change-diff-empty"
+                    >
+                      Codex did not expose a unified diff for this file change.
+                    </p>
+                  )}
+                </div>
                 <div className="review-inline-thread">
                   <div className="review-subsection-head">
                     <strong>Discussion</strong>

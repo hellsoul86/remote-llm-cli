@@ -263,8 +263,31 @@ async function mockSessionApi(
               type: "file_change",
               status: "completed",
               changes: [
-                { kind: "update", path: "src/app.ts" },
-                { kind: "create", path: "docs/review-plan.md" },
+                {
+                  kind: "update",
+                  path: "src/app.ts",
+                  diff: [
+                    "--- a/src/app.ts",
+                    "+++ b/src/app.ts",
+                    "@@ -1,4 +1,4 @@",
+                    " export function App() {",
+                    '-  return "legacy shell";',
+                    '+  return "native workbench";',
+                    " }",
+                  ].join("\n"),
+                },
+                {
+                  kind: "create",
+                  path: "docs/review-plan.md",
+                  diff: [
+                    "--- /dev/null",
+                    "+++ b/docs/review-plan.md",
+                    "@@ -0,0 +1,3 @@",
+                    "+# Review plan",
+                    "+- move shell chrome out of the conversation",
+                    "+- keep diffs in the review pane",
+                  ].join("\n"),
+                },
               ],
             },
           }),
@@ -2398,6 +2421,12 @@ test("review pane surfaces changed files away from the main chat flow", async ({
   );
   await expect(page.getByTestId("review-change-detail")).toContainText(
     "Patch Applied",
+  );
+  await expect(page.getByTestId("review-change-diff")).toContainText(
+    "+++ b/docs/review-plan.md",
+  );
+  await expect(page.getByTestId("review-change-diff")).toContainText(
+    "+# Review plan",
   );
 });
 

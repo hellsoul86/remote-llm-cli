@@ -83,6 +83,7 @@ import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
 import {
   createSessionRunEventHandlers,
 } from "./features/session/session-run-events";
+import { parseCodexFileChangesBody } from "./features/session/codex-parsing";
 import {
   createSessionStreamController,
   type SessionStreamRuntimeState,
@@ -474,29 +475,24 @@ export function App() {
       state: "running" | "success" | "error";
       title: string;
       summary: string;
+      diff: string;
       timestamp: string;
     }> = [];
     for (const entry of activeTimeline) {
       if (entry.kind !== "system") continue;
       const title = entry.title.trim();
       if (!/^Patch (Started|Applied|Failed)$/i.test(title)) continue;
-      const lines = entry.body
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line !== "" && !line.startsWith("...and "));
-      if (lines.length === 0) continue;
-      lines.forEach((line, index) => {
-        const [kindToken, ...pathParts] = line.split(/\s+/);
-        const rawPath = pathParts.join(" ").trim();
-        if (!rawPath) return;
-        const normalizedKind = kindToken.trim() || "update";
+      const changes = parseCodexFileChangesBody(entry.body);
+      if (changes.length === 0) continue;
+      changes.forEach((change, index) => {
         out.push({
           id: `${entry.id}:${index}`,
-          path: rawPath,
-          kind: normalizedKind,
+          path: change.path,
+          kind: change.kind,
           state: entry.state ?? "success",
           title,
-          summary: line,
+          summary: `${change.kind} ${change.path}`,
+          diff: change.diff,
           timestamp: formatClock(entry.createdAt),
         });
       });

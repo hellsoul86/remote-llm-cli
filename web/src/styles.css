@@ -763,6 +763,53 @@ pre {
   padding-top: 2px;
 }
 
+.review-diff-view {
+  display: grid;
+  gap: 1px;
+  border: 1px solid #e1e6ef;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #f7f9fc;
+}
+
+.review-diff-line {
+  display: block;
+  padding: 6px 10px;
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #ffffff;
+  color: #20324f;
+}
+
+.review-diff-header {
+  background: #f5f7fb;
+  color: #5d6d88;
+}
+
+.review-diff-hunk {
+  background: #eef3fb;
+  color: #355175;
+}
+
+.review-diff-add {
+  background: #eff8f0;
+  color: #245a3a;
+}
+
+.review-diff-remove {
+  background: #fff1f1;
+  color: #7d3430;
+}
+
+.review-diff-context {
+  background: #ffffff;
+  color: #32445f;
+}
+
 .review-subsection-head {
   display: flex;
   align-items: center;

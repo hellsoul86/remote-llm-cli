@@ -265,32 +265,104 @@ function codexEventIncludesApproval(text: string): boolean {
   return /(approval|declined|rejected by user|approval settings)/i.test(text);
 }
 
+export type ParsedCodexFileChange = {
+  kind: string;
+  path: string;
+  diff: string;
+};
+
+const CODEX_FILE_CHANGE_METADATA_PREFIX = "__codex_file_changes__:";
+
+function normalizeCodexFileChange(raw: unknown): ParsedCodexFileChange | null {
+  const change = asRecord(raw);
+  if (!change) return null;
+  const kind =
+    typeof change.kind === "string" && change.kind.trim() !== ""
+      ? change.kind.trim()
+      : "update";
+  const path =
+    typeof change.path === "string" && change.path.trim() !== ""
+      ? change.path.trim()
+      : "";
+  if (!path) return null;
+  const diff =
+    typeof change.diff === "string" && change.diff.trim() !== ""
+      ? change.diff.trim()
+      : "";
+  return { kind, path, diff };
+}
+
+function collectCodexFileChanges(raw: unknown): ParsedCodexFileChange[] {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  return raw
+    .map((value) => normalizeCodexFileChange(value))
+    .filter((value): value is ParsedCodexFileChange => value !== null);
+}
+
 function summarizeCodexFileChanges(raw: unknown): string {
-  if (!Array.isArray(raw) || raw.length === 0) {
+  const changes = collectCodexFileChanges(raw);
+  if (changes.length === 0) {
     return "No file changes were reported.";
   }
   const lines: string[] = [];
-  for (const value of raw) {
-    const change = asRecord(value);
-    if (!change) continue;
-    const kind =
-      typeof change.kind === "string" && change.kind.trim() !== ""
-        ? change.kind.trim()
-        : "update";
-    const path =
-      typeof change.path === "string" && change.path.trim() !== ""
-        ? change.path.trim()
-        : "(unknown path)";
-    lines.push(`${kind} ${path}`);
+  for (const change of changes) {
+    lines.push(`${change.kind} ${change.path}`);
     if (lines.length >= 5) break;
   }
   if (lines.length === 0) {
     return "No file changes were reported.";
   }
-  if (Array.isArray(raw) && raw.length > lines.length) {
-    lines.push(`...and ${raw.length - lines.length} more`);
+  if (changes.length > lines.length) {
+    lines.push(`...and ${changes.length - lines.length} more`);
   }
-  return lines.join("\n");
+  return [
+    lines.join("\n"),
+    `${CODEX_FILE_CHANGE_METADATA_PREFIX}${encodeURIComponent(
+      JSON.stringify(changes),
+    )}`,
+  ].join("\n");
+}
+
+export function parseCodexFileChangesBody(
+  body: string,
+): ParsedCodexFileChange[] {
+  const trimmed = body.trim();
+  if (!trimmed) return [];
+  const markerLine = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith(CODEX_FILE_CHANGE_METADATA_PREFIX));
+  if (markerLine) {
+    const encoded = markerLine.slice(CODEX_FILE_CHANGE_METADATA_PREFIX.length);
+    try {
+      const parsed = JSON.parse(decodeURIComponent(encoded)) as unknown;
+      const changes = collectCodexFileChanges(parsed);
+      if (changes.length > 0) {
+        return changes;
+      }
+    } catch {
+      // Fall back to legacy line parsing below.
+    }
+  }
+
+  return trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line !== "" &&
+        !line.startsWith("...and ") &&
+        !line.startsWith(CODEX_FILE_CHANGE_METADATA_PREFIX),
+    )
+    .map((line) => {
+      const [kindToken, ...pathParts] = line.split(/\s+/);
+      return {
+        kind: kindToken.trim() || "update",
+        path: pathParts.join(" ").trim(),
+        diff: "",
+      };
+    })
+    .filter((change) => change.path !== "");
 }
 
 export function buildCodexRuntimeCardFromEvent(
