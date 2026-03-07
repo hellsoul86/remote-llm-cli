@@ -457,6 +457,43 @@ export function App() {
         })),
     [activeTimeline],
   );
+  const reviewChanges = useMemo(() => {
+    const out: Array<{
+      id: string;
+      path: string;
+      kind: string;
+      state: "running" | "success" | "error";
+      title: string;
+      summary: string;
+      timestamp: string;
+    }> = [];
+    for (const entry of activeTimeline) {
+      if (entry.kind !== "system") continue;
+      const title = entry.title.trim();
+      if (!/^Patch (Started|Applied|Failed)$/i.test(title)) continue;
+      const lines = entry.body
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "" && !line.startsWith("...and "));
+      if (lines.length === 0) continue;
+      lines.forEach((line, index) => {
+        const [kindToken, ...pathParts] = line.split(/\s+/);
+        const rawPath = pathParts.join(" ").trim();
+        if (!rawPath) return;
+        const normalizedKind = kindToken.trim() || "update";
+        out.push({
+          id: `${entry.id}:${index}`,
+          path: rawPath,
+          kind: normalizedKind,
+          state: entry.state ?? "success",
+          title,
+          summary: line,
+          timestamp: formatClock(entry.createdAt),
+        });
+      });
+    }
+    return out.reverse();
+  }, [activeTimeline]);
   const terminalCommands = useMemo(() => {
     const cutoffMS = activeTerminalClearCutoff
       ? Date.parse(activeTerminalClearCutoff)
@@ -1515,6 +1552,7 @@ export function App() {
     reviewBase: activeThread?.reviewBase ?? "",
     reviewCommit: activeThread?.reviewCommit ?? "",
     reviewTitle: activeThread?.reviewTitle ?? "",
+    reviewChanges,
     reviewFindings,
     onSetReviewMode: onSetActiveThreadReviewMode,
     onSetReviewUncommitted: onSetActiveThreadReviewUncommitted,

@@ -596,6 +596,102 @@ pre {
   min-height: 0;
 }
 
+.review-change-shell {
+  display: grid;
+  grid-template-columns: minmax(148px, 180px) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+}
+
+.review-change-list {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.review-change-item {
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  border-radius: 12px;
+  padding: 8px 9px;
+}
+
+.review-change-item.active {
+  color: var(--text);
+  border-color: #bfd0f2;
+  background: #eef4ff;
+}
+
+.review-change-item strong {
+  font-size: 0.76rem;
+  line-height: 1.35;
+  color: inherit;
+  word-break: break-word;
+}
+
+.review-change-item small,
+.review-change-kind,
+.review-change-kindline,
+.review-change-summary-title {
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.review-change-running {
+  border-color: #d4dce8;
+}
+
+.review-change-success {
+  border-color: #c7ddd2;
+}
+
+.review-change-error {
+  border-color: #e6c8c5;
+}
+
+.review-change-detail {
+  min-height: 0;
+  border: 1px solid #e2e7f0;
+  border-radius: var(--radius-sm);
+  background: #fbfcfe;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.review-change-detail header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.review-change-detail h4 {
+  font-size: 0.88rem;
+  line-height: 1.35;
+  color: #20314d;
+}
+
+.review-change-detail time {
+  font-size: 0.66rem;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.review-change-summary-title {
+  color: #5b6e8b;
+}
+
+.review-change-detail pre {
+  font-size: 0.75rem;
+  line-height: 1.55;
+  font-family: var(--font-mono);
+}
+
 .review-empty-copy {
   font-size: 0.78rem;
   line-height: 1.55;
@@ -2429,9 +2525,14 @@ pre {
 
   .review-pane-head,
   .review-toggle-row,
+  .review-change-detail header,
   .review-finding-card header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .review-change-shell {
+    grid-template-columns: 1fr;
   }
 
   .review-close-btn {

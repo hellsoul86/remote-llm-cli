@@ -24,6 +24,7 @@ type MockOptions = {
   jobEventFirstPollDelayMS?: number;
   streamFailAttempts?: number;
   runtimeCommandEvents?: boolean;
+  runtimeFileChangeEvents?: boolean;
   assistantDeltaEvents?: number;
   ignoreStreamAfterCursor?: boolean;
 };
@@ -70,6 +71,7 @@ async function mockSessionApi(
   );
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
+  const runtimeFileChangeEvents = options?.runtimeFileChangeEvents ?? false;
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
   const ignoreStreamAfterCursor = options?.ignoreStreamAfterCursor ?? false;
 
@@ -248,6 +250,22 @@ async function mockSessionApi(
               aggregated_output: "README.md",
               exit_code: 0,
               status: "completed",
+            },
+          }),
+        );
+      }
+      if (runtimeFileChangeEvents) {
+        chunkLines.push(
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "item_patch_1",
+              type: "file_change",
+              status: "completed",
+              changes: [
+                { kind: "update", path: "src/app.ts" },
+                { kind: "create", path: "docs/review-plan.md" },
+              ],
             },
           }),
         );
@@ -2343,6 +2361,43 @@ test("review pane stays secondary but drives review payloads", async ({
   );
 
   await expect(page.getByTestId("review-findings")).toContainText(marker);
+});
+
+test("review pane surfaces changed files away from the main chat flow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_CHANGES_${Date.now()}`;
+  const harness = await mockSessionApi(page, `review changes ${marker}`, marker, {
+    runtimeFileChangeEvents: true,
+  });
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await expect(page.getByTestId("review-pane")).toBeVisible();
+  await page.getByTestId("review-mode-review").click();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`review changed files ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const changeList = page.getByTestId("review-change-list");
+  await expect(changeList).toContainText("src/app.ts");
+  await expect(changeList).toContainText("docs/review-plan.md");
+
+  const docsChange = page.getByTestId("review-change-item").filter({
+    hasText: "docs/review-plan.md",
+  });
+  await docsChange.click();
+  await expect(page.getByTestId("review-change-detail")).toContainText(
+    "docs/review-plan.md",
+  );
+  await expect(page.getByTestId("review-change-detail")).toContainText(
+    "Patch Applied",
+  );
 });
 
 test("fork session creates a branch session in project list", async ({ page }) => {

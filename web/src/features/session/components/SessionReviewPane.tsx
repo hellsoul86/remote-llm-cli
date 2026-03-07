@@ -1,4 +1,6 @@
-import type { CodexSessionMode } from "../../../domains/session";
+import { useEffect, useState } from "react";
+
+import type { CodexSessionMode, TimelineState } from "../../../domains/session";
 
 type ReviewFinding = {
   id: string;
@@ -8,6 +10,16 @@ type ReviewFinding = {
   tone: "assistant" | "system";
 };
 
+type ReviewChange = {
+  id: string;
+  path: string;
+  kind: string;
+  state: TimelineState;
+  title: string;
+  summary: string;
+  timestamp: string;
+};
+
 type SessionReviewPaneProps = {
   mode: CodexSessionMode;
   busy: boolean;
@@ -15,6 +27,7 @@ type SessionReviewPaneProps = {
   reviewBase: string;
   reviewCommit: string;
   reviewTitle: string;
+  changes: ReviewChange[];
   findings: ReviewFinding[];
   onClose: () => void;
   onSetMode: (mode: CodexSessionMode) => void;
@@ -31,6 +44,7 @@ export function SessionReviewPane({
   reviewBase,
   reviewCommit,
   reviewTitle,
+  changes,
   findings,
   onClose,
   onSetMode,
@@ -40,6 +54,20 @@ export function SessionReviewPane({
   onSetReviewTitle,
 }: SessionReviewPaneProps) {
   const reviewActive = mode === "review";
+  const [selectedChangeID, setSelectedChangeID] = useState("");
+
+  useEffect(() => {
+    if (changes.length === 0) {
+      setSelectedChangeID("");
+      return;
+    }
+    if (!changes.some((change) => change.id === selectedChangeID)) {
+      setSelectedChangeID(changes[0]?.id ?? "");
+    }
+  }, [changes, selectedChangeID]);
+
+  const selectedChange =
+    changes.find((change) => change.id === selectedChangeID) ?? changes[0] ?? null;
 
   return (
     <aside className="review-pane" data-testid="review-pane">
@@ -129,6 +157,60 @@ export function SessionReviewPane({
             onChange={(event) => onSetReviewTitle(event.target.value)}
           />
         </label>
+      </section>
+
+      <section className="review-pane-block review-changes-block">
+        <div className="review-pane-copy">
+          <strong>Changed files</strong>
+          <p>
+            Review-relevant file changes stay here instead of interrupting the
+            conversation timeline.
+          </p>
+        </div>
+        {changes.length === 0 ? (
+          <p className="review-empty-copy" data-testid="review-change-empty">
+            File changes from Codex will appear here when review or patch events
+            are reported.
+          </p>
+        ) : (
+          <div className="review-change-shell">
+            <div className="review-change-list" data-testid="review-change-list">
+              {changes.map((change) => {
+                const active = selectedChange?.id === change.id;
+                return (
+                  <button
+                    key={change.id}
+                    type="button"
+                    className={`ghost review-change-item${
+                      active ? " active" : ""
+                    } review-change-${change.state}`}
+                    data-testid="review-change-item"
+                    onClick={() => setSelectedChangeID(change.id)}
+                  >
+                    <span className="review-change-kind">{change.kind}</span>
+                    <strong>{change.path}</strong>
+                    <small>{change.title}</small>
+                  </button>
+                );
+              })}
+            </div>
+            {selectedChange ? (
+              <article className="review-change-detail" data-testid="review-change-detail">
+                <header>
+                  <div>
+                    <p className="review-change-kindline">
+                      {selectedChange.kind} file
+                    </p>
+                    <h4>{selectedChange.path}</h4>
+                  </div>
+                  <time>{selectedChange.timestamp}</time>
+                </header>
+                <p className="review-change-summary-title">{selectedChange.title}</p>
+                <pre>{selectedChange.summary}</pre>
+              </article>
+            ) : null}
+          </div>
+        )}
       </section>
 
       <section className="review-pane-block review-findings-block">
