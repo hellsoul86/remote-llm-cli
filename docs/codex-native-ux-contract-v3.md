@@ -1,7 +1,7 @@
 # Codex Native UX Contract v3
 
 Scope date: 2026-03-07 (Asia/Shanghai)
-Primary issue: #200
+Primary issue: #201
 Supersedes:
 
 - `docs/codex-native-ux-contract-v1.md`

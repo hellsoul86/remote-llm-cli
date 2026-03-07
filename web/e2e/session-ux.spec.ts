@@ -2286,6 +2286,65 @@ test("composer submits codex exec payload", async ({ page }) => {
   }).toBe(`text:exec payload ${marker}|/srv/work|exec`);
 });
 
+test("review pane stays secondary but drives review payloads", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_MODE_${Date.now()}`;
+  const harness = await mockSessionApi(page, `review result ${marker}`, marker);
+  await unlock(page);
+
+  await expect(page.getByTestId("review-pane")).toHaveCount(0);
+  await page.getByTestId("review-pane-toggle").click();
+  await expect(page.getByTestId("review-pane")).toBeVisible();
+
+  await page.keyboard.press("Control+Alt+b");
+  await expect(page.getByTestId("review-pane")).toHaveCount(0);
+  await page.keyboard.press("Control+Alt+b");
+  await expect(page.getByTestId("review-pane")).toBeVisible();
+
+  await page.getByTestId("review-mode-review").click();
+  await page.getByTestId("review-uncommitted-toggle").check();
+  await page.getByTestId("review-base-input").fill("staging");
+  await page.getByTestId("review-commit-input").fill("HEAD~2");
+  await page.getByTestId("review-title-input").fill("Native parity review");
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`review payload ${marker}`);
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect.poll(() => {
+    const req = harness.lastRunRequest() as {
+      mode?: string;
+      review_uncommitted?: boolean;
+      review_base?: string;
+      review_commit?: string;
+      review_title?: string;
+    } | null;
+    return JSON.stringify({
+      mode: req?.mode ?? "",
+      review_uncommitted: Boolean(req?.review_uncommitted),
+      review_base: req?.review_base ?? "",
+      review_commit: req?.review_commit ?? "",
+      review_title: req?.review_title ?? "",
+    });
+  }).toBe(
+    JSON.stringify({
+      mode: "review",
+      review_uncommitted: true,
+      review_base: "staging",
+      review_commit: "HEAD~2",
+      review_title: "Native parity review",
+    }),
+  );
+
+  await expect(page.getByTestId("review-findings")).toContainText(marker);
+});
+
 test("fork session creates a branch session in project list", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `FORK_${Date.now()}`;

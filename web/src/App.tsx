@@ -197,6 +197,11 @@ export function App() {
     removeThread,
     switchThreadByOffset,
     setThreadModel,
+    setThreadCodexMode,
+    setThreadReviewUncommitted,
+    setThreadReviewBase,
+    setThreadReviewCommit,
+    setThreadReviewTitle,
     setThreadSandbox,
     setThreadApprovalPolicy,
     setThreadWebSearch,
@@ -269,6 +274,7 @@ export function App() {
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
   const [sessionAdvancedOpen, setSessionAdvancedOpen] = useState(false);
+  const [reviewPaneOpen, setReviewPaneOpen] = useState(false);
   const [addDirDraft, setAddDirDraft] = useState("");
   const [configFlagDraft, setConfigFlagDraft] = useState("");
   const [enableFlagDraft, setEnableFlagDraft] = useState("");
@@ -414,12 +420,37 @@ export function App() {
     token.trim() !== "" &&
     activeThreadID.trim() !== "" &&
     activeStreamState !== "live";
+  const reviewMode = activeThread?.codexMode ?? "exec";
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
     if (sessionModelDefault.trim()) return sessionModelDefault.trim();
     return sessionModelOptions[0]?.trim() ?? "";
   }, [activeThread?.model, sessionModelDefault, sessionModelOptions]);
+  const reviewFindings = useMemo(
+    () =>
+      activeTimeline
+        .filter(
+          (entry) =>
+            (entry.kind === "assistant" || entry.kind === "system") &&
+            entry.body.trim() !== "",
+        )
+        .slice(-6)
+        .reverse()
+        .map((entry) => ({
+          id: entry.id,
+          title:
+            entry.title.trim() ||
+            (entry.kind === "assistant" ? "Assistant" : "System"),
+          body: entry.body.trim(),
+          timestamp: formatClock(entry.createdAt),
+          tone:
+            entry.kind === "system"
+              ? ("system" as const)
+              : ("assistant" as const),
+        })),
+    [activeTimeline],
+  );
   const sessionModelChoices = useMemo(() => {
     const seen = new Set<string>();
     const out: string[] = [];
@@ -592,6 +623,49 @@ export function App() {
     minHeight: COMPOSER_MIN_HEIGHT,
     maxHeight: COMPOSER_MAX_HEIGHT,
   });
+  useEffect(() => {
+    if (!activeThread) {
+      setReviewPaneOpen(false);
+      return;
+    }
+    if (activeThread.codexMode === "review") {
+      setReviewPaneOpen(true);
+    }
+  }, [activeThreadID, activeThread?.codexMode]);
+
+  function onToggleReviewPane() {
+    if (!activeThread) return;
+    setReviewPaneOpen((prev) => !prev);
+  }
+
+  function onSetActiveThreadReviewMode(mode: "exec" | "resume" | "review") {
+    if (!activeThread) return;
+    setThreadCodexMode(activeThread.id, mode);
+    if (mode === "review") {
+      setReviewPaneOpen(true);
+    }
+  }
+
+  function onSetActiveThreadReviewUncommitted(next: boolean) {
+    if (!activeThread) return;
+    setThreadReviewUncommitted(activeThread.id, next);
+  }
+
+  function onSetActiveThreadReviewBase(value: string) {
+    if (!activeThread) return;
+    setThreadReviewBase(activeThread.id, value);
+  }
+
+  function onSetActiveThreadReviewCommit(value: string) {
+    if (!activeThread) return;
+    setThreadReviewCommit(activeThread.id, value);
+  }
+
+  function onSetActiveThreadReviewTitle(value: string) {
+    if (!activeThread) return;
+    setThreadReviewTitle(activeThread.id, value);
+  }
+
   useGlobalShortcuts({
     authReady: authPhase === "ready",
     appMode,
@@ -600,6 +674,7 @@ export function App() {
     onCloseCommandPalette: () => closeCommandPalette(),
     onCreateThreadAndFocus: createThreadAndFocus,
     onSwitchThreadByOffset: switchThreadByOffset,
+    onToggleReviewPane,
   });
 
   const activeProgress = useMemo(() => {
@@ -1362,6 +1437,21 @@ export function App() {
     streamTone: activeStreamTone,
     streamCopy: activeStreamCopy,
     streamLastError: activeStreamLastError,
+    reviewPaneOpen,
+    canToggleReview: activeThread !== null,
+    onToggleReviewPane,
+    reviewMode,
+    reviewBusy: activeThreadBusy,
+    reviewUncommitted: activeThread?.reviewUncommitted ?? false,
+    reviewBase: activeThread?.reviewBase ?? "",
+    reviewCommit: activeThread?.reviewCommit ?? "",
+    reviewTitle: activeThread?.reviewTitle ?? "",
+    reviewFindings,
+    onSetReviewMode: onSetActiveThreadReviewMode,
+    onSetReviewUncommitted: onSetActiveThreadReviewUncommitted,
+    onSetReviewBase: onSetActiveThreadReviewBase,
+    onSetReviewCommit: onSetActiveThreadReviewCommit,
+    onSetReviewTitle: onSetActiveThreadReviewTitle,
     canArchive: Boolean(activeThread) && !activeThreadBusy,
     archiving: Boolean(activeThread && deletingThreadID === activeThread.id),
     onArchive: onArchiveActiveSession,

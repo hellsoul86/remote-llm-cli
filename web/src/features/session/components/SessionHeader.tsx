@@ -4,6 +4,9 @@ type SessionHeaderProps = {
   streamTone: string;
   streamCopy: string;
   streamLastError: string;
+  reviewOpen: boolean;
+  canToggleReview: boolean;
+  onToggleReviewPane: () => void;
   canArchive: boolean;
   archiving: boolean;
   onArchive: () => void;
@@ -17,6 +20,9 @@ export function SessionHeader({
   streamTone,
   streamCopy,
   streamLastError,
+  reviewOpen,
+  canToggleReview,
+  onToggleReviewPane,
   canArchive,
   archiving,
   onArchive,
@@ -53,6 +59,17 @@ export function SessionHeader({
           </span>
         </div>
         <div className="chat-head-actions">
+          <button
+            type="button"
+            className={`ghost stream-reconnect-btn review-pane-toggle${
+              reviewOpen ? " active" : ""
+            }`}
+            data-testid="review-pane-toggle"
+            disabled={!canToggleReview}
+            onClick={onToggleReviewPane}
+          >
+            Review
+          </button>
           <button
             type="button"
             className="ghost danger-ghost stream-reconnect-btn"

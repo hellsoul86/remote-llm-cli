@@ -8,6 +8,7 @@ type UseGlobalShortcutsOptions = {
   onCloseCommandPalette: () => void;
   onCreateThreadAndFocus: () => void;
   onSwitchThreadByOffset: (offset: number) => void;
+  onToggleReviewPane: () => void;
 };
 
 export function useGlobalShortcuts({
@@ -18,6 +19,7 @@ export function useGlobalShortcuts({
   onCloseCommandPalette,
   onCreateThreadAndFocus,
   onSwitchThreadByOffset,
+  onToggleReviewPane,
 }: UseGlobalShortcutsOptions) {
   useEffect(() => {
     if (!authReady) return;
@@ -42,6 +44,16 @@ export function useGlobalShortcuts({
       }
 
       if (appMode !== "session") return;
+
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.altKey &&
+        event.key.toLowerCase() === "b"
+      ) {
+        event.preventDefault();
+        onToggleReviewPane();
+        return;
+      }
 
       if (
         (event.metaKey || event.ctrlKey) &&
@@ -85,5 +97,6 @@ export function useGlobalShortcuts({
     onCreateThreadAndFocus,
     onOpenCommandPalette,
     onSwitchThreadByOffset,
+    onToggleReviewPane,
   ]);
 }
