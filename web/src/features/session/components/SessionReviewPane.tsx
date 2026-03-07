@@ -34,6 +34,17 @@ type SessionReviewPaneProps = {
   patchDelta: string;
   changes: ReviewChange[];
   findings: ReviewFinding[];
+  gitStatusKnown: boolean;
+  gitStatusLoading: boolean;
+  gitStatusMessage: string;
+  gitStatusTone: "idle" | "success" | "error";
+  changedPaths: string[];
+  stagedPaths: string[];
+  gitBusyAction: "" | "stage" | "revert" | "commit";
+  onRefreshGitStatus: () => void;
+  onStageChange: (path: string) => Promise<void>;
+  onRevertChange: (path: string) => Promise<void>;
+  onCommitChanges: (message: string) => Promise<void>;
   canStartReview: boolean;
   onStartReview: () => void;
   onClose: () => void;
@@ -116,6 +127,17 @@ export function SessionReviewPane({
   patchDelta,
   changes,
   findings,
+  gitStatusKnown,
+  gitStatusLoading,
+  gitStatusMessage,
+  gitStatusTone,
+  changedPaths,
+  stagedPaths,
+  gitBusyAction,
+  onRefreshGitStatus,
+  onStageChange,
+  onRevertChange,
+  onCommitChanges,
   canStartReview,
   onStartReview,
   onClose,
@@ -129,6 +151,7 @@ export function SessionReviewPane({
   const [selectedChangeID, setSelectedChangeID] = useState("");
   const [dismissedNoteIDs, setDismissedNoteIDs] = useState<string[]>([]);
   const [reviewedChangeIDs, setReviewedChangeIDs] = useState<string[]>([]);
+  const [commitMessage, setCommitMessage] = useState("");
 
   useEffect(() => {
     if (changes.length === 0) {
@@ -204,6 +227,8 @@ export function SessionReviewPane({
   );
   const selectedChangeReviewed =
     selectedChange !== null && reviewedChangeIDs.includes(selectedChange.id);
+  const selectedChangeStaged =
+    selectedChange !== null && stagedPaths.includes(selectedChange.path.trim());
   const reviewedChangeCount = reviewedChangeIDs.length;
   const selectedChangeDiffStats = selectedChange
     ? diffStats(selectedChange.diff)
@@ -216,6 +241,29 @@ export function SessionReviewPane({
     setDismissedNoteIDs((current) =>
       current.includes(findingID) ? current : [...current, findingID],
     );
+  };
+
+  const gitStatusSummary = gitStatusLoading
+    ? "Syncing repo state…"
+    : gitStatusKnown
+      ? `${changedPaths.length} repo changes · ${stagedPaths.length} staged`
+      : "Repo state unavailable";
+
+  const runStageSelectedChange = async () => {
+    if (!selectedChange) return;
+    await onStageChange(selectedChange.path);
+  };
+
+  const runRevertSelectedChange = async () => {
+    if (!selectedChange) return;
+    await onRevertChange(selectedChange.path);
+  };
+
+  const runCommitChanges = async () => {
+    const nextMessage = commitMessage.trim();
+    if (!nextMessage) return;
+    await onCommitChanges(nextMessage);
+    setCommitMessage("");
   };
 
   const toggleSelectedChangeReviewed = () => {
@@ -249,6 +297,31 @@ export function SessionReviewPane({
         <span>{visibleNotes.length} notes</span>
         <span>{reviewedChangeCount} reviewed</span>
       </div>
+      <div
+        className={`review-git-status review-git-status-${gitStatusTone}`}
+        data-testid="review-git-status"
+      >
+        <span>{gitStatusSummary}</span>
+        <div className="review-git-status-actions">
+          <button
+            type="button"
+            className="ghost review-inline-action"
+            data-testid="review-git-refresh"
+            disabled={gitStatusLoading || gitBusyAction !== ""}
+            onClick={onRefreshGitStatus}
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+      {gitStatusMessage.trim() ? (
+        <p
+          className={`review-git-note review-git-note-${gitStatusTone}`}
+          data-testid="review-git-note"
+        >
+          {gitStatusMessage}
+        </p>
+      ) : null}
 
       <div className="review-mode-switch" data-testid="review-mode-switch">
         <button
@@ -360,6 +433,11 @@ export function SessionReviewPane({
                           Reviewed
                         </span>
                       ) : null}
+                      {stagedPaths.includes(change.path.trim()) ? (
+                        <span className="review-change-badge review-change-staged">
+                          Staged
+                        </span>
+                      ) : null}
                       {(findingsByChangeID.get(change.id)?.length ?? 0) > 0 ? (
                         <span className="review-change-badge">
                           {findingsByChangeID.get(change.id)?.length} notes
@@ -395,6 +473,44 @@ export function SessionReviewPane({
                       onClick={toggleSelectedChangeReviewed}
                     >
                       {selectedChangeReviewed ? "Reviewed" : "Mark reviewed"}
+                    </button>
+                    <button
+                      type="button"
+                      className={`ghost review-inline-action${
+                        selectedChangeStaged ? " active" : ""
+                      }`}
+                      data-testid="review-change-stage"
+                      disabled={
+                        busy ||
+                        gitBusyAction !== "" ||
+                        gitStatusLoading ||
+                        !selectedChange
+                      }
+                      onClick={() => {
+                        void runStageSelectedChange();
+                      }}
+                    >
+                      {gitBusyAction === "stage"
+                        ? "Staging…"
+                        : selectedChangeStaged
+                          ? "Staged"
+                          : "Stage"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost review-inline-action"
+                      data-testid="review-change-revert"
+                      disabled={
+                        busy ||
+                        gitBusyAction !== "" ||
+                        gitStatusLoading ||
+                        !selectedChange
+                      }
+                      onClick={() => {
+                        void runRevertSelectedChange();
+                      }}
+                    >
+                      {gitBusyAction === "revert" ? "Reverting…" : "Revert"}
                     </button>
                   </div>
                 </header>
@@ -492,6 +608,43 @@ export function SessionReviewPane({
             ) : null}
           </div>
         )}
+      </section>
+
+      <section className="review-pane-block review-commit-block">
+        <div className="review-pane-copy">
+          <strong>Commit staged changes</strong>
+          <p>
+            Keep the review flow inside the workbench once files are staged.
+          </p>
+        </div>
+        <label className="review-field">
+          <span>Commit message</span>
+          <input
+            data-testid="review-commit-message"
+            placeholder="Refine review changes"
+            value={commitMessage}
+            disabled={busy || gitBusyAction !== ""}
+            onChange={(event) => setCommitMessage(event.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          className="review-start-btn review-commit-btn"
+          data-testid="review-commit-btn"
+          disabled={
+            busy ||
+            gitBusyAction !== "" ||
+            stagedPaths.length === 0 ||
+            commitMessage.trim() === ""
+          }
+          onClick={() => {
+            void runCommitChanges();
+          }}
+        >
+          {gitBusyAction === "commit"
+            ? "Committing…"
+            : `Commit ${stagedPaths.length} staged`}
+        </button>
       </section>
 
       <section className="review-pane-block review-findings-block">

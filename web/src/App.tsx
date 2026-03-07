@@ -28,6 +28,7 @@ import { useSessionStreamHealth } from "./features/session/use-session-stream-he
 import { useTimelineEntryBody } from "./features/session/use-timeline-entry-body";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import { useCodexPendingRequests } from "./features/session/use-codex-pending-requests";
+import { useProjectReviewGit } from "./features/session/use-project-review-git";
 import { useProjectTerminalSession } from "./features/session/use-project-terminal-session";
 import { createProjectSourceActions } from "./features/session/project-source-actions";
 import { createHostActions } from "./features/session/host-actions";
@@ -355,6 +356,14 @@ export function App() {
     token,
     projectID: activeWorkspaceID,
   });
+  const projectReviewGit = useProjectReviewGit({
+    enabled:
+      authPhase === "ready" &&
+      reviewPaneOpen &&
+      activeWorkspaceID.trim() !== "",
+    token,
+    projectID: activeWorkspaceID,
+  });
   const sessionTreeHosts = useMemo<SessionTreeHost[]>(
     () => buildSessionTreeHosts(hosts, workspaces, activeWorkspaceID),
     [hosts, workspaces, activeWorkspaceID],
@@ -519,6 +528,17 @@ export function App() {
     }
     return out.reverse();
   }, [activeTimeline]);
+  const visibleReviewChanges = useMemo(() => {
+    if (!projectReviewGit.known) {
+      return reviewChanges;
+    }
+    const changedPathSet = new Set(
+      projectReviewGit.changedPaths.map((path) => path.trim()).filter(Boolean),
+    );
+    return reviewChanges.filter((change) =>
+      changedPathSet.has(change.path.trim()),
+    );
+  }, [projectReviewGit.changedPaths, projectReviewGit.known, reviewChanges]);
   const terminalCommands = useMemo(() => {
     const cutoffMS = activeTerminalClearCutoff
       ? Date.parse(activeTerminalClearCutoff)
@@ -1688,8 +1708,19 @@ export function App() {
     reviewTitle: activeThread?.reviewTitle ?? "",
     reviewTurnDiff,
     reviewPatchDelta,
-    reviewChanges,
+    reviewChanges: visibleReviewChanges,
     reviewFindings,
+    reviewGitStatusKnown: projectReviewGit.known,
+    reviewGitStatusLoading: projectReviewGit.loading,
+    reviewGitStatusMessage: projectReviewGit.message,
+    reviewGitStatusTone: projectReviewGit.tone,
+    reviewChangedPaths: projectReviewGit.changedPaths,
+    reviewStagedPaths: projectReviewGit.stagedPaths,
+    reviewGitBusyAction: projectReviewGit.busyAction,
+    onRefreshReviewGitStatus: projectReviewGit.refresh,
+    onStageReviewChange: projectReviewGit.stagePath,
+    onRevertReviewChange: projectReviewGit.revertPath,
+    onCommitReviewChanges: projectReviewGit.commitChanges,
     canStartReview:
       Boolean(activeThread) &&
       !activeThreadBusy &&

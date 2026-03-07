@@ -512,6 +512,52 @@ pre {
   font-family: var(--font-mono);
 }
 
+.review-git-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #e0e6f0;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 9px 10px;
+  font-size: 0.72rem;
+  color: #5b6c87;
+  font-family: var(--font-mono);
+}
+
+.review-git-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.review-git-status-success {
+  border-color: #d4e4d8;
+  background: #f7fcf8;
+  color: #2d6540;
+}
+
+.review-git-status-error {
+  border-color: #ead2d0;
+  background: #fff7f6;
+  color: #8c3f39;
+}
+
+.review-git-note {
+  font-size: 0.72rem;
+  line-height: 1.55;
+  color: var(--text-soft);
+}
+
+.review-git-note-success {
+  color: #2d6540;
+}
+
+.review-git-note-error {
+  color: #8c3f39;
+}
+
 .review-pane-eyebrow {
   font-size: 0.67rem;
   letter-spacing: 0.12em;
@@ -712,6 +758,12 @@ pre {
   color: #2d6540;
 }
 
+.review-change-staged {
+  border-color: #d0d9ea;
+  background: #f2f6fd;
+  color: #36547a;
+}
+
 .review-change-success {
   border-color: #c7ddd2;
 }
@@ -860,6 +912,14 @@ pre {
   font-size: 0.78rem;
   line-height: 1.55;
   color: var(--text-soft);
+}
+
+.review-commit-block {
+  align-content: start;
+}
+
+.review-commit-btn {
+  margin-top: 2px;
 }
 
 .review-finding-list {

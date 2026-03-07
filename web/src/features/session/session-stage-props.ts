@@ -47,6 +47,17 @@ type BuildSessionStagePropsDeps = {
   reviewPatchDelta: SessionReviewPaneProps["patchDelta"];
   reviewChanges: SessionReviewPaneProps["changes"];
   reviewFindings: SessionReviewPaneProps["findings"];
+  reviewGitStatusKnown: SessionReviewPaneProps["gitStatusKnown"];
+  reviewGitStatusLoading: SessionReviewPaneProps["gitStatusLoading"];
+  reviewGitStatusMessage: SessionReviewPaneProps["gitStatusMessage"];
+  reviewGitStatusTone: SessionReviewPaneProps["gitStatusTone"];
+  reviewChangedPaths: SessionReviewPaneProps["changedPaths"];
+  reviewStagedPaths: SessionReviewPaneProps["stagedPaths"];
+  reviewGitBusyAction: SessionReviewPaneProps["gitBusyAction"];
+  onRefreshReviewGitStatus: SessionReviewPaneProps["onRefreshGitStatus"];
+  onStageReviewChange: SessionReviewPaneProps["onStageChange"];
+  onRevertReviewChange: SessionReviewPaneProps["onRevertChange"];
+  onCommitReviewChanges: SessionReviewPaneProps["onCommitChanges"];
   canStartReview: SessionReviewPaneProps["canStartReview"];
   onStartReview: SessionReviewPaneProps["onStartReview"];
   onSetReviewMode: SessionReviewPaneProps["onSetMode"];
@@ -136,6 +147,17 @@ export function buildSessionStageProps(
         patchDelta: deps.reviewPatchDelta,
         changes: deps.reviewChanges,
         findings: deps.reviewFindings,
+        gitStatusKnown: deps.reviewGitStatusKnown,
+        gitStatusLoading: deps.reviewGitStatusLoading,
+        gitStatusMessage: deps.reviewGitStatusMessage,
+        gitStatusTone: deps.reviewGitStatusTone,
+        changedPaths: deps.reviewChangedPaths,
+        stagedPaths: deps.reviewStagedPaths,
+        gitBusyAction: deps.reviewGitBusyAction,
+        onRefreshGitStatus: deps.onRefreshReviewGitStatus,
+        onStageChange: deps.onStageReviewChange,
+        onRevertChange: deps.onRevertReviewChange,
+        onCommitChanges: deps.onCommitReviewChanges,
         canStartReview: deps.canStartReview,
         onStartReview: deps.onStartReview,
         onClose: deps.onToggleReviewPane,

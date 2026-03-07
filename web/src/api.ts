@@ -344,6 +344,34 @@ export type ProjectRecord = {
   updated_at: string;
 };
 
+export type ProjectGitFileStatus = {
+  path: string;
+  code: string;
+  staged: boolean;
+  changed: boolean;
+};
+
+export type ProjectGitStatusResponse = {
+  project_id: string;
+  host_id: string;
+  files: ProjectGitFileStatus[];
+  changed_paths: string[];
+  staged_paths: string[];
+};
+
+export type ProjectGitActionRequest = {
+  paths?: string[];
+  message?: string;
+};
+
+export type ProjectGitActionResponse = {
+  action: "stage" | "revert" | "commit";
+  paths?: string[];
+  message?: string;
+  result: RunTargetResult["result"];
+  status: ProjectGitStatusResponse;
+};
+
 export type SessionRecord = {
   id: string;
   project_id: string;
@@ -1036,6 +1064,72 @@ export async function deleteProject(
     session_count:
       typeof body?.session_count === "number" ? body.session_count : undefined,
   };
+}
+
+export async function getProjectGitStatus(
+  token: string,
+  projectID: string,
+): Promise<ProjectGitStatusResponse> {
+  const res = await fetch(
+    `${API_BASE}/v2/projects/${encodeURIComponent(projectID)}/git/status`,
+    {
+      headers: headers(token),
+    },
+  );
+  const body = await res.json();
+  if (!res.ok || !body?.project_id) {
+    throw new Error(
+      `get project git status failed: ${res.status} ${JSON.stringify(body)}`,
+    );
+  }
+  return body as ProjectGitStatusResponse;
+}
+
+async function postProjectGitAction(
+  token: string,
+  projectID: string,
+  action: "stage" | "revert" | "commit",
+  payload: ProjectGitActionRequest,
+): Promise<ProjectGitActionResponse> {
+  const res = await fetch(
+    `${API_BASE}/v2/projects/${encodeURIComponent(projectID)}/git/${action}`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(payload),
+    },
+  );
+  const body = await res.json();
+  if (!res.ok || !body?.status?.project_id) {
+    throw new Error(
+      `project git ${action} failed: ${res.status} ${JSON.stringify(body)}`,
+    );
+  }
+  return body as ProjectGitActionResponse;
+}
+
+export function stageProjectGitPaths(
+  token: string,
+  projectID: string,
+  paths: string[],
+): Promise<ProjectGitActionResponse> {
+  return postProjectGitAction(token, projectID, "stage", { paths });
+}
+
+export function revertProjectGitPaths(
+  token: string,
+  projectID: string,
+  paths: string[],
+): Promise<ProjectGitActionResponse> {
+  return postProjectGitAction(token, projectID, "revert", { paths });
+}
+
+export function commitProjectGitChanges(
+  token: string,
+  projectID: string,
+  message: string,
+): Promise<ProjectGitActionResponse> {
+  return postProjectGitAction(token, projectID, "commit", { message });
 }
 
 export async function listSessions(

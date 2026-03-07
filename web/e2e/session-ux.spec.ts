@@ -9,6 +9,10 @@ type MockHarness = {
   imageUploads: () => number;
   lastRunRequest: () => Record<string, unknown> | null;
   lastReviewStartRequest: () => Record<string, unknown> | null;
+  lastProjectGitActionRequest: () => {
+    action: string;
+    body: Record<string, unknown> | null;
+  } | null;
   lastPendingResolveRequest: () => Record<string, unknown> | null;
   lastPlatformLoginRequest: () => Record<string, unknown> | null;
   lastPlatformMCPRequest: () => Record<string, unknown> | null;
@@ -58,6 +62,10 @@ async function mockSessionApi(
   let imageUploadCount = 0;
   let lastRunRequest: Record<string, unknown> | null = null;
   let lastReviewStartRequest: Record<string, unknown> | null = null;
+  let lastProjectGitActionRequest: {
+    action: string;
+    body: Record<string, unknown> | null;
+  } | null = null;
   let lastPendingResolveRequest: Record<string, unknown> | null = null;
   let lastPlatformLoginRequest: Record<string, unknown> | null = null;
   let lastPlatformMCPRequest: Record<string, unknown> | null = null;
@@ -98,6 +106,12 @@ async function mockSessionApi(
     "+- move shell chrome out of the conversation",
     "+- keep diffs in the review pane",
   ].join("\n");
+  const defaultGitChangedPaths =
+    runtimeFileChangeEvents || protocolDiffEvents
+      ? ["docs/review-plan.md", "src/app.ts"]
+      : [];
+  const projectGitChangedPaths = new Set<string>(defaultGitChangedPaths);
+  const projectGitStagedPaths = new Set<string>();
 
   let sessionOneStreamAttempts = 0;
   let sessionOneSSECalls = 0;
@@ -239,6 +253,23 @@ async function mockSessionApi(
         reason: "Codex needs repo status before it can continue.",
         availableDecisions: ["accept", "decline", "cancel"],
       },
+    };
+  };
+
+  const buildProjectGitStatusPayload = () => {
+    const changedPaths = Array.from(projectGitChangedPaths).sort();
+    const stagedPaths = Array.from(projectGitStagedPaths).sort();
+    return {
+      project_id: "project_local_1__srv_work",
+      host_id: "local_1",
+      files: changedPaths.map((path) => ({
+        path,
+        code: projectGitStagedPaths.has(path) ? "M " : " M",
+        staged: projectGitStagedPaths.has(path),
+        changed: true,
+      })),
+      changed_paths: changedPaths,
+      staged_paths: stagedPaths,
     };
   };
 
@@ -1396,6 +1427,105 @@ async function mockSessionApi(
     },
   );
 
+  await page.route("**/v2/projects/*/git/status", async (route, request) => {
+    if (request.method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      json: buildProjectGitStatusPayload(),
+    });
+  });
+
+  await page.route("**/v2/projects/*/git/stage", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    lastProjectGitActionRequest = { action: "stage", body };
+    const paths = Array.isArray(body?.paths)
+      ? body.paths.map((item) => String(item))
+      : [];
+    for (const path of paths) {
+      if (projectGitChangedPaths.has(path)) {
+        projectGitStagedPaths.add(path);
+      }
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        action: "stage",
+        paths,
+        result: { command: `git add -- ${paths.join(" ")}`, exit_code: 0 },
+        status: buildProjectGitStatusPayload(),
+      },
+    });
+  });
+
+  await page.route("**/v2/projects/*/git/revert", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    lastProjectGitActionRequest = { action: "revert", body };
+    const paths = Array.isArray(body?.paths)
+      ? body.paths.map((item) => String(item))
+      : [];
+    for (const path of paths) {
+      projectGitChangedPaths.delete(path);
+      projectGitStagedPaths.delete(path);
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        action: "revert",
+        paths,
+        result: { command: `git restore -- ${paths.join(" ")}`, exit_code: 0 },
+        status: buildProjectGitStatusPayload(),
+      },
+    });
+  });
+
+  await page.route("**/v2/projects/*/git/commit", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    lastProjectGitActionRequest = { action: "commit", body };
+    for (const path of Array.from(projectGitStagedPaths)) {
+      projectGitChangedPaths.delete(path);
+      projectGitStagedPaths.delete(path);
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        action: "commit",
+        message: String(body?.message ?? ""),
+        result: { command: "git commit -m ...", exit_code: 0 },
+        status: buildProjectGitStatusPayload(),
+      },
+    });
+  });
+
   await page.route(
     "**/v2/codex/sessions/*/turns/*/interrupt",
     async (route, request) => {
@@ -1496,6 +1626,7 @@ async function mockSessionApi(
     imageUploads: () => imageUploadCount,
     lastRunRequest: () => lastRunRequest,
     lastReviewStartRequest: () => lastReviewStartRequest,
+    lastProjectGitActionRequest: () => lastProjectGitActionRequest,
     lastPendingResolveRequest: () => lastPendingResolveRequest,
     lastPlatformLoginRequest: () => lastPlatformLoginRequest,
     lastPlatformMCPRequest: () => lastPlatformMCPRequest,
@@ -2797,6 +2928,95 @@ test("review pane surfaces changed files away from the main chat flow", async ({
   );
   await expect(page.getByTestId("review-change-diff")).toContainText(
     "+# Review plan",
+  );
+});
+
+test("review pane stages, reverts, and commits through project git actions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_GIT_${Date.now()}`;
+  const harness = await mockSessionApi(
+    page,
+    `review changes ${marker}`,
+    marker,
+    {
+      runtimeFileChangeEvents: true,
+    },
+  );
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await page.getByTestId("review-mode-review").click();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`review git actions ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const changeList = page.getByTestId("review-change-list");
+  await expect(changeList).toContainText("src/app.ts");
+  await expect(changeList).toContainText("docs/review-plan.md");
+  await expect(page.getByTestId("review-git-status")).toContainText(
+    "2 repo changes",
+  );
+
+  const docsChange = page.getByTestId("review-change-item").filter({
+    hasText: "docs/review-plan.md",
+  });
+  await docsChange.click();
+  await page.getByTestId("review-change-stage").click();
+  await expect
+    .poll(() => {
+      const req = harness.lastProjectGitActionRequest();
+      const paths = Array.isArray(req?.body?.paths)
+        ? req?.body?.paths.map((item) => String(item))
+        : [];
+      return `${req?.action ?? ""}|${paths.join(",")}`;
+    })
+    .toBe("stage|docs/review-plan.md");
+  await expect(docsChange).toContainText("Staged");
+
+  await page.getByTestId("review-change-revert").click();
+  await expect
+    .poll(() => {
+      const req = harness.lastProjectGitActionRequest();
+      const paths = Array.isArray(req?.body?.paths)
+        ? req?.body?.paths.map((item) => String(item))
+        : [];
+      return `${req?.action ?? ""}|${paths.join(",")}`;
+    })
+    .toBe("revert|docs/review-plan.md");
+  await expect(changeList).not.toContainText("docs/review-plan.md");
+
+  const srcChange = page.getByTestId("review-change-item").filter({
+    hasText: "src/app.ts",
+  });
+  await srcChange.click();
+  await page.getByTestId("review-change-stage").click();
+  await expect
+    .poll(() => {
+      const req = harness.lastProjectGitActionRequest();
+      const paths = Array.isArray(req?.body?.paths)
+        ? req?.body?.paths.map((item) => String(item))
+        : [];
+      return `${req?.action ?? ""}|${paths.join(",")}`;
+    })
+    .toBe("stage|src/app.ts");
+
+  await page.getByTestId("review-commit-message").fill("Native review commit");
+  await page.getByTestId("review-commit-btn").click();
+  await expect
+    .poll(() => {
+      const req = harness.lastProjectGitActionRequest();
+      return `${req?.action ?? ""}|${String(req?.body?.message ?? "")}`;
+    })
+    .toBe("commit|Native review commit");
+  await expect(page.getByTestId("review-change-empty")).toBeVisible();
+  await expect(page.getByTestId("review-git-status")).toContainText(
+    "0 repo changes",
   );
 });
 
