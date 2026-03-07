@@ -2265,7 +2265,11 @@ async function unlock(page: Page): Promise<void> {
 }
 
 async function revisitWorkspace(page: Page): Promise<void> {
-  await page.reload({ waitUntil: "domcontentloaded" });
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+  } catch {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+  }
   const workspaceShell = page.locator(".session-side");
   try {
     await expect(workspaceShell).toBeVisible({ timeout: 15000 });
@@ -3127,12 +3131,13 @@ test("review pane scopes notes to the selected file and lets the reviewer dismis
     hasText: "docs/review-plan.md",
   });
   await docsChange.click();
-  await expect(page.getByTestId("review-file-findings")).toContainText(
+  await expect(page.getByTestId("review-inline-anchor")).toContainText(
     "docs/review-plan.md",
   );
-  await expect(page.getByTestId("review-file-findings")).not.toContainText(
+  await expect(page.getByTestId("review-inline-anchor")).not.toContainText(
     "src/app.ts",
   );
+  await expect(page.getByTestId("review-file-findings-empty")).toBeVisible();
 
   await page.getByTestId("review-change-mark-reviewed").click();
   await expect(page.getByTestId("review-change-mark-reviewed")).toContainText(
@@ -3140,10 +3145,10 @@ test("review pane scopes notes to the selected file and lets the reviewer dismis
   );
 
   await page
-    .getByTestId("review-file-findings")
+    .getByTestId("review-inline-anchor")
     .getByTestId("review-finding-dismiss")
     .click();
-  await expect(page.getByTestId("review-file-findings")).toHaveCount(0);
+  await expect(page.getByTestId("review-inline-anchor")).toHaveCount(0);
   await expect(page.getByTestId("review-restore-dismissed")).toBeVisible();
 });
 

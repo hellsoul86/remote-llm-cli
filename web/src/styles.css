@@ -939,6 +939,11 @@ pre {
   background: #f7f9fc;
 }
 
+.review-diff-row {
+  display: grid;
+  gap: 1px;
+}
+
 .review-diff-line {
   display: block;
   padding: 6px 10px;
@@ -975,6 +980,73 @@ pre {
 .review-diff-context {
   background: #ffffff;
   color: #32445f;
+}
+
+.review-inline-anchor {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid #e5eaf2;
+  background: #f8fbff;
+}
+
+.review-inline-anchor-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.review-inline-anchor-head span {
+  border-radius: 999px;
+  border: 1px solid #d6dfec;
+  background: #ffffff;
+  padding: 3px 8px;
+  font-size: 0.63rem;
+  color: #60708c;
+  font-family: var(--font-mono);
+}
+
+.review-inline-anchor-list {
+  display: grid;
+  gap: 8px;
+}
+
+.review-inline-note {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #dfe6f1;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.review-inline-note header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.review-inline-note header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.review-inline-note strong {
+  font-size: 0.76rem;
+  color: #23344f;
+}
+
+.review-inline-note time {
+  font-size: 0.65rem;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.review-inline-note pre {
+  font-size: 0.75rem;
+  line-height: 1.55;
+  font-family: var(--font-sans);
 }
 
 .review-subsection-head {
