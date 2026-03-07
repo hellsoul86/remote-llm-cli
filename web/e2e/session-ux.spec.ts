@@ -2401,6 +2401,54 @@ test("review pane surfaces changed files away from the main chat flow", async ({
   );
 });
 
+test("review pane scopes notes to the selected file and lets the reviewer dismiss them", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_LINKED_${Date.now()}`;
+  const assistantReply = [
+    `src/app.ts still couples the review adapter to the chat shell. ${marker}`,
+    `docs/review-plan.md should call out the new review workflow separately. ${marker}`,
+  ].join("\n\n");
+  const harness = await mockSessionApi(page, assistantReply, marker, {
+    runtimeFileChangeEvents: true,
+  });
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await page.getByTestId("review-mode-review").click();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`review linked files ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const docsChange = page.getByTestId("review-change-item").filter({
+    hasText: "docs/review-plan.md",
+  });
+  await docsChange.click();
+  await expect(page.getByTestId("review-file-findings")).toContainText(
+    "docs/review-plan.md",
+  );
+  await expect(page.getByTestId("review-file-findings")).not.toContainText(
+    "src/app.ts",
+  );
+
+  await page.getByTestId("review-change-mark-reviewed").click();
+  await expect(page.getByTestId("review-change-mark-reviewed")).toContainText(
+    "Reviewed",
+  );
+
+  await page
+    .getByTestId("review-file-findings")
+    .getByTestId("review-finding-dismiss")
+    .click();
+  await expect(page.getByTestId("review-file-findings")).toHaveCount(0);
+  await expect(page.getByTestId("review-restore-dismissed")).toBeVisible();
+});
+
 test("fork session creates a branch session in project list", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `FORK_${Date.now()}`;
