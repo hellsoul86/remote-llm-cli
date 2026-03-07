@@ -69,6 +69,19 @@ type codexV2TurnSteerRequest struct {
 	Input  []map[string]any `json:"input,omitempty"`
 }
 
+type codexV2ReviewStartRequest struct {
+	HostID            string `json:"host_id,omitempty"`
+	ProjectID         string `json:"project_id,omitempty"`
+	Path              string `json:"path,omitempty"`
+	Title             string `json:"title,omitempty"`
+	ReviewUncommitted *bool  `json:"review_uncommitted,omitempty"`
+	ReviewBase        string `json:"review_base,omitempty"`
+	ReviewCommit      string `json:"review_commit,omitempty"`
+	ReviewTitle       string `json:"review_title,omitempty"`
+	Instructions      string `json:"instructions,omitempty"`
+	Delivery          string `json:"delivery,omitempty"`
+}
+
 type codexPendingRequest struct {
 	SessionID  string          `json:"session_id"`
 	RequestID  string          `json:"request_id"`
@@ -96,6 +109,15 @@ type codexV2SessionSyncResult struct {
 	RunID           string              `json:"run_id,omitempty"`
 	Status          string              `json:"status,omitempty"`
 	AssistantText   string              `json:"assistant_text,omitempty"`
+}
+
+type codexV2ReviewStartResult struct {
+	Session        model.SessionRecord `json:"session"`
+	Project        model.ProjectRecord `json:"project"`
+	ReviewThreadID string              `json:"review_thread_id"`
+	Turn           map[string]any      `json:"turn,omitempty"`
+	Delivery       string              `json:"delivery,omitempty"`
+	Target         map[string]any      `json:"target,omitempty"`
 }
 
 type codexThreadSyncSnapshot struct {
@@ -530,6 +552,98 @@ func (s *Server) handleCodexV2SessionSync(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func (s *Server) handleCodexV2ReviewStart(w http.ResponseWriter, r *http.Request) {
+	threadID := strings.TrimSpace(r.PathValue("id"))
+	if threadID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session id"})
+		return
+	}
+
+	var req codexV2ReviewStartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json body"})
+		return
+	}
+
+	session, host, err := s.resolveCodexV2SessionHost(threadID, req.HostID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	project, err := s.resolveCodexV2SessionProject(session, host, req.ProjectID, req.Path, req.Title)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	target, err := buildCodexV2ReviewTarget(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	delivery := normalizeCodexV2ReviewDelivery(req.Delivery)
+
+	bridge, err := s.codexBridgeForHost(host)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+
+	payload := map[string]any{
+		"threadId": threadID,
+		"target":   target,
+	}
+	if delivery != "" {
+		payload["delivery"] = delivery
+	}
+
+	var rpcResp map[string]any
+	if err := bridge.Call(r.Context(), "review/start", payload, &rpcResp); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+
+	reviewThreadID := strings.TrimSpace(asString(rpcResp["reviewThreadId"]))
+	if reviewThreadID == "" {
+		reviewThreadID = threadID
+	}
+	turnObj, _ := rpcResp["turn"].(map[string]any)
+	resolvedSession := session
+	if reviewThreadID != threadID {
+		nextTitle := strings.TrimSpace(req.Title)
+		if nextTitle == "" {
+			nextTitle = strings.TrimSpace(req.ReviewTitle)
+		}
+		if nextTitle == "" {
+			if base := strings.TrimSpace(session.Title); base != "" {
+				nextTitle = "Review · " + base
+			} else {
+				nextTitle = deriveSessionTitle("", reviewThreadID)
+			}
+		}
+		resolvedSession, err = s.upsertCodexV2Session(reviewThreadID, host, project, nextTitle)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+	}
+	if resolvedSession.ID != "" {
+		resolvedSession.LastStatus = "running"
+		resolvedSession.LastRunID = extractCodexRunIDMap(rpcResp)
+		if saved, saveErr := s.store.UpsertSession(resolvedSession); saveErr == nil {
+			resolvedSession = saved
+		}
+	}
+
+	writeJSON(w, http.StatusOK, codexV2ReviewStartResult{
+		Session:        resolvedSession,
+		Project:        project,
+		ReviewThreadID: reviewThreadID,
+		Turn:           turnObj,
+		Delivery:       delivery,
+		Target:         target,
+	})
+}
+
 func (s *Server) handleCodexV2TurnStart(w http.ResponseWriter, r *http.Request) {
 	threadID := strings.TrimSpace(r.PathValue("id"))
 	if threadID == "" {
@@ -862,6 +976,52 @@ func normalizeCodexV2Mode(v string) string {
 	default:
 		return strings.TrimSpace(v)
 	}
+}
+
+func normalizeCodexV2ReviewDelivery(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "inline":
+		return "inline"
+	case "detached":
+		return "detached"
+	default:
+		return strings.TrimSpace(v)
+	}
+}
+
+func buildCodexV2ReviewTarget(req codexV2ReviewStartRequest) (map[string]any, error) {
+	if req.ReviewUncommitted != nil && *req.ReviewUncommitted {
+		return map[string]any{"type": "uncommittedChanges"}, nil
+	}
+	if branch := strings.TrimSpace(req.ReviewBase); branch != "" {
+		return map[string]any{
+			"type":   "baseBranch",
+			"branch": branch,
+		}, nil
+	}
+	if sha := strings.TrimSpace(req.ReviewCommit); sha != "" {
+		target := map[string]any{
+			"type": "commit",
+			"sha":  sha,
+		}
+		if title := strings.TrimSpace(req.ReviewTitle); title != "" {
+			target["title"] = title
+		}
+		return target, nil
+	}
+	if instructions := strings.TrimSpace(req.Instructions); instructions != "" {
+		return map[string]any{
+			"type":         "custom",
+			"instructions": instructions,
+		}, nil
+	}
+	if title := strings.TrimSpace(req.ReviewTitle); title != "" {
+		return map[string]any{
+			"type":         "custom",
+			"instructions": title,
+		}, nil
+	}
+	return nil, errors.New("review target is required")
 }
 
 func sanitizeCodexV2StringList(input []string) []string {

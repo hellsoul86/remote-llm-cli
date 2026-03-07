@@ -4,6 +4,12 @@ type SessionHeaderProps = {
   streamTone: string;
   streamCopy: string;
   streamLastError: string;
+  terminalOpen: boolean;
+  canToggleTerminal: boolean;
+  onToggleTerminalDrawer: () => void;
+  reviewOpen: boolean;
+  canToggleReview: boolean;
+  onToggleReviewPane: () => void;
   canArchive: boolean;
   archiving: boolean;
   onArchive: () => void;
@@ -17,46 +23,87 @@ export function SessionHeader({
   streamTone,
   streamCopy,
   streamLastError,
+  terminalOpen,
+  canToggleTerminal,
+  onToggleTerminalDrawer,
+  reviewOpen,
+  canToggleReview,
+  onToggleReviewPane,
   canArchive,
   archiving,
   onArchive,
   canReconnect,
   onReconnect,
 }: SessionHeaderProps) {
+  const statusCopy =
+    streamCopy === "live"
+      ? "Connected"
+      : streamCopy === "connecting"
+        ? "Connecting"
+        : streamCopy.startsWith("reconnecting")
+          ? streamCopy.replace("reconnecting", "Reconnecting")
+          : streamCopy.startsWith("stream error")
+            ? streamCopy.replace("stream error", "Needs attention")
+            : streamCopy === "offline"
+              ? "Offline"
+              : streamCopy;
+
   return (
     <header className="chat-head">
       <div className="chat-head-main">
-        <p className="chat-head-eyebrow">Session</p>
         <h1>{title || "Session"}</h1>
         <p className="chat-context">{context}</p>
       </div>
       <div className="chat-head-side">
         <div className="chat-head-status">
-        <span
-          className={`stream-pill ${streamTone}`}
-          data-testid="stream-status"
-          title={streamLastError || `stream ${streamCopy}`}
-        >
-          stream {streamCopy}
-        </span>
+          <span
+            className={`stream-pill ${streamTone}`}
+            data-testid="stream-status"
+            title={streamLastError || statusCopy}
+          >
+            {statusCopy}
+          </span>
         </div>
         <div className="chat-head-actions">
-        <button
-          type="button"
-          className="ghost danger-ghost stream-reconnect-btn"
-          disabled={!canArchive}
-          onClick={onArchive}
-        >
-          {archiving ? "Archiving..." : "Archive"}
-        </button>
-        <button
-          type="button"
-          className="ghost stream-reconnect-btn"
-          disabled={!canReconnect}
-          onClick={onReconnect}
-        >
-          Reconnect
-        </button>
+          <button
+            type="button"
+            className={`ghost stream-reconnect-btn terminal-drawer-toggle${
+              terminalOpen ? " active" : ""
+            }`}
+            data-testid="terminal-drawer-toggle"
+            disabled={!canToggleTerminal}
+            onClick={onToggleTerminalDrawer}
+          >
+            Terminal
+          </button>
+          <button
+            type="button"
+            className={`ghost stream-reconnect-btn review-pane-toggle${
+              reviewOpen ? " active" : ""
+            }`}
+            data-testid="review-pane-toggle"
+            disabled={!canToggleReview}
+            onClick={onToggleReviewPane}
+          >
+            Review
+          </button>
+          <button
+            type="button"
+            className="ghost danger-ghost stream-reconnect-btn"
+            disabled={!canArchive}
+            onClick={onArchive}
+          >
+            {archiving ? "Archiving..." : "Archive"}
+          </button>
+          {canReconnect ? (
+            <button
+              type="button"
+              className="ghost stream-reconnect-btn"
+              onClick={onReconnect}
+            >
+              Retry
+            </button>
+          ) : null}
         </div>
       </div>
     </header>

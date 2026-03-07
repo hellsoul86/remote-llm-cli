@@ -8,6 +8,11 @@ type UseGlobalShortcutsOptions = {
   onCloseCommandPalette: () => void;
   onCreateThreadAndFocus: () => void;
   onSwitchThreadByOffset: (offset: number) => void;
+  terminalDrawerOpen: boolean;
+  terminalHasLiveTransport: boolean;
+  onToggleTerminalDrawer: () => void;
+  onClearTerminalDrawer: () => void;
+  onToggleReviewPane: () => void;
 };
 
 export function useGlobalShortcuts({
@@ -18,6 +23,11 @@ export function useGlobalShortcuts({
   onCloseCommandPalette,
   onCreateThreadAndFocus,
   onSwitchThreadByOffset,
+  terminalDrawerOpen,
+  terminalHasLiveTransport,
+  onToggleTerminalDrawer,
+  onClearTerminalDrawer,
+  onToggleReviewPane,
 }: UseGlobalShortcutsOptions) {
   useEffect(() => {
     if (!authReady) return;
@@ -42,6 +52,41 @@ export function useGlobalShortcuts({
       }
 
       if (appMode !== "session") return;
+
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "j"
+      ) {
+        event.preventDefault();
+        onToggleTerminalDrawer();
+        return;
+      }
+
+      if (
+        terminalDrawerOpen &&
+        !terminalHasLiveTransport &&
+        event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "l"
+      ) {
+        event.preventDefault();
+        onClearTerminalDrawer();
+        return;
+      }
+
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.altKey &&
+        event.key.toLowerCase() === "b"
+      ) {
+        event.preventDefault();
+        onToggleReviewPane();
+        return;
+      }
 
       if (
         (event.metaKey || event.ctrlKey) &&
@@ -85,5 +130,10 @@ export function useGlobalShortcuts({
     onCreateThreadAndFocus,
     onOpenCommandPalette,
     onSwitchThreadByOffset,
+    terminalDrawerOpen,
+    terminalHasLiveTransport,
+    onToggleTerminalDrawer,
+    onClearTerminalDrawer,
+    onToggleReviewPane,
   ]);
 }

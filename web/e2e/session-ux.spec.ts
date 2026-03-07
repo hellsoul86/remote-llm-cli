@@ -8,6 +8,11 @@ type MockHarness = {
   sessionOneSSECalls: () => number;
   imageUploads: () => number;
   lastRunRequest: () => Record<string, unknown> | null;
+  lastReviewStartRequest: () => Record<string, unknown> | null;
+  lastProjectGitActionRequest: () => {
+    action: string;
+    body: Record<string, unknown> | null;
+  } | null;
   lastPendingResolveRequest: () => Record<string, unknown> | null;
   lastPlatformLoginRequest: () => Record<string, unknown> | null;
   lastPlatformMCPRequest: () => Record<string, unknown> | null;
@@ -25,6 +30,9 @@ type MockOptions = {
   jobEventFirstPollDelayMS?: number;
   streamFailAttempts?: number;
   runtimeCommandEvents?: boolean;
+  runtimeFileChangeEvents?: boolean;
+  protocolDiffEvents?: boolean;
+  protocolTerminalEvents?: boolean;
   assistantDeltaEvents?: number;
   ignoreStreamAfterCursor?: boolean;
 };
@@ -54,6 +62,11 @@ async function mockSessionApi(
   let runReqCount = 0;
   let imageUploadCount = 0;
   let lastRunRequest: Record<string, unknown> | null = null;
+  let lastReviewStartRequest: Record<string, unknown> | null = null;
+  let lastProjectGitActionRequest: {
+    action: string;
+    body: Record<string, unknown> | null;
+  } | null = null;
   let lastPendingResolveRequest: Record<string, unknown> | null = null;
   let lastPlatformLoginRequest: Record<string, unknown> | null = null;
   let lastPlatformMCPRequest: Record<string, unknown> | null = null;
@@ -75,8 +88,35 @@ async function mockSessionApi(
   );
   const streamFailAttempts = Math.max(0, options?.streamFailAttempts ?? 0);
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
+  const runtimeFileChangeEvents = options?.runtimeFileChangeEvents ?? false;
+  const protocolDiffEvents = options?.protocolDiffEvents ?? false;
+  const protocolTerminalEvents = options?.protocolTerminalEvents ?? false;
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
   const ignoreStreamAfterCursor = options?.ignoreStreamAfterCursor ?? false;
+
+  const appDiffText = [
+    "--- a/src/app.ts",
+    "+++ b/src/app.ts",
+    "@@ -1,4 +1,4 @@",
+    " export function App() {",
+    '-  return "legacy shell";',
+    '+  return "native workbench";',
+    " }",
+  ].join("\n");
+  const docsDiffText = [
+    "--- /dev/null",
+    "+++ b/docs/review-plan.md",
+    "@@ -0,0 +1,3 @@",
+    "+# Review plan",
+    "+- move shell chrome out of the conversation",
+    "+- keep diffs in the review pane",
+  ].join("\n");
+  const defaultGitChangedPaths =
+    runtimeFileChangeEvents || protocolDiffEvents
+      ? ["docs/review-plan.md", "src/app.ts"]
+      : [];
+  const projectGitChangedPaths = new Set<string>(defaultGitChangedPaths);
+  const projectGitStagedPaths = new Set<string>();
 
   let sessionOneStreamAttempts = 0;
   let sessionOneSSECalls = 0;
@@ -150,12 +190,7 @@ async function mockSessionApi(
   type TurnState = {
     runID: string;
     sessionID: string;
-    phase:
-      | "pending"
-      | "waiting-request"
-      | "started"
-      | "completed"
-      | "canceled";
+    phase: "pending" | "waiting-request" | "started" | "completed" | "canceled";
     remainingPolls: number;
     pendingRequestID: string;
   };
@@ -169,7 +204,9 @@ async function mockSessionApi(
       setTimeout(resolve, ms);
     });
 
-  const ensureSessionEvents = (sessionID: string): Array<Record<string, unknown>> => {
+  const ensureSessionEvents = (
+    sessionID: string,
+  ): Array<Record<string, unknown>> => {
     let events = sessionEvents.get(sessionID);
     if (!events) {
       events = [];
@@ -224,6 +261,23 @@ async function mockSessionApi(
     };
   };
 
+  const buildProjectGitStatusPayload = () => {
+    const changedPaths = Array.from(projectGitChangedPaths).sort();
+    const stagedPaths = Array.from(projectGitStagedPaths).sort();
+    return {
+      project_id: "project_local_1__srv_work",
+      host_id: "local_1",
+      files: changedPaths.map((path) => ({
+        path,
+        code: projectGitStagedPaths.has(path) ? "M " : " M",
+        staged: projectGitStagedPaths.has(path),
+        changed: true,
+      })),
+      changed_paths: changedPaths,
+      staged_paths: stagedPaths,
+    };
+  };
+
   const chunkFromText = (text: string, includePrelude: boolean): string => {
     const chunkLines: string[] = [];
     if (includePrelude) {
@@ -237,6 +291,7 @@ async function mockSessionApi(
               id: "item_cmd_1",
               type: "command_execution",
               command: "ls -la",
+              process_id: "pty_cmd_1",
               aggregated_output: "",
               exit_code: null,
               status: "in_progress",
@@ -250,9 +305,34 @@ async function mockSessionApi(
               id: "item_cmd_1",
               type: "command_execution",
               command: "ls -la",
+              process_id: "pty_cmd_1",
               aggregated_output: "README.md",
               exit_code: 0,
               status: "completed",
+            },
+          }),
+        );
+      }
+      if (runtimeFileChangeEvents) {
+        chunkLines.push(
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "item_patch_1",
+              type: "file_change",
+              status: "completed",
+              changes: [
+                {
+                  kind: "update",
+                  path: "src/app.ts",
+                  diff: appDiffText,
+                },
+                {
+                  kind: "create",
+                  path: "docs/review-plan.md",
+                  diff: docsDiffText,
+                },
+              ],
             },
           }),
         );
@@ -297,6 +377,72 @@ async function mockSessionApi(
         turnState.runID,
         "assistant.delta",
         { chunk: chunkFromText(text, index === 0) },
+        startedAt,
+      );
+    }
+
+    if (protocolDiffEvents) {
+      pushSessionEvent(
+        turnState.sessionID,
+        turnState.runID,
+        "codexrpc.turn.diff.updated",
+        {
+          method: "turn/diff/updated",
+          params: {
+            threadId: turnState.sessionID,
+            turnId: turnState.runID,
+            diff: [appDiffText, "", docsDiffText].join("\n"),
+          },
+        },
+        startedAt,
+      );
+      pushSessionEvent(
+        turnState.sessionID,
+        turnState.runID,
+        "codexrpc.item.filechange.outputdelta",
+        {
+          method: "item/fileChange/outputDelta",
+          params: {
+            threadId: turnState.sessionID,
+            turnId: turnState.runID,
+            itemId: "item_patch_1",
+            delta: "@@ streaming patch output @@\n+native workbench\n",
+          },
+        },
+        startedAt,
+      );
+    }
+
+    if (protocolTerminalEvents) {
+      pushSessionEvent(
+        turnState.sessionID,
+        turnState.runID,
+        "codexrpc.item.commandexecution.outputdelta",
+        {
+          method: "item/commandExecution/outputDelta",
+          params: {
+            threadId: turnState.sessionID,
+            turnId: turnState.runID,
+            itemId: "item_cmd_1",
+            delta: "total 4\n-rw-r--r-- README.md\n",
+          },
+        },
+        startedAt,
+      );
+      pushSessionEvent(
+        turnState.sessionID,
+        turnState.runID,
+        "codexrpc.item.commandexecution.terminalinteraction",
+        {
+          method: "item/commandExecution/terminalInteraction",
+          params: {
+            threadId: turnState.sessionID,
+            turnId: turnState.runID,
+            itemId: "item_cmd_1",
+            processId: "pty_cmd_1",
+            stdin: "q\n",
+          },
+        },
         startedAt,
       );
     }
@@ -378,7 +524,11 @@ async function mockSessionApi(
   };
 
   const ensureSessionTwoBackgroundCompletion = async () => {
-    if (!includeSecondSession || !backgroundCompletion || backgroundCompletionEmitted) {
+    if (
+      !includeSecondSession ||
+      !backgroundCompletion ||
+      backgroundCompletionEmitted
+    ) {
       return;
     }
     if (backgroundCompletionDelayMS > 0) {
@@ -393,10 +543,34 @@ async function mockSessionApi(
       '{"type":"turn.started"}\n' +
       `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: `background reply ${marker}` } })}\n`;
 
-    pushSessionEvent("session_cli_2", runID, "run.started", { turn_id: runID }, startedAt);
-    pushSessionEvent("session_cli_2", runID, "assistant.delta", { chunk: streamChunk }, startedAt);
-    pushSessionEvent("session_cli_2", runID, "assistant.completed", { turn_id: runID }, finishedAt);
-    pushSessionEvent("session_cli_2", runID, "run.completed", { turn_id: runID }, finishedAt);
+    pushSessionEvent(
+      "session_cli_2",
+      runID,
+      "run.started",
+      { turn_id: runID },
+      startedAt,
+    );
+    pushSessionEvent(
+      "session_cli_2",
+      runID,
+      "assistant.delta",
+      { chunk: streamChunk },
+      startedAt,
+    );
+    pushSessionEvent(
+      "session_cli_2",
+      runID,
+      "assistant.completed",
+      { turn_id: runID },
+      finishedAt,
+    );
+    pushSessionEvent(
+      "session_cli_2",
+      runID,
+      "run.completed",
+      { turn_id: runID },
+      finishedAt,
+    );
   };
 
   const buildSSEBody = (
@@ -721,7 +895,8 @@ async function mockSessionApi(
       const id = (body.id ?? "").trim() || `project_${hostID}::${path}`;
       const now = new Date().toISOString();
       const existingIndex = projectRecords.findIndex((item) => item.id === id);
-      const existing = existingIndex >= 0 ? projectRecords[existingIndex] : null;
+      const existing =
+        existingIndex >= 0 ? projectRecords[existingIndex] : null;
       const nextRecord = {
         id,
         host_id: hostID || existing?.host_id || "local_1",
@@ -751,7 +926,9 @@ async function mockSessionApi(
     if (method === "DELETE") {
       const url = new URL(request.url());
       const parts = url.pathname.split("/");
-      const projectID = decodeURIComponent(parts[parts.length - 1] ?? "").trim();
+      const projectID = decodeURIComponent(
+        parts[parts.length - 1] ?? "",
+      ).trim();
       if (!projectID) {
         await route.fulfill({
           status: 400,
@@ -759,7 +936,9 @@ async function mockSessionApi(
         });
         return;
       }
-      const existingIndex = projectRecords.findIndex((item) => item.id === projectID);
+      const existingIndex = projectRecords.findIndex(
+        (item) => item.id === projectID,
+      );
       if (existingIndex < 0) {
         await route.fulfill({
           status: 404,
@@ -803,7 +982,9 @@ async function mockSessionApi(
     await route.fulfill({
       status: 200,
       json: {
-        sessions: filteredSessions.map((sessionItem) => sessionRecord(sessionItem)),
+        sessions: filteredSessions.map((sessionItem) =>
+          sessionRecord(sessionItem),
+        ),
       },
     });
   });
@@ -836,8 +1017,9 @@ async function mockSessionApi(
             ok: true,
             sessions: sessions.map((sessionItem) => {
               const project =
-                projectRecords.find((item) => item.id === sessionItem.project_id) ??
-                projectRecords[0];
+                projectRecords.find(
+                  (item) => item.id === sessionItem.project_id,
+                ) ?? projectRecords[0];
               return {
                 session_id: sessionItem.id,
                 thread_name: sessionItem.title,
@@ -869,7 +1051,8 @@ async function mockSessionApi(
         state.phase === "waiting-request" ||
         state.phase === "started",
     );
-    const latestTurn = turnStates.length > 0 ? turnStates[turnStates.length - 1] : null;
+    const latestTurn =
+      turnStates.length > 0 ? turnStates[turnStates.length - 1] : null;
     const status = activeTurn
       ? "running"
       : latestTurn?.phase === "canceled"
@@ -1034,69 +1217,80 @@ async function mockSessionApi(
     });
   });
 
-  await page.route("**/v2/codex/sessions/*/unarchive", async (route, request) => {
-    if (request.method() !== "POST") {
-      await route.fallback();
-      return;
-    }
-    const url = new URL(request.url());
-    const parts = url.pathname.split("/");
-    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
-    const archivedIndex = archivedSessions.findIndex((item) => item.id === sessionID);
-    const restored =
-      archivedIndex >= 0 ? archivedSessions.splice(archivedIndex, 1)[0] : null;
-    if (restored) {
-      sessions.push({
-        ...restored,
-        updated_at: new Date().toISOString(),
-      });
-    }
-    const current = restored ?? sessions.find((item) => item.id === sessionID) ?? null;
-    const project =
-      current
-        ? projectRecords.find((item) => item.id === current.project_id) ?? projectRecords[0]
+  await page.route(
+    "**/v2/codex/sessions/*/unarchive",
+    async (route, request) => {
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const url = new URL(request.url());
+      const parts = url.pathname.split("/");
+      const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+      const archivedIndex = archivedSessions.findIndex(
+        (item) => item.id === sessionID,
+      );
+      const restored =
+        archivedIndex >= 0
+          ? archivedSessions.splice(archivedIndex, 1)[0]
+          : null;
+      if (restored) {
+        sessions.push({
+          ...restored,
+          updated_at: new Date().toISOString(),
+        });
+      }
+      const current =
+        restored ?? sessions.find((item) => item.id === sessionID) ?? null;
+      const project = current
+        ? (projectRecords.find((item) => item.id === current.project_id) ??
+          projectRecords[0])
         : projectRecords[0];
-    await route.fulfill({
-      status: current ? 200 : 404,
-      json: current
-        ? {
-            restored: true,
-            session: sessionRecord(current),
-            project,
-            thread: {
-              id: current.id,
-              preview: current.title,
-            },
-          }
-        : { error: "session not found" },
-    });
-  });
+      await route.fulfill({
+        status: current ? 200 : 404,
+        json: current
+          ? {
+              restored: true,
+              session: sessionRecord(current),
+              project,
+              thread: {
+                id: current.id,
+                preview: current.title,
+              },
+            }
+          : { error: "session not found" },
+      });
+    },
+  );
 
-  await page.route("**/v2/codex/sessions/*/requests/pending", async (route, request) => {
-    if (request.method() !== "GET") {
-      await route.fallback();
-      return;
-    }
-    const url = new URL(request.url());
-    const parts = url.pathname.split("/");
-    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
-    const pending = turnStates
-      .filter(
-        (state) =>
-          state.phase === "waiting-request" &&
-          state.pendingRequestID.trim() !== "" &&
-          sessionID === "session_cli_1",
-      )
-      .map((state) => pendingRequestRecordForTurn(state))
-      .filter((item): item is Record<string, unknown> => item !== null);
-    await route.fulfill({
-      status: 200,
-      json: {
-        session_id: sessionID,
-        requests: pending,
-      },
-    });
-  });
+  await page.route(
+    "**/v2/codex/sessions/*/requests/pending",
+    async (route, request) => {
+      if (request.method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      const url = new URL(request.url());
+      const parts = url.pathname.split("/");
+      const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+      const pending = turnStates
+        .filter(
+          (state) =>
+            state.phase === "waiting-request" &&
+            state.pendingRequestID.trim() !== "" &&
+            sessionID === "session_cli_1",
+        )
+        .map((state) => pendingRequestRecordForTurn(state))
+        .filter((item): item is Record<string, unknown> => item !== null);
+      await route.fulfill({
+        status: 200,
+        json: {
+          session_id: sessionID,
+          requests: pending,
+        },
+      });
+    },
+  );
 
   await page.route(
     "**/v2/codex/sessions/*/requests/*/resolve",
@@ -1110,14 +1304,15 @@ async function mockSessionApi(
       const sessionID = decodeURIComponent(parts[4] ?? "").trim();
       const requestID = decodeURIComponent(parts[6] ?? "").trim();
       try {
-        lastPendingResolveRequest = JSON.parse(request.postData() ?? "{}") as Record<
-          string,
-          unknown
-        >;
+        lastPendingResolveRequest = JSON.parse(
+          request.postData() ?? "{}",
+        ) as Record<string, unknown>;
       } catch {
         lastPendingResolveRequest = null;
       }
-      const turnState = turnStates.find((state) => state.pendingRequestID === requestID);
+      const turnState = turnStates.find(
+        (state) => state.pendingRequestID === requestID,
+      );
       if (turnState && turnState.phase === "waiting-request") {
         turnState.phase = "started";
         turnState.pendingRequestID = "";
@@ -1134,83 +1329,242 @@ async function mockSessionApi(
     },
   );
 
-  await page.route("**/v2/codex/sessions/*/turns/start", async (route, request) => {
-    if (request.method() !== "POST") {
-      await route.fallback();
-      return;
-    }
-    runReqCount += 1;
-    const url = new URL(request.url());
-    const parts = url.pathname.split("/");
-    const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+  await page.route(
+    "**/v2/codex/sessions/*/turns/start",
+    async (route, request) => {
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      runReqCount += 1;
+      const url = new URL(request.url());
+      const parts = url.pathname.split("/");
+      const sessionID = decodeURIComponent(parts[4] ?? "").trim();
 
-    try {
-      const bodyRaw = request.postData() ?? "{}";
-      const parsed = JSON.parse(bodyRaw) as Record<string, unknown>;
-      lastRunRequest = parsed;
-    } catch {
-      lastRunRequest = null;
-    }
+      try {
+        const bodyRaw = request.postData() ?? "{}";
+        const parsed = JSON.parse(bodyRaw) as Record<string, unknown>;
+        lastRunRequest = parsed;
+      } catch {
+        lastRunRequest = null;
+      }
 
-    if (!sessions.some((item) => item.id === sessionID)) {
-      sessions.push({
-        id: sessionID,
-        project_id: "project_local_1__srv_work",
-        title: `Session ${sessions.length + 1}`,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      });
-    }
+      if (!sessions.some((item) => item.id === sessionID)) {
+        sessions.push({
+          id: sessionID,
+          project_id: "project_local_1__srv_work",
+          title: `Session ${sessions.length + 1}`,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      }
 
-    const runID = `turn_${runReqCount}`;
-    turnStates.push({
-      runID,
-      sessionID,
-      phase: "pending",
-      remainingPolls: jobRunningPolls,
-      pendingRequestID:
-        sessionID === "session_cli_1" && pendingRequestScenario
-          ? `req_${runID}`
-          : "",
-    });
-
-    await route.fulfill({
-      status: 200,
-      json: {
-        turn_id: runID,
-        turn: { id: runID },
-      },
-    });
-  });
-
-  await page.route("**/v2/codex/sessions/*/turns/*/interrupt", async (route, request) => {
-    if (request.method() !== "POST") {
-      await route.fallback();
-      return;
-    }
-    const url = new URL(request.url());
-    const parts = url.pathname.split("/");
-    const runID = decodeURIComponent(parts[6] ?? "").trim();
-    const state = turnStates.find((item) => item.runID === runID);
-    if (state && state.phase !== "completed" && state.phase !== "canceled") {
-      state.phase = "canceled";
-      state.remainingPolls = 0;
-      pushSessionEvent(
-        state.sessionID,
+      const runID = `turn_${runReqCount}`;
+      turnStates.push({
         runID,
-        "run.canceled",
-        { turn_id: runID },
-        new Date().toISOString(),
-      );
+        sessionID,
+        phase: "pending",
+        remainingPolls: jobRunningPolls,
+        pendingRequestID:
+          sessionID === "session_cli_1" && pendingRequestScenario
+            ? `req_${runID}`
+            : "",
+      });
+
+      await route.fulfill({
+        status: 200,
+        json: {
+          turn_id: runID,
+          turn: { id: runID },
+        },
+      });
+    },
+  );
+
+  await page.route(
+    "**/v2/codex/sessions/*/review/start",
+    async (route, request) => {
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const url = new URL(request.url());
+      const parts = url.pathname.split("/");
+      const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+
+      try {
+        lastReviewStartRequest = JSON.parse(
+          request.postData() ?? "{}",
+        ) as Record<string, unknown>;
+      } catch {
+        lastReviewStartRequest = null;
+      }
+
+      const runID = `review_turn_${runReqCount + 1}`;
+      turnStates.push({
+        runID,
+        sessionID,
+        phase: "pending",
+        remainingPolls: jobRunningPolls,
+        pendingRequestID: "",
+      });
+
+      await route.fulfill({
+        status: 200,
+        json: {
+          session: sessionRecord(
+            sessions.find((item) => item.id === sessionID) ?? sessions[0],
+          ),
+          project: projectRecords[0],
+          review_thread_id: sessionID,
+          turn: { id: runID },
+          delivery: "inline",
+          target: lastReviewStartRequest
+            ? {
+                type: (lastReviewStartRequest.review_base as string | undefined)
+                  ? "baseBranch"
+                  : (lastReviewStartRequest.review_commit as string | undefined)
+                    ? "commit"
+                    : lastReviewStartRequest.review_uncommitted
+                      ? "uncommittedChanges"
+                      : "custom",
+              }
+            : { type: "custom" },
+        },
+      });
+    },
+  );
+
+  await page.route("**/v2/projects/*/git/status", async (route, request) => {
+    if (request.method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      json: buildProjectGitStatusPayload(),
+    });
+  });
+
+  await page.route("**/v2/projects/*/git/stage", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    lastProjectGitActionRequest = { action: "stage", body };
+    const paths = Array.isArray(body?.paths)
+      ? body.paths.map((item) => String(item))
+      : [];
+    for (const path of paths) {
+      if (projectGitChangedPaths.has(path)) {
+        projectGitStagedPaths.add(path);
+      }
     }
     await route.fulfill({
       status: 200,
       json: {
-        turn_id: runID,
-        interrupted: true,
+        action: "stage",
+        paths,
+        result: { command: `git add -- ${paths.join(" ")}`, exit_code: 0 },
+        status: buildProjectGitStatusPayload(),
       },
     });
   });
+
+  await page.route("**/v2/projects/*/git/revert", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    lastProjectGitActionRequest = { action: "revert", body };
+    const paths = Array.isArray(body?.paths)
+      ? body.paths.map((item) => String(item))
+      : [];
+    for (const path of paths) {
+      projectGitChangedPaths.delete(path);
+      projectGitStagedPaths.delete(path);
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        action: "revert",
+        paths,
+        result: { command: `git restore -- ${paths.join(" ")}`, exit_code: 0 },
+        status: buildProjectGitStatusPayload(),
+      },
+    });
+  });
+
+  await page.route("**/v2/projects/*/git/commit", async (route, request) => {
+    if (request.method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    lastProjectGitActionRequest = { action: "commit", body };
+    for (const path of Array.from(projectGitStagedPaths)) {
+      projectGitChangedPaths.delete(path);
+      projectGitStagedPaths.delete(path);
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        action: "commit",
+        message: String(body?.message ?? ""),
+        result: { command: "git commit -m ...", exit_code: 0 },
+        status: buildProjectGitStatusPayload(),
+      },
+    });
+  });
+
+  await page.route(
+    "**/v2/codex/sessions/*/turns/*/interrupt",
+    async (route, request) => {
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const url = new URL(request.url());
+      const parts = url.pathname.split("/");
+      const runID = decodeURIComponent(parts[6] ?? "").trim();
+      const state = turnStates.find((item) => item.runID === runID);
+      if (state && state.phase !== "completed" && state.phase !== "canceled") {
+        state.phase = "canceled";
+        state.remainingPolls = 0;
+        pushSessionEvent(
+          state.sessionID,
+          runID,
+          "run.canceled",
+          { turn_id: runID },
+          new Date().toISOString(),
+        );
+      }
+      await route.fulfill({
+        status: 200,
+        json: {
+          turn_id: runID,
+          interrupted: true,
+        },
+      });
+    },
+  );
 
   await page.route("**/v2/codex/sessions/*/stream**", async (route) => {
     const url = new URL(route.request().url());
@@ -1218,9 +1572,8 @@ async function mockSessionApi(
     const sessionID = decodeURIComponent(parts[4] ?? "").trim();
     const streamAfterRaw = url.searchParams.get("after") ?? "0";
     const streamAfter = Number.parseInt(streamAfterRaw, 10);
-    const safeStreamAfter = Number.isFinite(streamAfter) && streamAfter > 0
-      ? streamAfter
-      : 0;
+    const safeStreamAfter =
+      Number.isFinite(streamAfter) && streamAfter > 0 ? streamAfter : 0;
 
     if (sessionID === "session_cli_1") {
       sessionOneSSECalls += 1;
@@ -1252,7 +1605,11 @@ async function mockSessionApi(
       await route.fulfill({
         status: 200,
         headers: { "content-type": "text/event-stream" },
-        body: buildSSEBody(sessionID, safeStreamAfter, ensureSessionEvents(sessionID)),
+        body: buildSSEBody(
+          sessionID,
+          safeStreamAfter,
+          ensureSessionEvents(sessionID),
+        ),
       });
       return;
     }
@@ -1262,7 +1619,11 @@ async function mockSessionApi(
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
-      body: buildSSEBody(sessionID, safeStreamAfter, ensureSessionEvents(sessionID)),
+      body: buildSSEBody(
+        sessionID,
+        safeStreamAfter,
+        ensureSessionEvents(sessionID),
+      ),
     });
   });
 
@@ -1272,6 +1633,8 @@ async function mockSessionApi(
     sessionOneSSECalls: () => sessionOneSSECalls,
     imageUploads: () => imageUploadCount,
     lastRunRequest: () => lastRunRequest,
+    lastReviewStartRequest: () => lastReviewStartRequest,
+    lastProjectGitActionRequest: () => lastProjectGitActionRequest,
     lastPendingResolveRequest: () => lastPendingResolveRequest,
     lastPlatformLoginRequest: () => lastPlatformLoginRequest,
     lastPlatformMCPRequest: () => lastPlatformMCPRequest,
@@ -1287,90 +1650,166 @@ async function installMockSessionWebSocket(
     mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
   },
 ): Promise<void> {
-  await page.addInitScript((config: {
-    sessionID: string;
-    marker: string;
-    mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
-  }) => {
-    const globalAny = window as unknown as {
-      __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
-      __mockWsControl?: {
-        triggerResetReconnect?: () => void;
-        triggerFlakyResetReconnect?: () => void;
+  await page.addInitScript(
+    (config: {
+      sessionID: string;
+      marker: string;
+      mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
+    }) => {
+      const globalAny = window as unknown as {
+        __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+        __mockWsControl?: {
+          triggerResetReconnect?: () => void;
+          triggerFlakyResetReconnect?: () => void;
+        };
+        WebSocket: typeof WebSocket;
       };
-      WebSocket: typeof WebSocket;
-    };
-    const mode = config.mode ?? "replay-once";
-    const emitted = new Set<string>();
-    const nowISO = () => new Date().toISOString();
-    const activeSockets = new Set<SessionMockWebSocket>();
-    const resetState: { phase: "idle" | "await_reconnect" | "done" } = {
-      phase: "idle",
-    };
-    const flakyResetState: {
-      phase: "idle" | "await_reconnect_1" | "await_reconnect_2" | "done";
-    } = {
-      phase: "idle",
-    };
+      const mode = config.mode ?? "replay-once";
+      const emitted = new Set<string>();
+      const nowISO = () => new Date().toISOString();
+      const activeSockets = new Set<SessionMockWebSocket>();
+      const resetState: { phase: "idle" | "await_reconnect" | "done" } = {
+        phase: "idle",
+      };
+      const flakyResetState: {
+        phase: "idle" | "await_reconnect_1" | "await_reconnect_2" | "done";
+      } = {
+        phase: "idle",
+      };
 
-    class SessionMockWebSocket {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSING = 2;
-      static CLOSED = 3;
+      class SessionMockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        static CLOSING = 2;
+        static CLOSED = 3;
 
-      url: string;
-      readyState = SessionMockWebSocket.CONNECTING;
-      bufferedAmount = 0;
-      extensions = "";
-      protocol = "";
-      binaryType: BinaryType = "blob";
-      onopen: ((ev: Event) => void) | null = null;
-      onclose: ((ev: CloseEvent) => void) | null = null;
-      onerror: ((ev: Event) => void) | null = null;
-      onmessage: ((ev: MessageEvent) => void) | null = null;
-      sessionID = "";
-      after = 0;
+        url: string;
+        readyState = SessionMockWebSocket.CONNECTING;
+        bufferedAmount = 0;
+        extensions = "";
+        protocol = "";
+        binaryType: BinaryType = "blob";
+        onopen: ((ev: Event) => void) | null = null;
+        onclose: ((ev: CloseEvent) => void) | null = null;
+        onerror: ((ev: Event) => void) | null = null;
+        onmessage: ((ev: MessageEvent) => void) | null = null;
+        sessionID = "";
+        after = 0;
 
-      constructor(url: string | URL) {
-        this.url = typeof url === "string" ? url : String(url);
-        if (!globalAny.__mockWsState) {
-          globalAny.__mockWsState = { calls: [] };
-        }
-        const parsed = new URL(this.url, window.location.href);
-        const parts = parsed.pathname.split("/");
-        const sessionID = decodeURIComponent(parts[4] ?? "").trim();
-        const rawAfter = parsed.searchParams.get("after") ?? "0";
-        const after = Number.parseInt(rawAfter, 10);
-        const safeAfter = Number.isFinite(after) && after > 0 ? after : 0;
-        this.sessionID = sessionID;
-        this.after = safeAfter;
-        globalAny.__mockWsState.calls.push({ sessionID, after: safeAfter });
+        constructor(url: string | URL) {
+          this.url = typeof url === "string" ? url : String(url);
+          if (!globalAny.__mockWsState) {
+            globalAny.__mockWsState = { calls: [] };
+          }
+          const parsed = new URL(this.url, window.location.href);
+          const parts = parsed.pathname.split("/");
+          const sessionID = decodeURIComponent(parts[4] ?? "").trim();
+          const rawAfter = parsed.searchParams.get("after") ?? "0";
+          const after = Number.parseInt(rawAfter, 10);
+          const safeAfter = Number.isFinite(after) && after > 0 ? after : 0;
+          this.sessionID = sessionID;
+          this.after = safeAfter;
+          globalAny.__mockWsState.calls.push({ sessionID, after: safeAfter });
 
-        window.setTimeout(() => {
-          if (this.readyState !== SessionMockWebSocket.CONNECTING) return;
-          this.readyState = SessionMockWebSocket.OPEN;
-          activeSockets.add(this);
-          this.onopen?.(new Event("open"));
+          window.setTimeout(() => {
+            if (this.readyState !== SessionMockWebSocket.CONNECTING) return;
+            this.readyState = SessionMockWebSocket.OPEN;
+            activeSockets.add(this);
+            this.onopen?.(new Event("open"));
 
-          const readyCursor = safeAfter;
-          if (mode === "reset-reconnect") {
-            if (
-              sessionID === config.sessionID &&
-              resetState.phase === "await_reconnect" &&
-              safeAfter > 0
-            ) {
-              const runID = "turn_1";
-              const chunk =
-                '{"type":"thread.started","thread_id":"ws_reset"}\n' +
-                '{"type":"turn.started"}\n' +
-                JSON.stringify({
-                  type: "item.completed",
-                  item: { type: "agent_message", text: `ws reset replay ${config.marker}` },
-                }) +
-                "\n";
-              const frames: Array<Record<string, unknown>> = [
-                {
+            const readyCursor = safeAfter;
+            if (mode === "reset-reconnect") {
+              if (
+                sessionID === config.sessionID &&
+                resetState.phase === "await_reconnect" &&
+                safeAfter > 0
+              ) {
+                const runID = "turn_1";
+                const chunk =
+                  '{"type":"thread.started","thread_id":"ws_reset"}\n' +
+                  '{"type":"turn.started"}\n' +
+                  JSON.stringify({
+                    type: "item.completed",
+                    item: {
+                      type: "agent_message",
+                      text: `ws reset replay ${config.marker}`,
+                    },
+                  }) +
+                  "\n";
+                const frames: Array<Record<string, unknown>> = [
+                  {
+                    type: "session.event",
+                    id: "3",
+                    event: {
+                      seq: 3,
+                      session_id: config.sessionID,
+                      run_id: runID,
+                      type: "assistant.delta",
+                      payload: { chunk },
+                      created_at: nowISO(),
+                    },
+                  },
+                  {
+                    type: "session.event",
+                    id: "4",
+                    event: {
+                      seq: 4,
+                      session_id: config.sessionID,
+                      run_id: runID,
+                      type: "assistant.completed",
+                      payload: { turn_id: runID },
+                      created_at: nowISO(),
+                    },
+                  },
+                  {
+                    type: "session.event",
+                    id: "5",
+                    event: {
+                      seq: 5,
+                      session_id: config.sessionID,
+                      run_id: runID,
+                      type: "run.completed",
+                      payload: { turn_id: runID },
+                      created_at: nowISO(),
+                    },
+                  },
+                  {
+                    type: "session.ready",
+                    session_id: config.sessionID,
+                    cursor: 5,
+                  },
+                ];
+                resetState.phase = "done";
+                this.pump(frames);
+                return;
+              }
+              this.emit({
+                type: "session.ready",
+                session_id: sessionID,
+                cursor: readyCursor,
+              });
+              return;
+            }
+            if (mode === "flaky-reset-reconnect") {
+              if (
+                sessionID === config.sessionID &&
+                flakyResetState.phase === "await_reconnect_1" &&
+                safeAfter >= 2
+              ) {
+                const runID = "turn_1";
+                const chunk =
+                  '{"type":"thread.started","thread_id":"ws_flaky"}\n' +
+                  '{"type":"turn.started"}\n' +
+                  JSON.stringify({
+                    type: "item.completed",
+                    item: {
+                      type: "agent_message",
+                      text: `ws flaky reset mid ${config.marker}`,
+                    },
+                  }) +
+                  "\n";
+                flakyResetState.phase = "await_reconnect_2";
+                this.emit({
                   type: "session.event",
                   id: "3",
                   event: {
@@ -1381,98 +1820,113 @@ async function installMockSessionWebSocket(
                     payload: { chunk },
                     created_at: nowISO(),
                   },
-                },
-                {
-                  type: "session.event",
-                  id: "4",
-                  event: {
-                    seq: 4,
-                    session_id: config.sessionID,
-                    run_id: runID,
-                    type: "assistant.completed",
-                    payload: { turn_id: runID },
-                    created_at: nowISO(),
-                  },
-                },
-                {
-                  type: "session.event",
-                  id: "5",
-                  event: {
-                    seq: 5,
-                    session_id: config.sessionID,
-                    run_id: runID,
-                    type: "run.completed",
-                    payload: { turn_id: runID },
-                    created_at: nowISO(),
-                  },
-                },
-                {
-                  type: "session.ready",
+                });
+                this.emit({
+                  type: "session.reset",
                   session_id: config.sessionID,
-                  cursor: 5,
-                },
-              ];
-              resetState.phase = "done";
-              this.pump(frames);
+                  reason: "backpressure",
+                  next_after: 3,
+                });
+                window.setTimeout(() => this.close(1012, "mock-reset-2"), 0);
+                return;
+              }
+              if (
+                sessionID === config.sessionID &&
+                flakyResetState.phase === "await_reconnect_2" &&
+                safeAfter >= 3
+              ) {
+                const runID = "turn_1";
+                flakyResetState.phase = "done";
+                const frames: Array<Record<string, unknown>> = [
+                  {
+                    type: "session.event",
+                    id: "4",
+                    event: {
+                      seq: 4,
+                      session_id: config.sessionID,
+                      run_id: runID,
+                      type: "assistant.completed",
+                      payload: { turn_id: runID },
+                      created_at: nowISO(),
+                    },
+                  },
+                  {
+                    type: "session.event",
+                    id: "5",
+                    event: {
+                      seq: 5,
+                      session_id: config.sessionID,
+                      run_id: runID,
+                      type: "run.completed",
+                      payload: { turn_id: runID },
+                      created_at: nowISO(),
+                    },
+                  },
+                  {
+                    type: "session.ready",
+                    session_id: config.sessionID,
+                    cursor: 5,
+                  },
+                ];
+                this.pump(frames);
+                return;
+              }
+              this.emit({
+                type: "session.ready",
+                session_id: sessionID,
+                cursor: readyCursor,
+              });
               return;
             }
-            this.emit({
-              type: "session.ready",
-              session_id: sessionID,
-              cursor: readyCursor,
-            });
-            return;
-          }
-          if (mode === "flaky-reset-reconnect") {
-            if (
+
+            const shouldReplay =
               sessionID === config.sessionID &&
-              flakyResetState.phase === "await_reconnect_1" &&
-              safeAfter >= 2
-            ) {
-              const runID = "turn_1";
+              safeAfter <= 0 &&
+              !emitted.has(sessionID);
+            if (shouldReplay) {
+              emitted.add(sessionID);
+              const runID = "turn_ws_mock_1";
               const chunk =
-                '{"type":"thread.started","thread_id":"ws_flaky"}\n' +
+                '{"type":"thread.started","thread_id":"ws_mock"}\n' +
                 '{"type":"turn.started"}\n' +
                 JSON.stringify({
                   type: "item.completed",
-                  item: { type: "agent_message", text: `ws flaky reset mid ${config.marker}` },
+                  item: {
+                    type: "agent_message",
+                    text: `ws replay ${config.marker}`,
+                  },
                 }) +
                 "\n";
-              flakyResetState.phase = "await_reconnect_2";
-              this.emit({
-                type: "session.event",
-                id: "3",
-                event: {
-                  seq: 3,
-                  session_id: config.sessionID,
-                  run_id: runID,
-                  type: "assistant.delta",
-                  payload: { chunk },
-                  created_at: nowISO(),
-                },
-              });
-              this.emit({
-                type: "session.reset",
-                session_id: config.sessionID,
-                reason: "backpressure",
-                next_after: 3,
-              });
-              window.setTimeout(() => this.close(1012, "mock-reset-2"), 0);
-              return;
-            }
-            if (
-              sessionID === config.sessionID &&
-              flakyResetState.phase === "await_reconnect_2" &&
-              safeAfter >= 3
-            ) {
-              const runID = "turn_1";
-              flakyResetState.phase = "done";
               const frames: Array<Record<string, unknown>> = [
                 {
                   type: "session.event",
-                  id: "4",
+                  id: "1",
                   event: {
-                    seq: 4,
+                    seq: 1,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "run.started",
+                    payload: { turn_id: runID },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.event",
+                  id: "2",
+                  event: {
+                    seq: 2,
+                    session_id: config.sessionID,
+                    run_id: runID,
+                    type: "assistant.delta",
+                    payload: { chunk },
+                    created_at: nowISO(),
+                  },
+                },
+                {
+                  type: "session.event",
+                  id: "3",
+                  event: {
+                    seq: 3,
                     session_id: config.sessionID,
                     run_id: runID,
                     type: "assistant.completed",
@@ -1482,9 +1936,9 @@ async function installMockSessionWebSocket(
                 },
                 {
                   type: "session.event",
-                  id: "5",
+                  id: "4",
                   event: {
-                    seq: 5,
+                    seq: 4,
                     session_id: config.sessionID,
                     run_id: runID,
                     type: "run.completed",
@@ -1495,257 +1949,183 @@ async function installMockSessionWebSocket(
                 {
                   type: "session.ready",
                   session_id: config.sessionID,
-                  cursor: 5,
+                  cursor: 4,
                 },
               ];
               this.pump(frames);
               return;
             }
+
             this.emit({
               type: "session.ready",
               session_id: sessionID,
               cursor: readyCursor,
             });
-            return;
-          }
+          }, 0);
+        }
 
-          const shouldReplay =
-            sessionID === config.sessionID &&
-            safeAfter <= 0 &&
-            !emitted.has(sessionID);
-          if (shouldReplay) {
-            emitted.add(sessionID);
-            const runID = "turn_ws_mock_1";
-            const chunk =
-              '{"type":"thread.started","thread_id":"ws_mock"}\n' +
-              '{"type":"turn.started"}\n' +
-              JSON.stringify({
-                type: "item.completed",
-                item: { type: "agent_message", text: `ws replay ${config.marker}` },
-              }) +
-              "\n";
-            const frames: Array<Record<string, unknown>> = [
-              {
-                type: "session.event",
-                id: "1",
-                event: {
-                  seq: 1,
-                  session_id: config.sessionID,
-                  run_id: runID,
-                  type: "run.started",
-                  payload: { turn_id: runID },
-                  created_at: nowISO(),
-                },
+        emit(frame: Record<string, unknown>): void {
+          if (this.readyState !== SessionMockWebSocket.OPEN) return;
+          this.onmessage?.(
+            new MessageEvent("message", { data: JSON.stringify(frame) }),
+          );
+        }
+
+        pump(frames: Array<Record<string, unknown>>): void {
+          let index = 0;
+          const tick = () => {
+            if (index >= frames.length) return;
+            this.emit(frames[index] ?? {});
+            index += 1;
+            if (index < frames.length) {
+              window.setTimeout(tick, 8);
+            }
+          };
+          window.setTimeout(tick, 8);
+        }
+
+        send(_data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+          // no-op for test transport
+        }
+
+        close(code?: number, reason?: string): void {
+          if (this.readyState === SessionMockWebSocket.CLOSED) return;
+          activeSockets.delete(this);
+          this.readyState = SessionMockWebSocket.CLOSED;
+          this.onclose?.(
+            new CloseEvent("close", {
+              code: code ?? 1000,
+              reason: reason ?? "mock-closed",
+              wasClean: true,
+            }),
+          );
+        }
+
+        addEventListener(): void {
+          // on* handlers are sufficient for this test path
+        }
+
+        removeEventListener(): void {
+          // on* handlers are sufficient for this test path
+        }
+
+        dispatchEvent(): boolean {
+          return true;
+        }
+      }
+
+      globalAny.__mockWsControl = {
+        triggerResetReconnect: () => {
+          if (mode !== "reset-reconnect") return;
+          if (resetState.phase !== "idle") return;
+          resetState.phase = "await_reconnect";
+          const runID = "turn_1";
+          const chunk =
+            '{"type":"thread.started","thread_id":"ws_reset"}\n' +
+            '{"type":"turn.started"}\n' +
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                text: `ws reset ${config.marker}`,
               },
-              {
-                type: "session.event",
-                id: "2",
-                event: {
-                  seq: 2,
-                  session_id: config.sessionID,
-                  run_id: runID,
-                  type: "assistant.delta",
-                  payload: { chunk },
-                  created_at: nowISO(),
-                },
-              },
-              {
-                type: "session.event",
-                id: "3",
-                event: {
-                  seq: 3,
-                  session_id: config.sessionID,
-                  run_id: runID,
-                  type: "assistant.completed",
-                  payload: { turn_id: runID },
-                  created_at: nowISO(),
-                },
-              },
-              {
-                type: "session.event",
-                id: "4",
-                event: {
-                  seq: 4,
-                  session_id: config.sessionID,
-                  run_id: runID,
-                  type: "run.completed",
-                  payload: { turn_id: runID },
-                  created_at: nowISO(),
-                },
-              },
-              {
-                type: "session.ready",
+            }) +
+            "\n";
+          for (const socket of Array.from(activeSockets)) {
+            if (socket.sessionID !== config.sessionID) continue;
+            socket.emit({
+              type: "session.event",
+              id: "1",
+              event: {
+                seq: 1,
                 session_id: config.sessionID,
-                cursor: 4,
+                run_id: runID,
+                type: "run.started",
+                payload: { turn_id: runID },
+                created_at: nowISO(),
               },
-            ];
-            this.pump(frames);
-            return;
+            });
+            socket.emit({
+              type: "session.event",
+              id: "2",
+              event: {
+                seq: 2,
+                session_id: config.sessionID,
+                run_id: runID,
+                type: "assistant.delta",
+                payload: { chunk },
+                created_at: nowISO(),
+              },
+            });
+            socket.emit({
+              type: "session.reset",
+              session_id: config.sessionID,
+              reason: "backpressure",
+              next_after: 2,
+            });
+            window.setTimeout(() => socket.close(1012, "mock-reset"), 0);
           }
-
-          this.emit({
-            type: "session.ready",
-            session_id: sessionID,
-            cursor: readyCursor,
-          });
-        }, 0);
-      }
-
-      emit(frame: Record<string, unknown>): void {
-        if (this.readyState !== SessionMockWebSocket.OPEN) return;
-        this.onmessage?.(
-          new MessageEvent("message", { data: JSON.stringify(frame) }),
-        );
-      }
-
-      pump(frames: Array<Record<string, unknown>>): void {
-        let index = 0;
-        const tick = () => {
-          if (index >= frames.length) return;
-          this.emit(frames[index] ?? {});
-          index += 1;
-          if (index < frames.length) {
-            window.setTimeout(tick, 8);
+        },
+        triggerFlakyResetReconnect: () => {
+          if (mode !== "flaky-reset-reconnect") return;
+          if (flakyResetState.phase !== "idle") return;
+          flakyResetState.phase = "await_reconnect_1";
+          const runID = "turn_1";
+          const chunk =
+            '{"type":"thread.started","thread_id":"ws_flaky"}\n' +
+            '{"type":"turn.started"}\n' +
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                text: `ws flaky reset ${config.marker}`,
+              },
+            }) +
+            "\n";
+          for (const socket of Array.from(activeSockets)) {
+            if (socket.sessionID !== config.sessionID) continue;
+            socket.emit({
+              type: "session.event",
+              id: "1",
+              event: {
+                seq: 1,
+                session_id: config.sessionID,
+                run_id: runID,
+                type: "run.started",
+                payload: { turn_id: runID },
+                created_at: nowISO(),
+              },
+            });
+            socket.emit({
+              type: "session.event",
+              id: "2",
+              event: {
+                seq: 2,
+                session_id: config.sessionID,
+                run_id: runID,
+                type: "assistant.delta",
+                payload: { chunk },
+                created_at: nowISO(),
+              },
+            });
+            socket.emit({
+              type: "session.reset",
+              session_id: config.sessionID,
+              reason: "backpressure",
+              next_after: 2,
+            });
+            window.setTimeout(() => socket.close(1012, "mock-reset-1"), 0);
           }
-        };
-        window.setTimeout(tick, 8);
-      }
+        },
+      };
 
-      send(_data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
-        // no-op for test transport
-      }
-
-      close(code?: number, reason?: string): void {
-        if (this.readyState === SessionMockWebSocket.CLOSED) return;
-        activeSockets.delete(this);
-        this.readyState = SessionMockWebSocket.CLOSED;
-        this.onclose?.(
-          new CloseEvent("close", {
-            code: code ?? 1000,
-            reason: reason ?? "mock-closed",
-            wasClean: true,
-          }),
-        );
-      }
-
-      addEventListener(): void {
-        // on* handlers are sufficient for this test path
-      }
-
-      removeEventListener(): void {
-        // on* handlers are sufficient for this test path
-      }
-
-      dispatchEvent(): boolean {
-        return true;
-      }
-    }
-
-    globalAny.__mockWsControl = {
-      triggerResetReconnect: () => {
-        if (mode !== "reset-reconnect") return;
-        if (resetState.phase !== "idle") return;
-        resetState.phase = "await_reconnect";
-        const runID = "turn_1";
-        const chunk =
-          '{"type":"thread.started","thread_id":"ws_reset"}\n' +
-          '{"type":"turn.started"}\n' +
-          JSON.stringify({
-            type: "item.completed",
-            item: { type: "agent_message", text: `ws reset ${config.marker}` },
-          }) +
-          "\n";
-        for (const socket of Array.from(activeSockets)) {
-          if (socket.sessionID !== config.sessionID) continue;
-          socket.emit({
-            type: "session.event",
-            id: "1",
-            event: {
-              seq: 1,
-              session_id: config.sessionID,
-              run_id: runID,
-              type: "run.started",
-              payload: { turn_id: runID },
-              created_at: nowISO(),
-            },
-          });
-          socket.emit({
-            type: "session.event",
-            id: "2",
-            event: {
-              seq: 2,
-              session_id: config.sessionID,
-              run_id: runID,
-              type: "assistant.delta",
-              payload: { chunk },
-              created_at: nowISO(),
-            },
-          });
-          socket.emit({
-            type: "session.reset",
-            session_id: config.sessionID,
-            reason: "backpressure",
-            next_after: 2,
-          });
-          window.setTimeout(() => socket.close(1012, "mock-reset"), 0);
-        }
-      },
-      triggerFlakyResetReconnect: () => {
-        if (mode !== "flaky-reset-reconnect") return;
-        if (flakyResetState.phase !== "idle") return;
-        flakyResetState.phase = "await_reconnect_1";
-        const runID = "turn_1";
-        const chunk =
-          '{"type":"thread.started","thread_id":"ws_flaky"}\n' +
-          '{"type":"turn.started"}\n' +
-          JSON.stringify({
-            type: "item.completed",
-            item: { type: "agent_message", text: `ws flaky reset ${config.marker}` },
-          }) +
-          "\n";
-        for (const socket of Array.from(activeSockets)) {
-          if (socket.sessionID !== config.sessionID) continue;
-          socket.emit({
-            type: "session.event",
-            id: "1",
-            event: {
-              seq: 1,
-              session_id: config.sessionID,
-              run_id: runID,
-              type: "run.started",
-              payload: { turn_id: runID },
-              created_at: nowISO(),
-            },
-          });
-          socket.emit({
-            type: "session.event",
-            id: "2",
-            event: {
-              seq: 2,
-              session_id: config.sessionID,
-              run_id: runID,
-              type: "assistant.delta",
-              payload: { chunk },
-              created_at: nowISO(),
-            },
-          });
-          socket.emit({
-            type: "session.reset",
-            session_id: config.sessionID,
-            reason: "backpressure",
-            next_after: 2,
-          });
-          window.setTimeout(() => socket.close(1012, "mock-reset-1"), 0);
-        }
-      },
-    };
-
-    // Use mocked WebSocket transport for deterministic stream tests.
-    globalAny.WebSocket =
-      SessionMockWebSocket as unknown as typeof WebSocket;
-    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
-      SessionMockWebSocket as unknown as typeof WebSocket;
-  }, opts);
+      // Use mocked WebSocket transport for deterministic stream tests.
+      globalAny.WebSocket = SessionMockWebSocket as unknown as typeof WebSocket;
+      (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+        SessionMockWebSocket as unknown as typeof WebSocket;
+    },
+    opts,
+  );
 }
 
 test("codex parser plain-text fallback strips transport noise lines", async () => {
@@ -1818,6 +2198,23 @@ test("codex parser preserves whitespace in streaming deltas", async () => {
   );
 });
 
+test("codex parser ignores terminal and file diff delta payloads", async () => {
+  const stdout = [
+    JSON.stringify({
+      type: "item.commandexecution.outputdelta",
+      itemId: "cmd_1",
+      delta: "README.md\n",
+    }),
+    JSON.stringify({
+      type: "item.filechange.outputdelta",
+      itemId: "patch_1",
+      delta: "@@ -1 +1 @@\n",
+    }),
+  ].join("\n");
+
+  expect(parseCodexAssistantTextFromStdout(stdout, false)).toBe("");
+});
+
 test("codex parser accepts camelCase agentMessage final items", async () => {
   const stdout = JSON.stringify({
     type: "item.completed",
@@ -1859,7 +2256,9 @@ async function unlock(page: Page): Promise<void> {
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
   await page.getByRole("button", { name: "Unlock Workspace" }).click();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeEnabled();
 }
 
 test("desktop session UX baseline (layout + interaction + scroll)", async ({
@@ -1875,9 +2274,13 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   const chatPane = page.locator(".chat-pane");
   await expect(sidebar).toBeVisible();
   await expect(chatPane).toBeVisible();
-  await expect(page.locator(".chat-context")).toContainText(
-    "local-default · /srv/work",
+  await expect(page.locator(".chat-context")).toContainText("/srv/work");
+  await expect(page.locator(".pane-summary-copy").first()).toContainText(
+    "1 project across 1",
   );
+  await expect(
+    page.getByText("Servers, project paths, and session history."),
+  ).toHaveCount(0);
   const sideBox = await sidebar.boundingBox();
   const chatBox = await chatPane.boundingBox();
   expect(sideBox).not.toBeNull();
@@ -1885,23 +2288,19 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   expect(Math.abs((chatBox?.y ?? 0) - (sideBox?.y ?? 0)) <= 40).toBeTruthy();
   expect((chatBox?.width ?? 0) >= 600).toBeTruthy();
 
-  const projectFilter = page.getByPlaceholder("Filter projects or sessions");
+  const projectFilter = page.getByPlaceholder("Search projects or threads");
   await expect(projectFilter).toBeVisible();
   await projectFilter.fill("session 1");
   await expect(page.locator(".session-chip-tree")).toHaveCount(1);
   await projectFilter.fill("not-found-session");
   await expect(
-    page.getByText("No matching projects or sessions."),
+    page.getByText("No matching projects or threads."),
   ).toBeVisible();
   await projectFilter.fill("");
-  await page.getByRole("button", { name: "Collapse" }).first().click();
-  await expect(
-    page.getByRole("button", { name: "Expand" }).first(),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Expand" }).first().click();
+  await expect(page.locator(".project-host-pill").first()).toBeVisible();
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill("line-a");
   await composer.press("Shift+Enter");
@@ -1916,7 +2315,9 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   await expect
     .poll(
       () =>
-        composer.evaluate((el) => Number.parseFloat(getComputedStyle(el).height)),
+        composer.evaluate((el) =>
+          Number.parseFloat(getComputedStyle(el).height),
+        ),
       {
         message: "composer textarea should grow for multiline prompts",
       },
@@ -1932,10 +2333,18 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
     hasText: marker,
   });
   await expect(assistantWithMarker).toHaveCount(1);
-  await expect(page.locator(".message.message-assistant .message-title-row")).toHaveCount(0);
-  await expect(page.locator(".message.message-user .message-title-row")).toHaveCount(0);
-  await expect(page.locator(".message.message-assistant .message-meta time")).toHaveCount(1);
-  await expect(page.locator(".message.message-user .message-meta time")).toHaveCount(1);
+  await expect(
+    page.locator(".message.message-assistant .message-title-row"),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".message.message-user .message-title-row"),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".message.message-assistant .message-meta time"),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(".message.message-user .message-meta time"),
+  ).toHaveCount(1);
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 
@@ -1944,6 +2353,33 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
     Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop),
   );
   expect(scrollGap <= 48).toBeTruthy();
+});
+
+test("top shell keeps utilities secondary to the active session workspace", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SHELL_REDUCTION_${Date.now()}`;
+  await mockSessionApi(page, `shell reduction ${marker}`, marker);
+  await unlock(page);
+
+  const topbar = page.locator(".app-topbar");
+  await expect(
+    topbar.getByRole("button", { name: "Utilities", exact: true }),
+  ).toBeVisible();
+  await expect(
+    topbar.getByRole("button", { name: "Session", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    topbar.getByRole("button", { name: "Ops", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    topbar.getByRole("button", { name: "Refresh", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    topbar.getByRole("button", { name: "Lock", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("stream-status")).toContainText("Connected");
 });
 
 test("jump-to-latest appears when timeline grows off-bottom", async ({
@@ -1959,7 +2395,7 @@ test("jump-to-latest appears when timeline grows off-bottom", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   const largePrompt = Array.from(
     { length: 56 },
@@ -2008,7 +2444,7 @@ test("composer supports image paste and drag-drop upload", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   const composerPanel = page.locator(".composer");
 
@@ -2020,12 +2456,17 @@ test("composer supports image paste and drag-drop upload", async ({ page }) => {
     node.dispatchEvent(event);
   });
   await expect.poll(() => harness.imageUploads()).toBe(1);
-  await expect(page.getByRole("button", { name: /mock-image-01\.png/i })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /mock-image-01\.png/i }),
+  ).toBeVisible();
 
   await composerPanel.evaluate((node) => {
     const data = new DataTransfer();
     data.items.add(new File(["img-drop"], "drop.png", { type: "image/png" }));
-    const dragEnter = new Event("dragenter", { bubbles: true, cancelable: true });
+    const dragEnter = new Event("dragenter", {
+      bubbles: true,
+      cancelable: true,
+    });
     Object.defineProperty(dragEnter, "dataTransfer", { value: data });
     node.dispatchEvent(dragEnter);
   });
@@ -2042,7 +2483,9 @@ test("composer supports image paste and drag-drop upload", async ({ page }) => {
     node.dispatchEvent(drop);
   });
   await expect.poll(() => harness.imageUploads()).toBe(2);
-  await expect(page.getByRole("button", { name: /mock-image-02\.png/i })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /mock-image-02\.png/i }),
+  ).toBeVisible();
 });
 
 test("tree interactions return focus to composer", async ({ page }) => {
@@ -2054,7 +2497,7 @@ test("tree interactions return focus to composer", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.focus();
   await expect(composer).toBeFocused();
@@ -2099,7 +2542,9 @@ test("command palette executes session and model actions", async ({ page }) => {
   await expect(paletteInput).toBeVisible();
   await paletteInput.fill("new session");
   await paletteInput.press("Enter");
-  await expect.poll(async () => sessionChips.count()).toBe(initialSessionCount + 1);
+  await expect
+    .poll(async () => sessionChips.count())
+    .toBe(initialSessionCount + 1);
 });
 
 test("ops codex platform auth panel runs status action", async ({ page }) => {
@@ -2108,17 +2553,21 @@ test("ops codex platform auth panel runs status action", async ({ page }) => {
   const harness = await mockSessionApi(page, `platform auth ${marker}`, marker);
   await unlock(page);
 
-  await page.getByRole("button", { name: "Ops", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Codex Platform" })).toBeVisible();
+  await page.getByRole("button", { name: "Utilities", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Codex Platform" }),
+  ).toBeVisible();
 
   await page.getByTestId("platform-login-status-btn").click();
   await expect(page.getByTestId("platform-login-output")).toContainText(
     "Logged in as test-user.",
   );
-  await expect.poll(() => {
-    const req = harness.lastPlatformLoginRequest();
-    return String(req?.action ?? "");
-  }).toBe("status");
+  await expect
+    .poll(() => {
+      const req = harness.lastPlatformLoginRequest();
+      return String(req?.action ?? "");
+    })
+    .toBe("status");
 });
 
 test("ops codex platform mcp/cloud controls map requests", async ({ page }) => {
@@ -2127,41 +2576,47 @@ test("ops codex platform mcp/cloud controls map requests", async ({ page }) => {
   const harness = await mockSessionApi(page, `platform req ${marker}`, marker);
   await unlock(page);
 
-  await page.getByRole("button", { name: "Ops", exact: true }).click();
+  await page.getByRole("button", { name: "Utilities", exact: true }).click();
 
   await page.getByTestId("platform-mcp-action-select").selectOption("add");
   await page.getByTestId("platform-mcp-name-input").fill("memory");
   await page.getByTestId("platform-mcp-command-input").fill("npx @acme/mcp");
   await page.getByTestId("platform-mcp-env-input").fill("TOKEN_ENV=RLM");
   await page.getByTestId("platform-mcp-run-btn").click();
-  await expect.poll(() => {
-    const req = harness.lastPlatformMCPRequest() as
-      | { action?: string; command?: string[]; env?: string[] }
-      | null;
-    const action = String(req?.action ?? "");
-    const command = Array.isArray(req?.command) ? req.command.join(" ") : "";
-    const env = Array.isArray(req?.env) ? req.env.join(",") : "";
-    return `${action}|${command}|${env}`;
-  }).toBe("add|npx @acme/mcp|TOKEN_ENV=RLM");
+  await expect
+    .poll(() => {
+      const req = harness.lastPlatformMCPRequest() as {
+        action?: string;
+        command?: string[];
+        env?: string[];
+      } | null;
+      const action = String(req?.action ?? "");
+      const command = Array.isArray(req?.command) ? req.command.join(" ") : "";
+      const env = Array.isArray(req?.env) ? req.env.join(",") : "";
+      return `${action}|${command}|${env}`;
+    })
+    .toBe("add|npx @acme/mcp|TOKEN_ENV=RLM");
 
   await page.getByTestId("platform-cloud-action-select").selectOption("exec");
   await page.getByTestId("platform-cloud-env-id-input").fill("env_staging");
-  await page.getByTestId("platform-cloud-query-input").fill("ship release notes");
+  await page
+    .getByTestId("platform-cloud-query-input")
+    .fill("ship release notes");
   await page.getByTestId("platform-cloud-attempts-input").fill("2");
   await page.getByTestId("platform-cloud-branch-input").fill("staging");
   await page.getByTestId("platform-cloud-run-btn").click();
-  await expect.poll(() => {
-    const req = harness.lastPlatformCloudRequest() as
-      | {
-          action?: string;
-          env_id?: string;
-          query?: string;
-          attempts?: number;
-          branch?: string;
-        }
-      | null;
-    return `${String(req?.action ?? "")}|${String(req?.env_id ?? "")}|${String(req?.query ?? "")}|${String(req?.attempts ?? "")}|${String(req?.branch ?? "")}`;
-  }).toBe("exec|env_staging|ship release notes|2|staging");
+  await expect
+    .poll(() => {
+      const req = harness.lastPlatformCloudRequest() as {
+        action?: string;
+        env_id?: string;
+        query?: string;
+        attempts?: number;
+        branch?: string;
+      } | null;
+      return `${String(req?.action ?? "")}|${String(req?.env_id ?? "")}|${String(req?.query ?? "")}|${String(req?.attempts ?? "")}|${String(req?.branch ?? "")}`;
+    })
+    .toBe("exec|env_staging|ship release notes|2|staging");
 });
 
 test("advanced codex controls map into run payload", async ({ page }) => {
@@ -2189,87 +2644,133 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await page.getByTestId("advanced-ephemeral-toggle").check();
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`advanced settings ${marker}`);
   await composer.press("Enter");
   await expect.poll(() => harness.runRequests()).toBe(1);
 
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { approval_policy?: string } | null;
-    return String(req?.approval_policy ?? "");
-  }).toBe("never");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { sandbox?: string } | null;
-    return String(req?.sandbox ?? "");
-  }).toBe("workspace-write");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { cwd?: string } | null;
-    return String(req?.cwd ?? "");
-  }).toBe("/srv/work");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as {
-      input?: Array<{ type?: string; text?: string }>;
-    } | null;
-    const first = Array.isArray(req?.input) ? req.input[0] : undefined;
-    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}`;
-  }).toBe(`text:advanced settings ${marker}`);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { model?: string } | null;
-    return String(req?.model ?? "").trim().length > 0;
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { mode?: string } | null;
-    return String(req?.mode ?? "");
-  }).toBe("exec");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { search?: boolean } | null;
-    return Boolean(req?.search);
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { profile?: string } | null;
-    return String(req?.profile ?? "");
-  }).toBe("default");
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { config?: string[] } | null;
-    return Array.isArray(req?.config) && req.config.includes("sandbox_workspace_write=true");
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { enable?: string[] } | null;
-    return Array.isArray(req?.enable) && req.enable.includes("web_search");
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { disable?: string[] } | null;
-    return Array.isArray(req?.disable) && req.disable.includes("legacy_preview");
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { add_dirs?: string[] } | null;
-    return Array.isArray(req?.add_dirs) && req.add_dirs.includes("/srv/extra");
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { skip_git_repo_check?: boolean } | null;
-    return req?.skip_git_repo_check === false;
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { ephemeral?: boolean } | null;
-    return Boolean(req?.ephemeral);
-  }).toBe(true);
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as { json_output?: boolean } | null;
-    return Boolean(req?.json_output);
-  }).toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as {
+        approval_policy?: string;
+      } | null;
+      return String(req?.approval_policy ?? "");
+    })
+    .toBe("never");
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { sandbox?: string } | null;
+      return String(req?.sandbox ?? "");
+    })
+    .toBe("workspace-write");
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { cwd?: string } | null;
+      return String(req?.cwd ?? "");
+    })
+    .toBe("/srv/work");
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as {
+        input?: Array<{ type?: string; text?: string }>;
+      } | null;
+      const first = Array.isArray(req?.input) ? req.input[0] : undefined;
+      return `${String(first?.type ?? "")}:${String(first?.text ?? "")}`;
+    })
+    .toBe(`text:advanced settings ${marker}`);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { model?: string } | null;
+      return String(req?.model ?? "").trim().length > 0;
+    })
+    .toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { mode?: string } | null;
+      return String(req?.mode ?? "");
+    })
+    .toBe("exec");
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { search?: boolean } | null;
+      return Boolean(req?.search);
+    })
+    .toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { profile?: string } | null;
+      return String(req?.profile ?? "");
+    })
+    .toBe("default");
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { config?: string[] } | null;
+      return (
+        Array.isArray(req?.config) &&
+        req.config.includes("sandbox_workspace_write=true")
+      );
+    })
+    .toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { enable?: string[] } | null;
+      return Array.isArray(req?.enable) && req.enable.includes("web_search");
+    })
+    .toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { disable?: string[] } | null;
+      return (
+        Array.isArray(req?.disable) && req.disable.includes("legacy_preview")
+      );
+    })
+    .toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { add_dirs?: string[] } | null;
+      return (
+        Array.isArray(req?.add_dirs) && req.add_dirs.includes("/srv/extra")
+      );
+    })
+    .toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as {
+        skip_git_repo_check?: boolean;
+      } | null;
+      return req?.skip_git_repo_check === false;
+    })
+    .toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { ephemeral?: boolean } | null;
+      return Boolean(req?.ephemeral);
+    })
+    .toBe(true);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as { json_output?: boolean } | null;
+      return Boolean(req?.json_output);
+    })
+    .toBe(true);
 });
 
 test("pending command approval can be resolved inline", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `PENDING_REQUEST_${Date.now()}`;
-  const harness = await mockSessionApi(page, `pending request ${marker}`, marker, {
-    pendingRequestScenario: "command-approval",
-  });
+  const harness = await mockSessionApi(
+    page,
+    `pending request ${marker}`,
+    marker,
+    {
+      pendingRequestScenario: "command-approval",
+    },
+  );
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`pending request ${marker}`);
   await composer.press("Enter");
@@ -2280,12 +2781,14 @@ test("pending command approval can be resolved inline", async ({ page }) => {
   await expect(pendingCard).toContainText("git status --short");
 
   await page.getByTestId("pending-request-decision-accept").click();
-  await expect.poll(() => {
-    const req = harness.lastPendingResolveRequest() as
-      | { result?: { decision?: string } }
-      | null;
-    return String(req?.result?.decision ?? "");
-  }).toBe("accept");
+  await expect
+    .poll(() => {
+      const req = harness.lastPendingResolveRequest() as {
+        result?: { decision?: string };
+      } | null;
+      return String(req?.result?.decision ?? "");
+    })
+    .toBe("accept");
   await expect(page.getByTestId("pending-request-card")).toHaveCount(0);
 });
 
@@ -2295,25 +2798,356 @@ test("composer submits codex exec payload", async ({ page }) => {
   const harness = await mockSessionApi(page, `exec ${marker}`, marker);
   await unlock(page);
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`exec payload ${marker}`);
   await composer.press("Enter");
   await expect(composer).toHaveValue("");
   await expect.poll(() => harness.runRequests()).toBe(1);
 
-  await expect.poll(() => {
-    const req = harness.lastRunRequest() as {
-      input?: Array<{ type?: string; text?: string }>;
-      cwd?: string;
-      mode?: string;
-    } | null;
-    const first = Array.isArray(req?.input) ? req.input[0] : undefined;
-    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}|${String(req?.cwd ?? "")}|${String(req?.mode ?? "")}`;
-  }).toBe(`text:exec payload ${marker}|/srv/work|exec`);
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as {
+        input?: Array<{ type?: string; text?: string }>;
+        cwd?: string;
+        mode?: string;
+      } | null;
+      const first = Array.isArray(req?.input) ? req.input[0] : undefined;
+      return `${String(first?.type ?? "")}:${String(first?.text ?? "")}|${String(req?.cwd ?? "")}|${String(req?.mode ?? "")}`;
+    })
+    .toBe(`text:exec payload ${marker}|/srv/work|exec`);
 });
 
-test("fork session creates a branch session in project list", async ({ page }) => {
+test("review pane stays secondary but drives review payloads", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_MODE_${Date.now()}`;
+  const harness = await mockSessionApi(page, `review result ${marker}`, marker);
+  await unlock(page);
+
+  await expect(page.getByTestId("review-pane")).toHaveCount(0);
+  await page.getByTestId("review-pane-toggle").click();
+  await expect(page.getByTestId("review-pane")).toBeVisible();
+
+  await page.keyboard.press("Control+Alt+b");
+  await expect(page.getByTestId("review-pane")).toHaveCount(0);
+  await page.keyboard.press("Control+Alt+b");
+  await expect(page.getByTestId("review-pane")).toBeVisible();
+
+  await page.getByTestId("review-mode-review").click();
+  await page.getByTestId("review-uncommitted-toggle").check();
+  await page.getByTestId("review-base-input").fill("staging");
+  await page.getByTestId("review-commit-input").fill("HEAD~2");
+  await page.getByTestId("review-title-input").fill("Native parity review");
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`review payload ${marker}`);
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as {
+        mode?: string;
+        review_uncommitted?: boolean;
+        review_base?: string;
+        review_commit?: string;
+        review_title?: string;
+      } | null;
+      return JSON.stringify({
+        mode: req?.mode ?? "",
+        review_uncommitted: Boolean(req?.review_uncommitted),
+        review_base: req?.review_base ?? "",
+        review_commit: req?.review_commit ?? "",
+        review_title: req?.review_title ?? "",
+      });
+    })
+    .toBe(
+      JSON.stringify({
+        mode: "review",
+        review_uncommitted: true,
+        review_base: "staging",
+        review_commit: "HEAD~2",
+        review_title: "Native parity review",
+      }),
+    );
+
+  await expect(page.getByTestId("review-findings")).toContainText(marker);
+});
+
+test("review pane starts a dedicated review turn via review/start", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_START_${Date.now()}`;
+  const harness = await mockSessionApi(page, `review result ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await expect(page.getByTestId("review-pane")).toBeVisible();
+  await page.getByTestId("review-mode-review").click();
+  await page.getByTestId("review-base-input").fill("main");
+  await page.getByTestId("review-title-input").fill("Native review sweep");
+  await page.getByTestId("review-start-btn").click();
+
+  await expect.poll(() => harness.runRequests()).toBe(0);
+  await expect
+    .poll(() => {
+      const req = harness.lastReviewStartRequest() as {
+        host_id?: string;
+        path?: string;
+        title?: string;
+        review_base?: string;
+        review_title?: string;
+        delivery?: string;
+      } | null;
+      return JSON.stringify({
+        host_id: req?.host_id ?? "",
+        path: req?.path ?? "",
+        title: req?.title ?? "",
+        review_base: req?.review_base ?? "",
+        review_title: req?.review_title ?? "",
+        delivery: req?.delivery ?? "",
+      });
+    })
+    .toBe(
+      JSON.stringify({
+        host_id: "local_1",
+        path: "/srv/work",
+        title: "Session 1",
+        review_base: "main",
+        review_title: "Native review sweep",
+        delivery: "inline",
+      }),
+    );
+});
+
+test("review pane surfaces changed files away from the main chat flow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_CHANGES_${Date.now()}`;
+  const harness = await mockSessionApi(
+    page,
+    `review changes ${marker}`,
+    marker,
+    {
+      runtimeFileChangeEvents: true,
+    },
+  );
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await expect(page.getByTestId("review-pane")).toBeVisible();
+  await page.getByTestId("review-mode-review").click();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`review changed files ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+  await expect(page.locator(".timeline")).not.toContainText("Patch Applied");
+
+  const changeList = page.getByTestId("review-change-list");
+  await expect(changeList).toContainText("src/app.ts");
+  await expect(changeList).toContainText("docs/review-plan.md");
+
+  const docsChange = page.getByTestId("review-change-item").filter({
+    hasText: "docs/review-plan.md",
+  });
+  await docsChange.click();
+  await expect(page.getByTestId("review-change-detail")).toContainText(
+    "docs/review-plan.md",
+  );
+  await expect(page.getByTestId("review-change-detail")).toContainText(
+    "Patch Applied",
+  );
+  await expect(page.getByTestId("review-change-diff")).toContainText(
+    "+++ b/docs/review-plan.md",
+  );
+  await expect(page.getByTestId("review-change-diff")).toContainText(
+    "+# Review plan",
+  );
+});
+
+test("review pane stages, reverts, and commits through project git actions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_GIT_${Date.now()}`;
+  const harness = await mockSessionApi(
+    page,
+    `review changes ${marker}`,
+    marker,
+    {
+      runtimeFileChangeEvents: true,
+    },
+  );
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await page.getByTestId("review-mode-review").click();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`review git actions ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const changeList = page.getByTestId("review-change-list");
+  await expect(changeList).toContainText("src/app.ts");
+  await expect(changeList).toContainText("docs/review-plan.md");
+  await expect(page.getByTestId("review-git-status")).toContainText(
+    "2 repo changes",
+  );
+
+  const docsChange = page.getByTestId("review-change-item").filter({
+    hasText: "docs/review-plan.md",
+  });
+  await docsChange.click();
+  await page.getByTestId("review-change-stage").click();
+  await expect
+    .poll(() => {
+      const req = harness.lastProjectGitActionRequest();
+      const paths = Array.isArray(req?.body?.paths)
+        ? req?.body?.paths.map((item) => String(item))
+        : [];
+      return `${req?.action ?? ""}|${paths.join(",")}`;
+    })
+    .toBe("stage|docs/review-plan.md");
+  await expect(docsChange).toContainText("Staged");
+
+  await page.getByTestId("review-change-revert").click();
+  await expect
+    .poll(() => {
+      const req = harness.lastProjectGitActionRequest();
+      const paths = Array.isArray(req?.body?.paths)
+        ? req?.body?.paths.map((item) => String(item))
+        : [];
+      return `${req?.action ?? ""}|${paths.join(",")}`;
+    })
+    .toBe("revert|docs/review-plan.md");
+  await expect(changeList).not.toContainText("docs/review-plan.md");
+
+  const srcChange = page.getByTestId("review-change-item").filter({
+    hasText: "src/app.ts",
+  });
+  await srcChange.click();
+  await page.getByTestId("review-change-stage").click();
+  await expect
+    .poll(() => {
+      const req = harness.lastProjectGitActionRequest();
+      const paths = Array.isArray(req?.body?.paths)
+        ? req?.body?.paths.map((item) => String(item))
+        : [];
+      return `${req?.action ?? ""}|${paths.join(",")}`;
+    })
+    .toBe("stage|src/app.ts");
+
+  await page.getByTestId("review-commit-message").fill("Native review commit");
+  await page.getByTestId("review-commit-btn").click();
+  await expect
+    .poll(() => {
+      const req = harness.lastProjectGitActionRequest();
+      return `${req?.action ?? ""}|${String(req?.body?.message ?? "")}`;
+    })
+    .toBe("commit|Native review commit");
+  await expect(page.getByTestId("review-change-empty")).toBeVisible();
+  await expect(page.getByTestId("review-git-status")).toContainText(
+    "0 repo changes",
+  );
+});
+
+test("review pane scopes notes to the selected file and lets the reviewer dismiss them", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_LINKED_${Date.now()}`;
+  const assistantReply = [
+    `src/app.ts still couples the review adapter to the chat shell. ${marker}`,
+    `docs/review-plan.md should call out the new review workflow separately. ${marker}`,
+  ].join("\n\n");
+  const harness = await mockSessionApi(page, assistantReply, marker, {
+    runtimeFileChangeEvents: true,
+  });
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await page.getByTestId("review-mode-review").click();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`review linked files ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const docsChange = page.getByTestId("review-change-item").filter({
+    hasText: "docs/review-plan.md",
+  });
+  await docsChange.click();
+  await expect(page.getByTestId("review-file-findings")).toContainText(
+    "docs/review-plan.md",
+  );
+  await expect(page.getByTestId("review-file-findings")).not.toContainText(
+    "src/app.ts",
+  );
+
+  await page.getByTestId("review-change-mark-reviewed").click();
+  await expect(page.getByTestId("review-change-mark-reviewed")).toContainText(
+    "Reviewed",
+  );
+
+  await page
+    .getByTestId("review-file-findings")
+    .getByTestId("review-finding-dismiss")
+    .click();
+  await expect(page.getByTestId("review-file-findings")).toHaveCount(0);
+  await expect(page.getByTestId("review-restore-dismissed")).toBeVisible();
+});
+
+test("review pane consumes app-server diff notifications before file cards settle", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `REVIEW_PROTOCOL_DIFF_${Date.now()}`;
+  const harness = await mockSessionApi(
+    page,
+    `protocol diff ${marker}`,
+    marker,
+    {
+      protocolDiffEvents: true,
+    },
+  );
+  await unlock(page);
+
+  await page.getByTestId("review-pane-toggle").click();
+  await page.getByTestId("review-mode-review").click();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`consume protocol diff ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect(page.getByTestId("review-turn-diff")).toContainText(
+    "+++ b/docs/review-plan.md",
+  );
+  await expect(page.getByTestId("review-turn-diff")).toContainText(
+    '+  return "native workbench";',
+  );
+});
+
+test("fork session creates a branch session in project list", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `FORK_${Date.now()}`;
   await mockSessionApi(page, `fork ${marker}`, marker);
@@ -2330,7 +3164,9 @@ test("fork session creates a branch session in project list", async ({ page }) =
   ).toHaveCount(1);
 });
 
-test("new session stays active after remote session binding", async ({ page }) => {
+test("new session stays active after remote session binding", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `REMOTE_BIND_${Date.now()}`;
   const harness = await mockSessionApi(page, `remote bind ${marker}`, marker, {
@@ -2339,16 +3175,20 @@ test("new session stays active after remote session binding", async ({ page }) =
   await unlock(page);
 
   const initialActive = page.locator(".session-chip-tree.active").first();
-  await expect(initialActive).toHaveAttribute("data-session-id", "session_cli_1");
+  await expect(initialActive).toHaveAttribute(
+    "data-session-id",
+    "session_cli_1",
+  );
 
   await page.getByRole("button", { name: "New Session", exact: true }).click();
 
   const draftActive = page.locator(".session-chip-tree.active").first();
-  const draftSessionID = (await draftActive.getAttribute("data-session-id")) ?? "";
+  const draftSessionID =
+    (await draftActive.getAttribute("data-session-id")) ?? "";
   expect(draftSessionID.startsWith("session_")).toBeTruthy();
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`keep the new remote session active ${marker}`);
   await composer.press("Enter");
@@ -2379,7 +3219,7 @@ test("session stream completion keeps a single assistant reply", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`reply once with marker: ${marker}`);
   await composer.press("Enter");
@@ -2399,7 +3239,9 @@ test("session stream completion keeps a single assistant reply", async ({
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 });
 
-test("session stream renders command runtime cards", async ({ page }) => {
+test("session stream keeps command runtime cards out of the main chat flow", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `RUNTIME_CARD_${Date.now()}`;
   const harness = await mockSessionApi(page, `runtime ${marker}`, marker, {
@@ -2409,15 +3251,88 @@ test("session stream renders command runtime cards", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`emit runtime command cards ${marker}`);
   await composer.press("Enter");
   await expect.poll(() => harness.runRequests()).toBe(1);
+  await expect(page.locator(".timeline")).not.toContainText("Command Started");
+  await expect(page.locator(".timeline")).not.toContainText(
+    "Command Completed",
+  );
+  await expect(page.locator(".timeline")).not.toContainText("ls -la");
+});
 
-  await expect(page.getByText("Command Started")).toBeVisible();
-  await expect(page.getByText("Command Completed")).toBeVisible();
-  await expect(page.getByText(/^ls -la$/)).toBeVisible();
+test("terminal drawer mirrors project command output and supports clear shortcut", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TERMINAL_DRAWER_${Date.now()}`;
+  const harness = await mockSessionApi(page, `terminal ${marker}`, marker, {
+    streamPattern: "completion-once",
+    runtimeCommandEvents: true,
+  });
+  await unlock(page);
+
+  await expect(page.getByTestId("terminal-drawer")).toHaveCount(0);
+  await page.getByTestId("terminal-drawer-toggle").click();
+  await expect(page.getByTestId("terminal-drawer")).toBeVisible();
+  await expect(page.getByTestId("terminal-empty-copy")).toBeVisible();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`emit terminal output ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const terminalList = page.getByTestId("terminal-command-list");
+  await expect(terminalList).toContainText("Command Completed");
+  await expect(terminalList).toContainText("ls -la");
+  await expect(terminalList).toContainText("README.md");
+  await expect(terminalList).toContainText("pty_cmd_1");
+
+  await page.keyboard.press("Control+l");
+  await expect(page.getByTestId("terminal-command-list")).toHaveCount(0);
+  await expect(page.getByTestId("terminal-empty-copy")).toBeVisible();
+
+  await page.keyboard.press("Control+j");
+  await expect(page.getByTestId("terminal-drawer")).toHaveCount(0);
+  await page.keyboard.press("Control+j");
+  await expect(page.getByTestId("terminal-drawer")).toBeVisible();
+});
+
+test("terminal drawer consumes app-server output delta and stdin interaction events", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TERMINAL_PROTOCOL_${Date.now()}`;
+  const harness = await mockSessionApi(
+    page,
+    `terminal protocol ${marker}`,
+    marker,
+    {
+      protocolTerminalEvents: true,
+    },
+  );
+  await unlock(page);
+
+  await page.getByTestId("terminal-drawer-toggle").click();
+  await expect(page.getByTestId("terminal-drawer")).toBeVisible();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`emit terminal protocol ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const terminalList = page.getByTestId("terminal-command-list");
+  await expect(terminalList).toContainText("pty_cmd_1");
+  await expect(terminalList).toContainText("total 4");
+  await expect(terminalList).toContainText("README.md");
+  await expect(terminalList).toContainText("1 inputs");
+  await expect(terminalList).toContainText("q");
 });
 
 test("pending command approval resumes the session after allow", async ({
@@ -2425,13 +3340,18 @@ test("pending command approval resumes the session after allow", async ({
 }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `PENDING_APPROVAL_${Date.now()}`;
-  const harness = await mockSessionApi(page, `approval complete ${marker}`, marker, {
-    pendingRequestScenario: "command-approval",
-  });
+  const harness = await mockSessionApi(
+    page,
+    `approval complete ${marker}`,
+    marker,
+    {
+      pendingRequestScenario: "command-approval",
+    },
+  );
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`needs approval ${marker}`);
   await composer.press("Enter");
@@ -2468,7 +3388,7 @@ test("stop and regenerate controls work in session composer", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`run long task ${marker}`);
   await composer.press("Enter");
@@ -2477,10 +3397,10 @@ test("stop and regenerate controls work in session composer", async ({
   const stopButton = page.getByRole("button", { name: "Stop", exact: true });
   await expect(stopButton).toBeVisible();
   await stopButton.click();
+  await expect(page.getByRole("heading", { name: "Stopping" })).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Stopping" }),
-  ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeEnabled({
     timeout: 12000,
   });
   await composer.fill(`regen after stop ${marker}`);
@@ -2495,12 +3415,14 @@ test("user message supports edit and resend", async ({ page }) => {
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`initial prompt ${marker}`);
   await composer.press("Enter");
   await expect.poll(() => harness.runRequests()).toBe(1);
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeEnabled({
     timeout: 12000,
   });
 
@@ -2543,7 +3465,7 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`check cursor replay safety ${marker}`);
   await composer.press("Enter");
@@ -2561,13 +3483,17 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
   ).toHaveCount(1);
   await expect(page.getByText("Response Started")).toHaveCount(0);
   await expect(page.getByText("Server Completed")).toHaveCount(0);
-  await expect.poll(
-    () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
-  ).toBe(true);
+  await expect
+    .poll(() =>
+      harness.sessionOneStreamAfterValues().some((value) => value > 0),
+    )
+    .toBe(true);
   await expect(page.locator(".session-alert")).toHaveCount(0);
 });
 
-test("archived session can be restored and survives reload", async ({ page }) => {
+test("archived session can be restored and survives reload", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `SESSION_RESTORE_${Date.now()}`;
   await mockSessionApi(page, `restore session ${marker}`, marker, {
@@ -2576,7 +3502,7 @@ test("archived session can be restored and survives reload", async ({ page }) =>
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`archive and restore ${marker}`);
   await composer.press("Enter");
@@ -2641,14 +3567,19 @@ test("server replay ignores cursor but timeline stays deduped", async ({
 }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `CURSOR_IGNORE_${Date.now()}`;
-  const harness = await mockSessionApi(page, `dedupe replay ${marker}`, marker, {
-    streamPattern: "completion-once",
-    ignoreStreamAfterCursor: true,
-  });
+  const harness = await mockSessionApi(
+    page,
+    `dedupe replay ${marker}`,
+    marker,
+    {
+      streamPattern: "completion-once",
+      ignoreStreamAfterCursor: true,
+    },
+  );
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`dedupe replay ${marker}`);
   await composer.press("Enter");
@@ -2661,9 +3592,11 @@ test("server replay ignores cursor but timeline stays deduped", async ({
   await page.reload();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(assistantEntry).toHaveCount(1);
-  await expect.poll(
-    () => harness.sessionOneStreamAfterValues().some((value) => value > 0),
-  ).toBe(true);
+  await expect
+    .poll(() =>
+      harness.sessionOneStreamAfterValues().some((value) => value > 0),
+    )
+    .toBe(true);
   await expect(page.locator(".session-alert")).toHaveCount(0);
 });
 
@@ -2696,11 +3629,15 @@ test("websocket stream replay renders once without SSE fallback", async ({
       page.evaluate(() => {
         const state = (
           window as unknown as {
-            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+            __mockWsState?: {
+              calls: Array<{ sessionID: string; after: number }>;
+            };
           }
         ).__mockWsState;
         return Array.isArray(state?.calls)
-          ? state.calls.some((item) => item.sessionID === "session_cli_1" && item.after > 0)
+          ? state.calls.some(
+              (item) => item.sessionID === "session_cli_1" && item.after > 0,
+            )
           : false;
       }),
     )
@@ -2723,7 +3660,7 @@ test("websocket reset reconnect completes once without SSE fallback", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`trigger ws reset ${marker}`);
   await composer.press("Enter");
@@ -2740,7 +3677,9 @@ test("websocket reset reconnect completes once without SSE fallback", async ({
     hasText: marker,
   });
   await expect(assistantEntry).toHaveCount(1);
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeEnabled({
     timeout: 12000,
   });
   await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
@@ -2749,11 +3688,15 @@ test("websocket reset reconnect completes once without SSE fallback", async ({
       page.evaluate(() => {
         const state = (
           window as unknown as {
-            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+            __mockWsState?: {
+              calls: Array<{ sessionID: string; after: number }>;
+            };
           }
         ).__mockWsState;
         return Array.isArray(state?.calls)
-          ? state.calls.some((item) => item.sessionID === "session_cli_1" && item.after > 0)
+          ? state.calls.some(
+              (item) => item.sessionID === "session_cli_1" && item.after > 0,
+            )
           : false;
       }),
     )
@@ -2776,7 +3719,7 @@ test("websocket repeated resets reconnect and complete once", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`trigger ws flaky reset ${marker}`);
   await composer.press("Enter");
@@ -2793,7 +3736,9 @@ test("websocket repeated resets reconnect and complete once", async ({
     hasText: marker,
   });
   await expect(assistantEntry).toHaveCount(1);
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeEnabled({
     timeout: 15000,
   });
   await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
@@ -2802,11 +3747,15 @@ test("websocket repeated resets reconnect and complete once", async ({
       page.evaluate(() => {
         const state = (
           window as unknown as {
-            __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
+            __mockWsState?: {
+              calls: Array<{ sessionID: string; after: number }>;
+            };
           }
         ).__mockWsState;
         if (!Array.isArray(state?.calls)) return false;
-        const calls = state.calls.filter((item) => item.sessionID === "session_cli_1");
+        const calls = state.calls.filter(
+          (item) => item.sessionID === "session_cli_1",
+        );
         const hasAfter2 = calls.some((item) => item.after >= 2);
         const hasAfter3 = calls.some((item) => item.after >= 3);
         return hasAfter2 && hasAfter3;
@@ -2839,26 +3788,21 @@ test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
   await expect(sessionTwo).toHaveClass(/active/);
   await expect(page.getByRole("heading", { name: "Session 2" })).toBeVisible();
 
-  const projectFilter = page.getByPlaceholder("Filter projects or sessions");
+  const projectFilter = page.getByPlaceholder("Search projects or threads");
   await projectFilter.fill("session 2");
   await expect
     .poll(async () => {
-      return page.evaluate(() =>
-        window.localStorage.getItem("remote_llm_session_tree_prefs_v1") ?? "",
+      return page.evaluate(
+        () =>
+          window.localStorage.getItem("remote_llm_session_tree_prefs_v1") ?? "",
       );
     })
     .toContain("session 2");
-  await page.getByRole("button", { name: "Collapse" }).first().click();
-  await expect(
-    page.getByRole("button", { name: "Expand" }).first(),
-  ).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(projectFilter).toHaveValue("session 2");
-  await expect(
-    page.getByRole("button", { name: "Expand" }).first(),
-  ).toBeVisible();
+  await expect(page.locator(".project-host-pill").first()).toBeVisible();
 });
 
 test("project create and rename use project name as primary label", async ({
@@ -2870,9 +3814,7 @@ test("project create and rename use project name as primary label", async ({
   await unlock(page);
 
   await page.getByRole("button", { name: "New Project" }).click();
-  await page
-    .getByPlaceholder("/path/to/project")
-    .fill("/srv/demo-app");
+  await page.getByPlaceholder("/path/to/project").fill("/srv/demo-app");
   await page.getByPlaceholder("My Project").fill("Demo App");
   await page.getByRole("button", { name: "Create" }).click();
 
@@ -2895,6 +3837,47 @@ test("project create and rename use project name as primary label", async ({
   ).toBeVisible();
 });
 
+test("only the active project surfaces management actions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `PROJECT_ACTIONS_${Date.now()}`;
+  await mockSessionApi(page, `project actions ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByRole("button", { name: "New Project" }).click();
+  await page.getByPlaceholder("/path/to/project").fill("/srv/demo-app");
+  await page.getByPlaceholder("My Project").fill("Demo App");
+  await page.getByRole("button", { name: "Create" }).click();
+
+  const demoProjectNode = page.locator(".project-node", {
+    has: page.locator(".project-chip-main strong", { hasText: "Demo App" }),
+  });
+  const workProjectNode = page.locator(".project-node", {
+    has: page.locator(".project-chip-main strong", { hasText: "work" }),
+  });
+
+  await expect(
+    demoProjectNode
+      .locator(".project-node-actions")
+      .getByRole("button", { name: "Rename" }),
+  ).toBeVisible();
+  await expect(
+    demoProjectNode
+      .locator(".project-node-actions")
+      .getByRole("button", { name: "Archive" }),
+  ).toBeVisible();
+
+  await workProjectNode.locator(".project-chip").click();
+
+  await expect(demoProjectNode.locator(".project-node-actions")).toHaveCount(0);
+  await expect(
+    workProjectNode
+      .locator(".project-node-actions")
+      .getByRole("button", { name: "Rename" }),
+  ).toBeVisible();
+});
+
 test("archiving an empty project removes it from the project list", async ({
   page,
 }) => {
@@ -2908,9 +3891,13 @@ test("archiving an empty project removes it from the project list", async ({
   await page.getByPlaceholder("My Project").fill("Archive Demo");
   await page.getByRole("button", { name: "Create" }).click();
 
-  const archiveDemoNode = page.locator(".project-node", {
-    has: page.locator(".project-chip-main strong", { hasText: "Archive Demo" }),
-  }).first();
+  const archiveDemoNode = page
+    .locator(".project-node", {
+      has: page.locator(".project-chip-main strong", {
+        hasText: "Archive Demo",
+      }),
+    })
+    .first();
   await expect(archiveDemoNode).toBeVisible();
 
   page.once("dialog", async (dialog) => {
@@ -2929,16 +3916,16 @@ test("archiving an empty project removes it from the project list", async ({
   ).toBeVisible();
 });
 
-test("active project is prioritized to top of project list", async ({ page }) => {
+test("active project is prioritized to top of project list", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `PROJECT_ORDER_${Date.now()}`;
   await mockSessionApi(page, `project order ${marker}`, marker);
   await unlock(page);
 
   await page.getByRole("button", { name: "New Project" }).click();
-  await page
-    .getByPlaceholder("/path/to/project")
-    .fill("/srv/zzz-project");
+  await page.getByPlaceholder("/path/to/project").fill("/srv/zzz-project");
   await page.getByPlaceholder("My Project").fill("zzz Project");
   await page.getByRole("button", { name: "Create" }).click();
 
@@ -2997,11 +3984,15 @@ test("server snapshot prunes stale local project cache on unlock", async ({
     page.locator(".project-chip-main strong", { hasText: "work" }),
   ).toBeVisible();
   await expect(
-    page.locator(".project-chip-main strong", { hasText: "Stale Cache Project" }),
+    page.locator(".project-chip-main strong", {
+      hasText: "Stale Cache Project",
+    }),
   ).toHaveCount(0);
 });
 
-test("background completion shows one alert and unread badge", async ({ page }) => {
+test("background completion shows one alert and unread badge", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `BG_${Date.now()}`;
   await mockSessionApi(page, `background ${marker}`, marker, {
@@ -3033,7 +4024,9 @@ test("background completion shows one alert and unread badge", async ({ page }) 
   ).toHaveCount(0);
 });
 
-test("background completion does not steal active session after manual switch", async ({ page }) => {
+test("background completion does not steal active session after manual switch", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `BG_SWITCH_${Date.now()}`;
   await mockSessionApi(page, `background ${marker}`, marker, {
@@ -3043,8 +4036,12 @@ test("background completion does not steal active session after manual switch", 
   });
   await unlock(page);
 
-  const session1Chip = page.locator('.session-chip-tree[data-session-id="session_cli_1"]');
-  const session2Chip = page.locator('.session-chip-tree[data-session-id="session_cli_2"]');
+  const session1Chip = page.locator(
+    '.session-chip-tree[data-session-id="session_cli_1"]',
+  );
+  const session2Chip = page.locator(
+    '.session-chip-tree[data-session-id="session_cli_2"]',
+  );
   await session2Chip.click();
   await expect(session2Chip).toHaveClass(/active/);
 
@@ -3059,14 +4056,16 @@ test("background completion does not steal active session after manual switch", 
   await expect(session2Chip).not.toHaveClass(/active/);
 });
 
-test("generic session title is auto-derived from first prompt", async ({ page }) => {
+test("generic session title is auto-derived from first prompt", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `TITLE_${Date.now()}`;
   await mockSessionApi(page, `title ${marker}`, marker);
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await expect(page.getByRole("heading", { name: "Session 1" })).toBeVisible();
   await composer.fill("Plan deployment rollback strategy for staging API");
@@ -3082,7 +4081,9 @@ test("generic session title is auto-derived from first prompt", async ({ page })
   ).toContainText(/Plan deployment rollback strategy for staging API/i);
 });
 
-test("session title stream update overrides fallback title", async ({ page }) => {
+test("session title stream update overrides fallback title", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `TITLE_EVT_${Date.now()}`;
   await mockSessionApi(page, `title-evt ${marker}`, marker, {
@@ -3091,7 +4092,7 @@ test("session title stream update overrides fallback title", async ({ page }) =>
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill("Create rollout checklist for QA and release validation");
   await composer.press("Enter");
@@ -3113,7 +4114,7 @@ test("running state locks session controls then unlocks on completion", async ({
   await unlock(page);
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   const runningButton = page.getByRole("button", { name: "Running..." });
   const modelSelect = page.getByTestId("session-model-select");
@@ -3129,7 +4130,9 @@ test("running state locks session controls then unlocks on completion", async ({
   await expect(sandboxSelect).toBeDisabled();
   await expect(attachInput).toBeDisabled();
 
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled({
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeEnabled({
     timeout: 18000,
   });
   await expect(modelSelect).toBeEnabled();
@@ -3150,37 +4153,44 @@ test("stream status recovers after transient failures", async ({ page }) => {
   let sawRetryState = false;
   for (let index = 0; index < 16; index += 1) {
     const text = (await streamStatus.innerText()).toLowerCase();
-    if (text.includes("reconnecting") || text.includes("stream error")) {
+    if (text.includes("reconnecting") || text.includes("needs attention")) {
       sawRetryState = true;
       break;
     }
     await page.waitForTimeout(500);
   }
   expect(sawRetryState).toBeTruthy();
-  await expect(streamStatus).toContainText("stream live", { timeout: 15000 });
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(streamStatus).toContainText("Connected", { timeout: 15000 });
 
   const composer = page.getByPlaceholder(
-    "Tell codex what to do in this workspace...",
+    "Ask Codex to work in this project...",
   );
   await composer.fill(`recover ${marker}`);
   await composer.press("Enter");
   await expect.poll(() => harness.runRequests()).toBe(1);
   await expect(
-    page.locator(".message.message-assistant pre", { hasText: `recover ${marker}` }),
+    page.locator(".message.message-assistant pre", {
+      hasText: `recover ${marker}`,
+    }),
   ).toHaveCount(1, { timeout: 15000 });
-  await expect.poll(() => harness.sessionOneStreamAfterValues().length >= 3).toBe(
-    true,
-  );
+  await expect
+    .poll(() => harness.sessionOneStreamAfterValues().length >= 3)
+    .toBe(true);
   expect(harness.sessionOneStreamAfterValues().slice(0, 3)).toEqual([0, 0, 0]);
 
-  await page.getByRole("button", { name: "Reconnect" }).click();
-  await expect(streamStatus).toContainText("stream live", { timeout: 10000 });
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
 });
 
-test("pinning session reorders tree and persists across reload", async ({ page }) => {
+test("pinning session reorders tree and persists across reload", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `PIN_${Date.now()}`;
-  await mockSessionApi(page, `pin ${marker}`, marker, { includeSecondSession: true });
+  await mockSessionApi(page, `pin ${marker}`, marker, {
+    includeSecondSession: true,
+  });
   await unlock(page);
 
   const sessionTwo = page.locator(
@@ -3235,7 +4245,9 @@ test("mobile session UX baseline (stacked layout + no horizontal overflow)", asy
   expect(overflowX <= 2).toBeTruthy();
 
   await expect(
-    page.getByPlaceholder("Tell codex what to do in this workspace..."),
+    page.getByPlaceholder("Ask Codex to work in this project..."),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeVisible();
 });

@@ -3,11 +3,11 @@ import { useCallback, useEffect, useState } from "react";
 export type AppMode = "session" | "ops";
 
 function modeFromHash(hash: string): AppMode {
-  return hash === "#/ops" ? "ops" : "session";
+  return hash === "#/ops" || hash === "#/utilities" ? "ops" : "session";
 }
 
 function modeToHash(mode: AppMode): string {
-  return mode === "ops" ? "#/ops" : "#/session";
+  return mode === "ops" ? "#/utilities" : "#/session";
 }
 
 export function useAppMode() {

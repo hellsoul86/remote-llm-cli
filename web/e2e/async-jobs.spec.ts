@@ -241,7 +241,14 @@ async function mockSessionApi(
     },
   );
 
-  const fulfillSessionStream = async (route: Parameters<Page["route"]>[1] extends (route: infer T, ...args: infer _R) => any ? T : never) => {
+  const fulfillSessionStream = async (
+    route: Parameters<Page["route"]>[1] extends (
+      route: infer T,
+      ...args: infer _R
+    ) => any
+      ? T
+      : never,
+  ) => {
     const url = new URL(route.request().url());
     const afterRaw = url.searchParams.get("after") ?? "0";
     const after = Number.parseInt(afterRaw, 10);
@@ -391,9 +398,12 @@ async function mockSessionApi(
     });
   };
 
-  await page.route("**/v2/codex/sessions/session_cli_1/stream**", async (route) => {
-    await fulfillSessionStream(route);
-  });
+  await page.route(
+    "**/v2/codex/sessions/session_cli_1/stream**",
+    async (route) => {
+      await fulfillSessionStream(route);
+    },
+  );
 
   await page.route("**/v1/sessions/session_cli_1/stream**", async (route) => {
     await fulfillSessionStream(route);
@@ -410,25 +420,31 @@ async function unlock(page: Page): Promise<void> {
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
   await page.getByRole("button", { name: "Unlock Workspace" }).click();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeEnabled();
 }
 
 test("queues codex v2 turn and renders stream completion", async ({ page }) => {
   const harness = await mockSessionApi(page, "success");
   await unlock(page);
 
-  const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
   await composer.fill("smoke");
   await composer.press("Enter");
   await expect(composer).toHaveValue("");
 
   await expect.poll(() => harness.turnRequests()).toBe(1);
-  await expect.poll(() => {
-    const req = harness.lastTurnRequest();
-    const input = Array.isArray(req?.input) ? req.input : [];
-    const first = input[0] as { type?: string; text?: string } | undefined;
-    return `${String(first?.type ?? "")}:${String(first?.text ?? "")}`;
-  }).toBe("text:smoke");
+  await expect
+    .poll(() => {
+      const req = harness.lastTurnRequest();
+      const input = Array.isArray(req?.input) ? req.input : [];
+      const first = input[0] as { type?: string; text?: string } | undefined;
+      return `${String(first?.type ?? "")}:${String(first?.text ?? "")}`;
+    })
+    .toBe("text:smoke");
 
   await expect(page.getByText(/stream-one/)).toBeVisible();
   await expect(page.getByText(/"type":"thread.started"/)).toHaveCount(0);
@@ -439,7 +455,9 @@ test("renders assistant response from v2 stream delta", async ({ page }) => {
   const harness = await mockSessionApi(page, "assistant");
   await unlock(page);
 
-  const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
   await composer.fill("smoke");
   await composer.press("Enter");
 
@@ -449,16 +467,22 @@ test("renders assistant response from v2 stream delta", async ({ page }) => {
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 });
 
-test("shows target failure details when v2 stream reports failed target", async ({ page }) => {
+test("shows target failure details when v2 stream reports failed target", async ({
+  page,
+}) => {
   const harness = await mockSessionApi(page, "failure");
   await unlock(page);
 
-  const composer = page.getByPlaceholder("Tell codex what to do in this workspace...");
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
   await composer.fill("smoke");
   await composer.press("Enter");
 
   await expect.poll(() => harness.turnRequests()).toBe(1);
   await expect(page.getByText(/local-default failed/)).toBeVisible();
-  await expect(page.getByText(/local command failed: exit status 1/)).toBeVisible();
+  await expect(
+    page.getByText(/local command failed: exit status 1/),
+  ).toBeVisible();
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 });

@@ -49,6 +49,7 @@ type Server struct {
 	codexBridgeSub map[string]func()
 	codexPending   map[string]map[string]codexPendingRequest
 	codexNotifSeen map[string]map[string]time.Time
+	projectTerms   map[string]*projectTerminalSession
 }
 
 type authIdentity struct {
@@ -127,6 +128,7 @@ func NewWithOptions(st *store.Store, rt *runtime.Registry, opts ServerOptions) *
 		codexBridgeSub: map[string]func(){},
 		codexPending:   map[string]map[string]codexPendingRequest{},
 		codexNotifSeen: map[string]map[string]time.Time{},
+		projectTerms:   map[string]*projectTerminalSession{},
 		runViaSSH:      executor.RunViaSSH,
 		runRsyncViaSSH: executor.RunRsyncViaSSH,
 	}
@@ -175,6 +177,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v2/codex/sessions/{id}/unarchive", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionUnarchive)))
 	mux.Handle("POST /v2/codex/sessions/{id}/name", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionSetName)))
 	mux.Handle("POST /v2/codex/sessions/{id}/sync", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionSync)))
+	mux.Handle("POST /v2/codex/sessions/{id}/review/start", s.withAuth(http.HandlerFunc(s.handleCodexV2ReviewStart)))
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/start", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnStart)))
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/interrupt", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnInterrupt)))
 	mux.Handle("POST /v2/codex/sessions/{id}/turns/{turn_id}/steer", s.withAuth(http.HandlerFunc(s.handleCodexV2TurnSteer)))
@@ -183,6 +186,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v2/codex/sessions/{id}/events", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionEvents)))
 	mux.Handle("GET /v2/codex/sessions/{id}/stream", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionStream)))
 	mux.Handle("GET /v2/codex/sessions/{id}/ws", s.withAuth(http.HandlerFunc(s.handleCodexV2SessionWS)))
+	mux.Handle("GET /v2/projects/{id}/git/status", s.withAuth(http.HandlerFunc(s.handleGetProjectGitStatus)))
+	mux.Handle("POST /v2/projects/{id}/git/stage", s.withAuth(http.HandlerFunc(s.handleStageProjectGitPaths)))
+	mux.Handle("POST /v2/projects/{id}/git/revert", s.withAuth(http.HandlerFunc(s.handleRevertProjectGitPaths)))
+	mux.Handle("POST /v2/projects/{id}/git/commit", s.withAuth(http.HandlerFunc(s.handleCommitProjectGitChanges)))
+	mux.Handle("GET /v2/projects/{id}/terminal/ws", s.withAuth(http.HandlerFunc(s.handleProjectTerminalWS)))
 	mux.Handle("POST /v1/files/images", s.withAuth(http.HandlerFunc(s.handleUploadImage)))
 	mux.Handle("GET /v1/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
 	mux.Handle("GET /v1/admin/retention", s.withAuth(http.HandlerFunc(s.handleGetRetentionPolicy)))
@@ -3849,6 +3857,8 @@ func inferAction(method string, path string) string {
 		return "codex.v2.session.unarchive"
 	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/name"):
 		return "codex.v2.session.name"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/review/start"):
+		return "codex.v2.review.start"
 	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/turns/start"):
 		return "codex.v2.turn.start"
 	case method == http.MethodPost && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.Contains(path, "/turns/") && strings.HasSuffix(path, "/interrupt"):
@@ -3865,6 +3875,16 @@ func inferAction(method string, path string) string {
 		return "codex.v2.session.stream.open"
 	case method == http.MethodGet && strings.HasPrefix(path, "/v2/codex/sessions/") && strings.HasSuffix(path, "/ws"):
 		return "codex.v2.session.ws.open"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/projects/") && strings.HasSuffix(path, "/git/status"):
+		return "project.git.status.get"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/projects/") && strings.HasSuffix(path, "/git/stage"):
+		return "project.git.stage"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/projects/") && strings.HasSuffix(path, "/git/revert"):
+		return "project.git.revert"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v2/projects/") && strings.HasSuffix(path, "/git/commit"):
+		return "project.git.commit"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v2/projects/") && strings.HasSuffix(path, "/terminal/ws"):
+		return "project.terminal.ws.open"
 	case method == http.MethodPost && path == "/v1/files/images":
 		return "files.image.upload"
 	case method == http.MethodGet && path == "/v1/metrics":

@@ -1,21 +1,9 @@
-import {
-  FormEvent,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import {
-  API_BASE,
-} from "./api";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { API_BASE } from "./api";
 import { useOpsDomain } from "./domains/ops";
-import {
-  clearStoredToken,
-  loadStoredToken,
-} from "./domains/auth-token";
-import {
-  useSessionDomain,
-} from "./domains/session";
+import { clearStoredToken, loadStoredToken } from "./domains/auth-token";
+import { isSecondarySurfaceTimelineEntry } from "./domains/timeline-noise";
+import { useSessionDomain } from "./domains/session";
 import { AppChrome } from "./features/session/components/AppChrome";
 import { CommandPalette } from "./features/session/components/CommandPalette";
 import { OpsStage } from "./features/session/components/OpsStage";
@@ -40,11 +28,14 @@ import { useSessionStreamHealth } from "./features/session/use-session-stream-he
 import { useTimelineEntryBody } from "./features/session/use-timeline-entry-body";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import { useCodexPendingRequests } from "./features/session/use-codex-pending-requests";
+import { useProjectReviewGit } from "./features/session/use-project-review-git";
+import { useProjectTerminalSession } from "./features/session/use-project-terminal-session";
 import { createProjectSourceActions } from "./features/session/project-source-actions";
 import { createHostActions } from "./features/session/host-actions";
 import { createOpsJobActions } from "./features/session/ops-job-actions";
 import { createProjectActions } from "./features/session/project-actions";
 import { createComposerImageActions } from "./features/session/composer-image-actions";
+import { createSessionReviewAction } from "./features/session/session-review-action";
 import { createSessionControlActions } from "./features/session/session-control-actions";
 import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
 import { createSessionSubmitAction } from "./features/session/session-submit-action";
@@ -70,18 +61,20 @@ import {
   loadSessionTreePrefs,
   persistSessionTreePrefs,
 } from "./features/session/persistence";
-import {
-  type SessionTreeHost,
-} from "./features/session/types";
+import { type SessionTreeHost } from "./features/session/types";
 import {
   collectVisibleTreeSessionIDs,
   filterSessionTreeHosts,
   buildSessionTreeHosts,
 } from "./features/session/tree";
 import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
+import { createSessionRunEventHandlers } from "./features/session/session-run-events";
 import {
-  createSessionRunEventHandlers,
-} from "./features/session/session-run-events";
+  parseCodexFileChangesBody,
+  parseCodexCommandEventBody,
+  parseCodexPatchDeltaBody,
+  parseCodexTurnDiffBody,
+} from "./features/session/codex-parsing";
 import {
   createSessionStreamController,
   type SessionStreamRuntimeState,
@@ -109,9 +102,7 @@ function isLocalDraftSessionID(sessionID: string): boolean {
 export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
-  const [tokenInput, setTokenInput] = useState<string>(
-    () => loadStoredToken(),
-  );
+  const [tokenInput, setTokenInput] = useState<string>(() => loadStoredToken());
   const [authError, setAuthError] = useState("");
   const { appMode, switchMode } = useAppMode();
 
@@ -197,6 +188,11 @@ export function App() {
     removeThread,
     switchThreadByOffset,
     setThreadModel,
+    setThreadCodexMode,
+    setThreadReviewUncommitted,
+    setThreadReviewBase,
+    setThreadReviewCommit,
+    setThreadReviewTitle,
     setThreadSandbox,
     setThreadApprovalPolicy,
     setThreadWebSearch,
@@ -269,13 +265,19 @@ export function App() {
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
   const [sessionAdvancedOpen, setSessionAdvancedOpen] = useState(false);
+  const [reviewPaneOpen, setReviewPaneOpen] = useState(false);
+  const [terminalDrawerOpen, setTerminalDrawerOpen] = useState(false);
+  const [terminalClearCutoffByThread, setTerminalClearCutoffByThread] =
+    useState<Record<string, string>>({});
   const [addDirDraft, setAddDirDraft] = useState("");
   const [configFlagDraft, setConfigFlagDraft] = useState("");
   const [enableFlagDraft, setEnableFlagDraft] = useState("");
   const [disableFlagDraft, setDisableFlagDraft] = useState("");
   const [composerDropActive, setComposerDropActive] = useState(false);
   const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
-  const [projectFilter, setProjectFilter] = useState(sessionTreePrefs.projectFilter);
+  const [projectFilter, setProjectFilter] = useState(
+    sessionTreePrefs.projectFilter,
+  );
   const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
     sessionTreePrefs.collapsedHostIDs,
   );
@@ -346,6 +348,22 @@ export function App() {
   const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
   const activeWorkspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
   const activeWorkspacePath = activeWorkspace?.path?.trim() ?? "";
+  const projectTerminal = useProjectTerminalSession({
+    enabled:
+      authPhase === "ready" &&
+      terminalDrawerOpen &&
+      activeWorkspaceID.trim() !== "",
+    token,
+    projectID: activeWorkspaceID,
+  });
+  const projectReviewGit = useProjectReviewGit({
+    enabled:
+      authPhase === "ready" &&
+      reviewPaneOpen &&
+      activeWorkspaceID.trim() !== "",
+    token,
+    projectID: activeWorkspaceID,
+  });
   const sessionTreeHosts = useMemo<SessionTreeHost[]>(
     () => buildSessionTreeHosts(hosts, workspaces, activeWorkspaceID),
     [hosts, workspaces, activeWorkspaceID],
@@ -353,9 +371,7 @@ export function App() {
   const sourceProjectIDSet = useMemo(
     () =>
       new Set(
-        sourceProjectIDs
-          .map((id) => id.trim())
-          .filter((id) => id !== ""),
+        sourceProjectIDs.map((id) => id.trim()).filter((id) => id !== ""),
       ),
     [sourceProjectIDs],
   );
@@ -364,7 +380,8 @@ export function App() {
     [projectFilter, sessionTreeHosts],
   );
   const visibleTreeSessionIDs = useMemo(
-    () => collectVisibleTreeSessionIDs(filteredSessionTreeHosts, collapsedHostIDs),
+    () =>
+      collectVisibleTreeSessionIDs(filteredSessionTreeHosts, collapsedHostIDs),
     [collapsedHostIDs, filteredSessionTreeHosts],
   );
   const activeThreadBusy =
@@ -405,18 +422,226 @@ export function App() {
       ? "connecting"
       : "offline";
   const activeStreamRetries = activeSessionStreamHealth?.retries ?? 0;
-  const activeStreamCopy = streamHealthCopy(activeStreamState, activeStreamRetries);
+  const activeStreamCopy = streamHealthCopy(
+    activeStreamState,
+    activeStreamRetries,
+  );
   const activeStreamTone = streamHealthTone(activeStreamState);
   const activeStreamLastError =
     activeSessionStreamHealth?.lastError.trim() ?? "";
   const canReconnectActiveStream =
-    authPhase === "ready" && token.trim() !== "" && activeThreadID.trim() !== "";
+    authPhase === "ready" &&
+    token.trim() !== "" &&
+    activeThreadID.trim() !== "" &&
+    activeStreamState !== "live";
+  const reviewMode = activeThread?.codexMode ?? "exec";
+  const activeTerminalClearCutoff = activeThreadID
+    ? (terminalClearCutoffByThread[activeThreadID] ?? "")
+    : "";
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
     if (sessionModelDefault.trim()) return sessionModelDefault.trim();
     return sessionModelOptions[0]?.trim() ?? "";
   }, [activeThread?.model, sessionModelDefault, sessionModelOptions]);
+  const visibleTimeline = useMemo(
+    () =>
+      activeTimeline.filter((entry) => !isSecondarySurfaceTimelineEntry(entry)),
+    [activeTimeline],
+  );
+  const reviewFindings = useMemo(
+    () =>
+      activeTimeline
+        .filter(
+          (entry) =>
+            (entry.kind === "assistant" || entry.kind === "system") &&
+            entry.body.trim() !== "" &&
+            !isSecondarySurfaceTimelineEntry(entry),
+        )
+        .slice(-6)
+        .reverse()
+        .map((entry) => ({
+          id: entry.id,
+          title:
+            entry.title.trim() ||
+            (entry.kind === "assistant" ? "Assistant" : "System"),
+          body: entry.body.trim(),
+          timestamp: formatClock(entry.createdAt),
+          tone:
+            entry.kind === "system"
+              ? ("system" as const)
+              : ("assistant" as const),
+        })),
+    [activeTimeline],
+  );
+  const reviewTurnDiff = useMemo(() => {
+    for (let index = activeTimeline.length - 1; index >= 0; index -= 1) {
+      const entry = activeTimeline[index];
+      if (!entry || entry.kind !== "system") continue;
+      if (entry.title.trim().toLowerCase() !== "review diff updated") continue;
+      const diff = parseCodexTurnDiffBody(entry.body);
+      if (diff.trim()) return diff;
+    }
+    return "";
+  }, [activeTimeline]);
+  const reviewPatchDelta = useMemo(() => {
+    return activeTimeline
+      .filter(
+        (entry) =>
+          entry.kind === "system" &&
+          entry.title.trim().toLowerCase() === "patch diff delta",
+      )
+      .map((entry) => parseCodexPatchDeltaBody(entry.body))
+      .filter((value) => value.trim() !== "")
+      .slice(-12)
+      .join("\n");
+  }, [activeTimeline]);
+  const reviewChanges = useMemo(() => {
+    const out: Array<{
+      id: string;
+      path: string;
+      kind: string;
+      state: "running" | "success" | "error";
+      title: string;
+      summary: string;
+      diff: string;
+      timestamp: string;
+    }> = [];
+    for (const entry of activeTimeline) {
+      if (entry.kind !== "system") continue;
+      const title = entry.title.trim();
+      if (!/^Patch (Started|Applied|Failed)$/i.test(title)) continue;
+      const changes = parseCodexFileChangesBody(entry.body);
+      if (changes.length === 0) continue;
+      changes.forEach((change, index) => {
+        out.push({
+          id: `${entry.id}:${index}`,
+          path: change.path,
+          kind: change.kind,
+          state: entry.state ?? "success",
+          title,
+          summary: `${change.kind} ${change.path}`,
+          diff: change.diff,
+          timestamp: formatClock(entry.createdAt),
+        });
+      });
+    }
+    return out.reverse();
+  }, [activeTimeline]);
+  const visibleReviewChanges = useMemo(() => {
+    if (!projectReviewGit.known) {
+      return reviewChanges;
+    }
+    const changedPathSet = new Set(
+      projectReviewGit.changedPaths.map((path) => path.trim()).filter(Boolean),
+    );
+    return reviewChanges.filter((change) =>
+      changedPathSet.has(change.path.trim()),
+    );
+  }, [projectReviewGit.changedPaths, projectReviewGit.known, reviewChanges]);
+  const terminalCommands = useMemo(() => {
+    const cutoffMS = activeTerminalClearCutoff
+      ? Date.parse(activeTerminalClearCutoff)
+      : Number.NaN;
+    const entries = activeTimeline.filter((entry) => {
+      if (entry.kind !== "system") return false;
+      if (
+        !/^Command (Started|Completed|Failed)$/i.test(entry.title.trim()) &&
+        entry.title.trim().toLowerCase() !== "command output delta" &&
+        entry.title.trim().toLowerCase() !== "terminal interaction"
+      ) {
+        return false;
+      }
+      if (entry.body.trim() === "") return false;
+      if (!Number.isFinite(cutoffMS)) return true;
+      const createdAtMS = Date.parse(entry.createdAt);
+      return !Number.isFinite(createdAtMS) || createdAtMS > cutoffMS;
+    });
+
+    const byCommand = new Map<
+      string,
+      {
+        id: string;
+        title: string;
+        command: string;
+        output: string;
+        interactions: string[];
+        processId: string;
+        timestamp: string;
+        state: "running" | "success" | "error";
+      }
+    >();
+
+    for (const entry of entries) {
+      const title = entry.title.trim() || "Command";
+      const metadata = parseCodexCommandEventBody(entry.body);
+      if (metadata) {
+        const key = metadata.itemId.trim() || entry.id;
+        const existing = byCommand.get(key) ?? {
+          id: key,
+          title,
+          command: metadata.command.trim() || "command",
+          output: "",
+          interactions: [],
+          processId: metadata.processId.trim(),
+          timestamp: formatClock(entry.createdAt),
+          state:
+            entry.state ??
+            (title.toLowerCase().includes("failed")
+              ? ("error" as const)
+              : title.toLowerCase().includes("completed")
+                ? ("success" as const)
+                : ("running" as const)),
+        };
+        if (metadata.command.trim()) {
+          existing.command = metadata.command.trim();
+        }
+        if (metadata.processId.trim()) {
+          existing.processId = metadata.processId.trim();
+        }
+        existing.timestamp = formatClock(entry.createdAt);
+        if (metadata.phase === "delta") {
+          existing.output = `${existing.output}${metadata.output}`;
+        } else if (metadata.phase === "interaction") {
+          existing.interactions.push(metadata.stdin);
+        } else {
+          existing.title = title;
+          existing.state =
+            entry.state ??
+            (title.toLowerCase().includes("failed")
+              ? ("error" as const)
+              : title.toLowerCase().includes("completed")
+                ? ("success" as const)
+                : ("running" as const));
+          if (metadata.output.trim()) {
+            existing.output = metadata.output;
+          }
+        }
+        byCommand.set(key, existing);
+        continue;
+      }
+
+      const [commandLine, ...outputLines] = entry.body.split("\n");
+      byCommand.set(entry.id, {
+        id: entry.id,
+        title,
+        command: commandLine?.trim() || "command",
+        output: outputLines.join("\n").trim(),
+        interactions: [],
+        processId: "",
+        timestamp: formatClock(entry.createdAt),
+        state:
+          entry.state ??
+          (title.toLowerCase().includes("failed")
+            ? ("error" as const)
+            : title.toLowerCase().includes("started")
+              ? ("running" as const)
+              : ("success" as const)),
+      });
+    }
+
+    return Array.from(byCommand.values()).slice(-8);
+  }, [activeTerminalClearCutoff, activeTimeline]);
   const sessionModelChoices = useMemo(() => {
     const seen = new Set<string>();
     const out: string[] = [];
@@ -565,7 +790,7 @@ export function App() {
       .filter((action) => action.searchText.includes(query))
       .slice(0, 48);
   }, [commandPaletteActions, commandPaletteQuery]);
-  const activeTimelineTail = activeTimeline[activeTimeline.length - 1];
+  const activeTimelineTail = visibleTimeline[visibleTimeline.length - 1];
   const {
     timelineUnreadCount,
     timelineViewportRef,
@@ -575,7 +800,7 @@ export function App() {
     forceStickToBottom,
   } = useTimelineScrollController({
     activeThreadID,
-    timelineLength: activeTimeline.length,
+    timelineLength: visibleTimeline.length,
     timelineTailID: activeTimelineTail?.id ?? "",
     timelineTailState: activeTimelineTail?.state ?? "",
     timelineTailBody: activeTimelineTail?.body ?? "",
@@ -589,6 +814,69 @@ export function App() {
     minHeight: COMPOSER_MIN_HEIGHT,
     maxHeight: COMPOSER_MAX_HEIGHT,
   });
+  useEffect(() => {
+    if (!activeThread) {
+      setReviewPaneOpen(false);
+      return;
+    }
+    if (activeThread.codexMode === "review") {
+      setReviewPaneOpen(true);
+    }
+  }, [activeThreadID, activeThread?.codexMode]);
+
+  useEffect(() => {
+    if (!activeThreadID.trim()) {
+      setTerminalDrawerOpen(false);
+    }
+  }, [activeThreadID]);
+
+  function onToggleReviewPane() {
+    if (!activeThread) return;
+    setReviewPaneOpen((prev) => !prev);
+  }
+
+  function onToggleTerminalDrawer() {
+    if (!activeThread) return;
+    setTerminalDrawerOpen((prev) => !prev);
+  }
+
+  function onClearTerminalDrawer() {
+    if (!activeThreadID.trim()) return;
+    projectTerminal.clear();
+    setTerminalClearCutoffByThread((prev) => ({
+      ...prev,
+      [activeThreadID]: new Date().toISOString(),
+    }));
+  }
+
+  function onSetActiveThreadReviewMode(mode: "exec" | "resume" | "review") {
+    if (!activeThread) return;
+    setThreadCodexMode(activeThread.id, mode);
+    if (mode === "review") {
+      setReviewPaneOpen(true);
+    }
+  }
+
+  function onSetActiveThreadReviewUncommitted(next: boolean) {
+    if (!activeThread) return;
+    setThreadReviewUncommitted(activeThread.id, next);
+  }
+
+  function onSetActiveThreadReviewBase(value: string) {
+    if (!activeThread) return;
+    setThreadReviewBase(activeThread.id, value);
+  }
+
+  function onSetActiveThreadReviewCommit(value: string) {
+    if (!activeThread) return;
+    setThreadReviewCommit(activeThread.id, value);
+  }
+
+  function onSetActiveThreadReviewTitle(value: string) {
+    if (!activeThread) return;
+    setThreadReviewTitle(activeThread.id, value);
+  }
+
   useGlobalShortcuts({
     authReady: authPhase === "ready",
     appMode,
@@ -597,6 +885,11 @@ export function App() {
     onCloseCommandPalette: () => closeCommandPalette(),
     onCreateThreadAndFocus: createThreadAndFocus,
     onSwitchThreadByOffset: switchThreadByOffset,
+    terminalDrawerOpen,
+    terminalHasLiveTransport: projectTerminal.hasLiveTransport,
+    onToggleTerminalDrawer,
+    onClearTerminalDrawer,
+    onToggleReviewPane,
   });
 
   const activeProgress = useMemo(() => {
@@ -618,12 +911,7 @@ export function App() {
     return byStatus.filter((job) => job.type === opsJobTypeFilter);
   }, [jobs, opsJobStatusFilter, opsJobTypeFilter]);
   const knownJobIDSet = useMemo(
-    () =>
-      new Set(
-        jobs
-          .map((job) => job.id.trim())
-          .filter((id) => id !== ""),
-      ),
+    () => new Set(jobs.map((job) => job.id.trim()).filter((id) => id !== "")),
     [jobs],
   );
   const runningJobPollTargets = useMemo(
@@ -673,7 +961,6 @@ export function App() {
   }, [auditEvents, opsAuditMethodFilter, opsAuditStatusFilter]);
   const healthIsError = health.startsWith("error");
   const opsNoticeIsError = /fail|error|degraded/i.test(opsNotice);
-  const syncLabel = isRefreshing ? "syncing" : "live";
 
   useEffect(() => {
     tokenRef.current = token;
@@ -731,7 +1018,10 @@ export function App() {
           }
         }
       }
-      for (const [sessionID, state] of sessionStreamStateRef.current.entries()) {
+      for (const [
+        sessionID,
+        state,
+      ] of sessionStreamStateRef.current.entries()) {
         if (!runningSessionIDs.has(sessionID)) continue;
         if (state.lastEventAt <= 0) continue;
         if (now - state.lastEventAt < 16_000) continue;
@@ -763,7 +1053,8 @@ export function App() {
 
   useEffect(() => {
     if (!projectComposerOpen) return;
-    const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
+    const fallbackHostID =
+      activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
     if (
       !projectFormHostID ||
       !hosts.some((host) => host.id === projectFormHostID)
@@ -771,7 +1062,9 @@ export function App() {
       setProjectFormHostID(fallbackHostID);
     }
     if (!projectFormPath.trim()) {
-      setProjectFormPath(activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH);
+      setProjectFormPath(
+        activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+      );
     }
   }, [
     projectComposerOpen,
@@ -801,7 +1094,9 @@ export function App() {
       return;
     }
     setTreeCursorSessionID((prev) =>
-      prev && visibleTreeSessionIDs.includes(prev) ? prev : visibleTreeSessionIDs[0],
+      prev && visibleTreeSessionIDs.includes(prev)
+        ? prev
+        : visibleTreeSessionIDs[0],
     );
   }, [visibleTreeSessionIDs]);
 
@@ -815,7 +1110,8 @@ export function App() {
 
   const { ensureLocalCodexHost, refreshProjectsFromSource } =
     createProjectSourceActions({
-      activeWorkspacePath: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+      activeWorkspacePath:
+        activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
       workspaces,
       setSourceProjectIDs,
       syncProjectsFromDiscovery,
@@ -1021,28 +1317,31 @@ export function App() {
       refreshProjectsFromSource,
     });
 
-  const { onRefreshWorkspace, onArchiveActiveSession, onReconnectActiveStream } =
-    createSessionControlActions({
-      authPhase,
-      token,
-      activeThread,
-      activeThreadID,
-      submittingThreadID,
-      activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
-      activeWorkspaceHostName: activeWorkspace?.hostName?.trim() ?? "",
-      hosts,
-      sessionRunStateRef,
-      addTimelineEntry,
-      removeThread,
-      stopSessionStream,
-      deleteSessionEventCursor,
-      refreshProjectsFromSource,
-      updateSessionStreamHealth,
-      startSessionStream,
-      loadWorkspace,
-      isLocalDraftSessionID,
-      setDeletingThreadID,
-    });
+  const {
+    onRefreshWorkspace,
+    onArchiveActiveSession,
+    onReconnectActiveStream,
+  } = createSessionControlActions({
+    authPhase,
+    token,
+    activeThread,
+    activeThreadID,
+    submittingThreadID,
+    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+    activeWorkspaceHostName: activeWorkspace?.hostName?.trim() ?? "",
+    hosts,
+    sessionRunStateRef,
+    addTimelineEntry,
+    removeThread,
+    stopSessionStream,
+    deleteSessionEventCursor,
+    refreshProjectsFromSource,
+    updateSessionStreamHealth,
+    startSessionStream,
+    loadWorkspace,
+    isLocalDraftSessionID,
+    setDeletingThreadID,
+  });
   archiveSessionActionRef.current = onArchiveActiveSession;
   reconnectStreamActionRef.current = onReconnectActiveStream;
 
@@ -1076,6 +1375,30 @@ export function App() {
     startSessionStream,
     setSubmittingThreadID,
     finalizeAssistantStreamEntry,
+    isLocalDraftSessionID,
+  });
+  const { startReviewForActiveThread } = createSessionReviewAction({
+    authPhase,
+    token,
+    activeThread,
+    submittingThreadID,
+    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+    activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
+    hosts,
+    selectedHostIDs,
+    activeThreadIDRef,
+    sessionRunStateRef,
+    sessionStreamStateRef,
+    addTimelineEntry,
+    bindThreadID,
+    stopSessionStream,
+    deleteSessionEventCursor,
+    setThreadJobState,
+    setActiveJobThreadID,
+    setActiveJobID,
+    startSessionStream,
+    setSubmittingThreadID,
+    setThreadCodexMode,
     isLocalDraftSessionID,
   });
 
@@ -1352,18 +1675,70 @@ export function App() {
     composerProps: sessionComposerProps,
     headerTitle: activeThread?.title ?? "Session",
     headerContext:
-      (activeWorkspace?.hostName?.trim() || "local-default") +
-      " · " +
-      (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH),
+      (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH) +
+      ((activeWorkspace?.hostName?.trim() || "") &&
+      activeWorkspace?.hostName?.trim() !== "local-default"
+        ? ` · ${activeWorkspace.hostName.trim()}`
+        : ""),
     streamTone: activeStreamTone,
     streamCopy: activeStreamCopy,
     streamLastError: activeStreamLastError,
+    terminalDrawerOpen,
+    canToggleTerminal: activeThread !== null,
+    onToggleTerminalDrawer,
+    terminalWorkdir: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+    terminalHostLabel: activeWorkspace?.hostName?.trim() || "",
+    terminalCommands,
+    terminalLiveStatus: projectTerminal.status,
+    terminalLiveTransportAvailable: projectTerminal.hasLiveTransport,
+    terminalLiveOutput: projectTerminal.output,
+    terminalLiveError: projectTerminal.error,
+    onTerminalSendInput: projectTerminal.sendInput,
+    onTerminalResize: projectTerminal.resize,
+    onTerminalInterrupt: projectTerminal.interrupt,
+    onTerminalReconnect: projectTerminal.reconnect,
+    onClearTerminalDrawer,
+    reviewPaneOpen,
+    canToggleReview: activeThread !== null,
+    onToggleReviewPane,
+    reviewMode,
+    reviewBusy: activeThreadBusy,
+    reviewUncommitted: activeThread?.reviewUncommitted ?? false,
+    reviewBase: activeThread?.reviewBase ?? "",
+    reviewCommit: activeThread?.reviewCommit ?? "",
+    reviewTitle: activeThread?.reviewTitle ?? "",
+    reviewTurnDiff,
+    reviewPatchDelta,
+    reviewChanges: visibleReviewChanges,
+    reviewFindings,
+    reviewGitStatusKnown: projectReviewGit.known,
+    reviewGitStatusLoading: projectReviewGit.loading,
+    reviewGitStatusMessage: projectReviewGit.message,
+    reviewGitStatusTone: projectReviewGit.tone,
+    reviewChangedPaths: projectReviewGit.changedPaths,
+    reviewStagedPaths: projectReviewGit.stagedPaths,
+    reviewGitBusyAction: projectReviewGit.busyAction,
+    onRefreshReviewGitStatus: projectReviewGit.refresh,
+    onStageReviewChange: projectReviewGit.stagePath,
+    onRevertReviewChange: projectReviewGit.revertPath,
+    onCommitReviewChanges: projectReviewGit.commitChanges,
+    canStartReview:
+      Boolean(activeThread) &&
+      !activeThreadBusy &&
+      authPhase === "ready" &&
+      token.trim() !== "",
+    onStartReview: startReviewForActiveThread,
+    onSetReviewMode: onSetActiveThreadReviewMode,
+    onSetReviewUncommitted: onSetActiveThreadReviewUncommitted,
+    onSetReviewBase: onSetActiveThreadReviewBase,
+    onSetReviewCommit: onSetActiveThreadReviewCommit,
+    onSetReviewTitle: onSetActiveThreadReviewTitle,
     canArchive: Boolean(activeThread) && !activeThreadBusy,
     archiving: Boolean(activeThread && deletingThreadID === activeThread.id),
     onArchive: onArchiveActiveSession,
     canReconnect: canReconnectActiveStream,
     onReconnect: onReconnectActiveStream,
-    timeline: activeTimeline,
+    timeline: visibleTimeline,
     isRefreshing,
     renderTimelineEntryBody,
     formatClock,
@@ -1378,12 +1753,12 @@ export function App() {
     <div className="workspace-shell">
       <AppChrome
         appMode={appMode}
-        onSwitchMode={switchMode}
         isRefreshing={isRefreshing}
         healthIsError={healthIsError}
         health={health}
-        syncLabel={syncLabel}
         onRefreshWorkspace={onRefreshWorkspace}
+        onOpenUtilities={() => switchMode("ops")}
+        onReturnToSession={() => switchMode("session")}
         onLogout={onLogout}
       />
 
@@ -1405,7 +1780,6 @@ export function App() {
         onHoverAction={setCommandPaletteCursor}
         onRunAction={runCommandPaletteAction}
       />
-
     </div>
   );
 }

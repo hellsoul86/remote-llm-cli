@@ -90,6 +90,7 @@ type InteractiveProcess struct {
 	stdin   io.WriteCloser
 	stdout  io.ReadCloser
 	stderr  io.ReadCloser
+	resize  func(rows int, cols int) error
 
 	waitOnce sync.Once
 	waitErr  error
@@ -124,6 +125,19 @@ func (p *InteractiveProcess) StderrPipe() io.ReadCloser {
 		return nil
 	}
 	return p.stderr
+}
+
+func (p *InteractiveProcess) Resize(rows int, cols int) error {
+	if p == nil {
+		return errors.New("interactive process is nil")
+	}
+	if p.resize == nil {
+		return nil
+	}
+	if rows <= 0 || cols <= 0 {
+		return nil
+	}
+	return p.resize(rows, cols)
 }
 
 func (p *InteractiveProcess) Wait() error {

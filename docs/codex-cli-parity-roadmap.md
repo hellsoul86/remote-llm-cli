@@ -6,14 +6,17 @@ Align WebCLI with the native Codex app interaction model first, while treating C
 
 Execution tracking:
 
-- UX contract: `docs/codex-native-ux-contract-v2.md`
+- Feature inventory: `docs/codex-macos-feature-inventory.md`
+- Gap matrix: `docs/codex-web-gap-matrix.md`
+- UX contract: `docs/codex-native-ux-contract-v3.md`
 - Epic: #137
 - Reset/design issue: #192
+- Implementation issue: #200
 
 This document defines:
 
 - what the native Codex experience should feel like,
-- which Codex controls still matter in web,
+- which official app surfaces are first-wave blockers,
 - where current WebCLI still deviates,
 - the phased order to close those gaps.
 
@@ -23,105 +26,99 @@ Reference binary on staging controller host:
 
 - `codex-cli 0.107.0`
 
-Reference command families (from `codex --help` and subcommand helps):
+Reference app baseline:
 
-- interactive/root options (`model`, `sandbox`, approval policy, `--search`, `--add-dir`, image attach, profile/config/feature toggles)
-- `exec` / `exec resume` / `exec review`
-- `resume` / `fork`
-- `login` / `logout` / `login status`
-- `mcp` server management (`list/get/add/remove/login/logout`)
-- `cloud` task lifecycle (`exec/status/list/diff/apply`) [experimental]
+- official Codex app docs and screenshots
+- official app-server protocol and tests
 
-## Parity Scope
+## First-wave Blocking Scope
 
-In scope first:
+The first parity wave is not session-only anymore. It must land these together:
 
-- session-first Codex app parity in web (projects, sessions, chat, streaming, model/sandbox/image, resume/fork/review workflows)
-- user-facing controls that directly affect Codex behavior, but only when they fit a native-feeling session shell
-- interaction calmness: low-noise chrome, contextual actions, and background sync that stays out of the way
+- workbench-first shell
+- project/thread navigator that weakens host prominence
+- content-first conversation workbench
+- composer redesign
+- review pane
+- terminal drawer
+- background completion fidelity
+- visual and live parity gates
 
-Out of scope for first parity wave:
+The following must be fully designed now but are not first-wave implementation blockers:
 
-- shell completion generation
-- `sandbox` subcommand wrappers (OS sandbox launcher)
-- app-server protocol tooling
-- low-level debug tooling
-
-Primary acceptance is no longer raw option coverage. The web shell must feel close to the macOS app baseline before parity is claimed.
+- settings
+- skills browser and remote skills flows
+- automations
+- cloud mode
+- pop-out windows / stay-on-top
 
 ## Capability Matrix
 
 Legend:
 
-- `✅` implemented
-- `🟡` partial
-- `❌` missing
+- `Keep`
+- `Redesign`
+- `Add`
+- `Defer`
 
-| Area | Codex Capability | WebCLI Status | Notes |
-| --- | --- | --- | --- |
-| Session chat | Streaming interactive conversation | ✅ | SSE + session cursor resume in place |
-| Session list | Resume existing sessions by project/workdir | ✅ | Host -> Project(path) -> Session tree |
-| Session title | Auto title updates | ✅ | Uses `session.title.updated` event |
-| Background completion | Non-active session completion reminder | ✅ | Notification + in-app alert |
-| Composer | Enter send / Shift+Enter newline | ✅ | Implemented |
-| Attach image | `--image` | 🟡 | Supported, currently only for local-mode targets |
-| Model select | `--model` | ✅ | Discovered model catalog + per-session model |
-| Sandbox select | `--sandbox` | ✅ | Per-session selector in chat pane |
-| Approval policy | `--ask-for-approval` | ✅ | Session-level selector in composer advanced panel |
-| Web search | `--search` | ✅ | Session-level toggle in composer advanced panel |
-| Extra writable dirs | `--add-dir` | ✅ | Session-level add/remove controls in composer advanced panel |
-| Profile/config flags | `--profile`, `-c`, `--enable`, `--disable` | ❌ | Not exposed in chat UX |
-| Exec mode | `codex exec` | ✅ | Main session send flow |
-| Resume mode | `codex exec resume` / `codex resume` | ✅ | Session mode selector + resume target controls |
-| Fork mode | `codex fork` | ✅ | Session fork action integrated in composer controls |
-| Review mode | `codex review` / `exec review` | ✅ | Session mode selector + review options |
-| Ephemeral | `--ephemeral` | ✅ | Advanced toggle mapped into codex request |
-| Skip git check | `--skip-git-repo-check` | ✅ | Advanced toggle mapped into codex request |
-| JSON output | `--json` | ✅ | Advanced toggle mapped into codex request |
-| Login visibility | `codex login status` | 🟡 | Implemented, but still too coupled to the main shell |
-| MCP mgmt | `codex mcp ...` | 🟡 | Implemented, but should move to secondary utility surfaces |
-| Cloud tasks | `codex cloud ...` | 🟡 | Implemented, but should not shape the primary session workspace |
-
-## Native Gap Reset
-
-Current high-priority UX gaps relative to the native target:
-
-1. Primary shell still feels like a controller dashboard.
-2. Sidebar is too CRUD-heavy and not compact enough as navigation.
-3. Session header exposes transport mechanics too prominently.
-4. Composer exposes too many settings in the default path.
-5. Utility/ops surfaces are too close to the core chat workflow.
+| Area | Decision | Notes |
+| --- | --- | --- |
+| Global shell | Redesign | Remove dashboard split and make workbench primary |
+| Host visibility | Redesign | Host becomes secondary context |
+| Project/thread navigator | Redesign | Compact, native-feeling left rail |
+| Timeline core | Keep | Deduped content rendering remains useful |
+| Header | Redesign | Remove transport emphasis |
+| Composer | Redesign | Input-first shell with compact controls |
+| Image attach | Keep | Preserve existing attach path |
+| Command palette | Keep | Keep as a core native affordance |
+| Review pane | Add | Native diff/review surface |
+| Terminal drawer | Add | Native bottom-docked terminal |
+| Worktree bar | Add | Context bar for project/worktree actions |
+| Settings/skills/automations/cloud | Defer | Design now, implement later |
+| Visual regression | Add | Screenshot-level acceptance |
+| Live parity gate | Add | Real staging flows against native contract |
 
 ## Implementation Phases
 
-### Phase P0: Shell Reduction
+### Phase P0: Documentation Baseline
 
-- demote controller/ops chrome out of the primary session shell
-- make the session workbench visually dominant
-- remove acceptance language that rewards exposed controls over interaction quality
+- feature inventory
+- gap matrix
+- native UX contract v3
 
-### Phase P1: Sidebar Parity
+### Phase P1: Shell Reduction
 
-- compress host/project/session navigation
-- move project/session management into contextual actions
-- strengthen running/unread/background completion states
+- demote utilities out of the primary shell
+- remove controller-first chrome from the default path
+- make workbench visually dominant
 
-### Phase P2: Session Workbench Parity
+### Phase P2: Navigator Parity
 
-- simplify session header to title + minimal context
-- keep timeline content-first and low-noise
-- redesign composer so model/permission/image are compact and contextual
-- keep rare flags behind a secondary surface
+- flatten project-first navigation
+- weaken host prominence
+- move create/rename/archive into lighter surfaces
 
-### Phase P3: Utility Surface Parity
+### Phase P3: Workbench Parity
 
-- move auth, MCP, cloud, and diagnostics into secondary surfaces
-- ensure these remain reachable without becoming the app's primary mental model
+- simplify header
+- keep timeline content-first
+- redesign composer so model/permission/image stay compact and contextual
+
+### Phase P4: Review + Terminal
+
+- add a real review pane
+- add a real terminal drawer
+- connect both to thread/project context rather than chat noise
+
+### Phase P5: Parity Gates
+
+- visual regression snapshots
+- live staging workbench flows
+- soak signoff against the v3 contract
 
 ## UX Rules For Parity Work
 
-- no `job`/`run id` mental model in session mode UI
-- session pane stays focused: chat content first, controls minimal and contextual
-- advanced options hidden by default, but complete when expanded
-- non-active session completion must remain reliable and visible
-- a feature is not considered parity-complete if it makes the main shell feel more like an admin console than a native session workspace
+- no `job` or transport mental model in the default thread path
+- utilities must be secondary surfaces
+- unsupported capabilities must be hidden, not teased as dead controls
+- a feature is not considered parity-complete if it makes the app feel more like an admin console than a native Codex workbench

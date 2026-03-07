@@ -13,7 +13,9 @@ function lowerTrimmedString(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
-export function extractThreadIDFromCodexSessionResponse(value: unknown): string {
+export function extractThreadIDFromCodexSessionResponse(
+  value: unknown,
+): string {
   const record = asRecord(value);
   if (!record) return "";
   const session = asRecord(record.session);
@@ -44,11 +46,12 @@ export function extractTurnIDFromPayload(value: unknown): string {
   }
   const item = asRecord(payload.item);
   if (item) {
-    const id = typeof item.turn_id === "string"
-      ? item.turn_id.trim()
-      : typeof item.turnId === "string"
-        ? item.turnId.trim()
-        : "";
+    const id =
+      typeof item.turn_id === "string"
+        ? item.turn_id.trim()
+        : typeof item.turnId === "string"
+          ? item.turnId.trim()
+          : "";
     if (id) return id;
   }
   return "";
@@ -61,9 +64,8 @@ export function codexRPCMethodAndParams(
   method: string;
   params: Record<string, unknown>;
 } {
-  const rawMethod = typeof payload.method === "string"
-    ? payload.method.trim()
-    : "";
+  const rawMethod =
+    typeof payload.method === "string" ? payload.method.trim() : "";
   const method = rawMethod
     ? rawMethod
     : eventType.startsWith("codexrpc.")
@@ -80,11 +82,12 @@ export function extractRunIDFromCodexRPC(
   payload: Record<string, unknown>,
 ): string {
   const { params } = codexRPCMethodAndParams("codexrpc", payload);
-  const direct = typeof params.run_id === "string"
-    ? params.run_id.trim()
-    : typeof params.runId === "string"
-      ? params.runId.trim()
-      : "";
+  const direct =
+    typeof params.run_id === "string"
+      ? params.run_id.trim()
+      : typeof params.runId === "string"
+        ? params.runId.trim()
+        : "";
   if (direct) return direct;
   return extractTurnIDFromPayload(params);
 }
@@ -178,6 +181,15 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
   return "";
 }
 
+function isAssistantDeltaEventType(eventType: string): boolean {
+  const normalized = eventType.trim().toLowerCase();
+  return (
+    normalized === "item.agent_message.delta" ||
+    normalized === "agent_message_delta" ||
+    normalized === "agent.message.delta"
+  );
+}
+
 export function parseCodexAssistantTextFromStdout(
   stdout: string,
   allowPlainTextFallback = true,
@@ -202,7 +214,7 @@ export function parseCodexAssistantTextFromStdout(
     const event = asRecord(parsed);
     if (!event) continue;
     const eventType = typeof event.type === "string" ? event.type : "";
-    if (eventType.endsWith(".delta")) {
+    if (isAssistantDeltaEventType(eventType)) {
       const deltaText = gatherMessageText(event.delta ?? event, 0, {
         preserveWhitespace: true,
       }).join("");
@@ -294,32 +306,181 @@ function codexEventIncludesApproval(text: string): boolean {
   return /(approval|declined|rejected by user|approval settings)/i.test(text);
 }
 
+export type ParsedCodexFileChange = {
+  kind: string;
+  path: string;
+  diff: string;
+};
+
+const CODEX_FILE_CHANGE_METADATA_PREFIX = "__codex_file_changes__:";
+const CODEX_TURN_DIFF_METADATA_PREFIX = "__codex_turn_diff__:";
+const CODEX_PATCH_DELTA_METADATA_PREFIX = "__codex_patch_delta__:";
+const CODEX_COMMAND_EVENT_METADATA_PREFIX = "__codex_command_event__:";
+
+export type ParsedCodexCommandEvent = {
+  itemId: string;
+  command: string;
+  processId: string;
+  phase: "lifecycle" | "delta" | "interaction";
+  output: string;
+  stdin: string;
+};
+
+function normalizeCodexFileChange(raw: unknown): ParsedCodexFileChange | null {
+  const change = asRecord(raw);
+  if (!change) return null;
+  const kind =
+    typeof change.kind === "string" && change.kind.trim() !== ""
+      ? change.kind.trim()
+      : "update";
+  const path =
+    typeof change.path === "string" && change.path.trim() !== ""
+      ? change.path.trim()
+      : "";
+  if (!path) return null;
+  const diff =
+    typeof change.diff === "string" && change.diff.trim() !== ""
+      ? change.diff.trim()
+      : "";
+  return { kind, path, diff };
+}
+
+function collectCodexFileChanges(raw: unknown): ParsedCodexFileChange[] {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  return raw
+    .map((value) => normalizeCodexFileChange(value))
+    .filter((value): value is ParsedCodexFileChange => value !== null);
+}
+
 function summarizeCodexFileChanges(raw: unknown): string {
-  if (!Array.isArray(raw) || raw.length === 0) {
+  const changes = collectCodexFileChanges(raw);
+  if (changes.length === 0) {
     return "No file changes were reported.";
   }
   const lines: string[] = [];
-  for (const value of raw) {
-    const change = asRecord(value);
-    if (!change) continue;
-    const kind =
-      typeof change.kind === "string" && change.kind.trim() !== ""
-        ? change.kind.trim()
-        : "update";
-    const path =
-      typeof change.path === "string" && change.path.trim() !== ""
-        ? change.path.trim()
-        : "(unknown path)";
-    lines.push(`${kind} ${path}`);
+  for (const change of changes) {
+    lines.push(`${change.kind} ${change.path}`);
     if (lines.length >= 5) break;
   }
   if (lines.length === 0) {
     return "No file changes were reported.";
   }
-  if (Array.isArray(raw) && raw.length > lines.length) {
-    lines.push(`...and ${raw.length - lines.length} more`);
+  if (changes.length > lines.length) {
+    lines.push(`...and ${changes.length - lines.length} more`);
   }
-  return lines.join("\n");
+  return [
+    lines.join("\n"),
+    `${CODEX_FILE_CHANGE_METADATA_PREFIX}${encodeURIComponent(
+      JSON.stringify(changes),
+    )}`,
+  ].join("\n");
+}
+
+export function parseCodexFileChangesBody(
+  body: string,
+): ParsedCodexFileChange[] {
+  const trimmed = body.trim();
+  if (!trimmed) return [];
+  const markerLine = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith(CODEX_FILE_CHANGE_METADATA_PREFIX));
+  if (markerLine) {
+    const encoded = markerLine.slice(CODEX_FILE_CHANGE_METADATA_PREFIX.length);
+    try {
+      const parsed = JSON.parse(decodeURIComponent(encoded)) as unknown;
+      const changes = collectCodexFileChanges(parsed);
+      if (changes.length > 0) {
+        return changes;
+      }
+    } catch {
+      // Fall back to legacy line parsing below.
+    }
+  }
+
+  return trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line !== "" &&
+        !line.startsWith("...and ") &&
+        !line.startsWith(CODEX_FILE_CHANGE_METADATA_PREFIX),
+    )
+    .map((line) => {
+      const [kindToken, ...pathParts] = line.split(/\s+/);
+      return {
+        kind: kindToken.trim() || "update",
+        path: pathParts.join(" ").trim(),
+        diff: "",
+      };
+    })
+    .filter((change) => change.path !== "");
+}
+
+function encodeCodexMetadata(prefix: string, payload: unknown): string {
+  return `${prefix}${encodeURIComponent(JSON.stringify(payload))}`;
+}
+
+function decodeCodexMetadata<T>(prefix: string, body: string): T | null {
+  const markerLine = body
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith(prefix));
+  if (!markerLine) return null;
+  const encoded = markerLine.slice(prefix.length);
+  try {
+    return JSON.parse(decodeURIComponent(encoded)) as T;
+  } catch {
+    return null;
+  }
+}
+
+export function parseCodexTurnDiffBody(body: string): string {
+  const parsed = decodeCodexMetadata<{ diff?: string }>(
+    CODEX_TURN_DIFF_METADATA_PREFIX,
+    body,
+  );
+  const diff = typeof parsed?.diff === "string" ? parsed.diff.trim() : "";
+  if (diff) return diff;
+  return body
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(
+      (line) =>
+        line.trim() !== "" &&
+        !line.trim().startsWith(CODEX_TURN_DIFF_METADATA_PREFIX),
+    )
+    .join("\n")
+    .trim();
+}
+
+export function parseCodexPatchDeltaBody(body: string): string {
+  const parsed = decodeCodexMetadata<{ delta?: string }>(
+    CODEX_PATCH_DELTA_METADATA_PREFIX,
+    body,
+  );
+  const delta = typeof parsed?.delta === "string" ? parsed.delta : "";
+  if (delta.trim()) return delta;
+  return body
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(
+      (line) =>
+        line.trim() !== "" &&
+        !line.trim().startsWith(CODEX_PATCH_DELTA_METADATA_PREFIX),
+    )
+    .join("\n")
+    .trim();
+}
+
+export function parseCodexCommandEventBody(
+  body: string,
+): ParsedCodexCommandEvent | null {
+  return decodeCodexMetadata<ParsedCodexCommandEvent>(
+    CODEX_COMMAND_EVENT_METADATA_PREFIX,
+    body,
+  );
 }
 
 export function buildCodexRuntimeCardFromEvent(
@@ -364,6 +525,87 @@ export function buildCodexRuntimeCardFromEvent(
   }
 
   if (
+    eventType === "turn.diff.updated" ||
+    eventType === "item.filechange.outputdelta"
+  ) {
+    const diff =
+      typeof event.diff === "string"
+        ? event.diff.trim()
+        : typeof event.delta === "string"
+          ? event.delta
+          : "";
+    if (!diff.trim()) {
+      return null;
+    }
+    const itemID =
+      typeof event.itemId === "string" && event.itemId.trim() !== ""
+        ? event.itemId.trim()
+        : "turn";
+    return {
+      key:
+        eventType === "turn.diff.updated"
+          ? `${runID}:turn-diff:${diff.length}:${diff.slice(0, 80)}`
+          : `${runID}:patch-delta:${itemID}:${diff.length}:${diff.slice(0, 80)}`,
+      title:
+        eventType === "turn.diff.updated"
+          ? "Review Diff Updated"
+          : "Patch Diff Delta",
+      body:
+        eventType === "turn.diff.updated"
+          ? encodeCodexMetadata(CODEX_TURN_DIFF_METADATA_PREFIX, { diff })
+          : encodeCodexMetadata(CODEX_PATCH_DELTA_METADATA_PREFIX, {
+              itemId: itemID,
+              delta: diff,
+            }),
+      state: "running",
+    };
+  }
+
+  if (
+    eventType === "item.commandexecution.outputdelta" ||
+    eventType === "item.commandexecution.terminalinteraction"
+  ) {
+    const itemID =
+      typeof event.itemId === "string" && event.itemId.trim() !== ""
+        ? event.itemId.trim()
+        : "command";
+    if (eventType === "item.commandexecution.outputdelta") {
+      const delta = typeof event.delta === "string" ? event.delta : "";
+      if (!delta.trim()) return null;
+      return {
+        key: `${runID}:command-delta:${itemID}:${delta.length}:${delta.slice(0, 80)}`,
+        title: "Command Output Delta",
+        body: encodeCodexMetadata(CODEX_COMMAND_EVENT_METADATA_PREFIX, {
+          itemId: itemID,
+          command: "",
+          processId: "",
+          phase: "delta",
+          output: delta,
+          stdin: "",
+        }),
+        state: "running",
+      };
+    }
+    const stdin = typeof event.stdin === "string" ? event.stdin : "";
+    const processId =
+      typeof event.processId === "string" ? event.processId.trim() : "";
+    if (!stdin.trim()) return null;
+    return {
+      key: `${runID}:terminal-interaction:${itemID}:${processId}:${stdin.length}:${stdin.slice(0, 80)}`,
+      title: "Terminal Interaction",
+      body: encodeCodexMetadata(CODEX_COMMAND_EVENT_METADATA_PREFIX, {
+        itemId: itemID,
+        command: "",
+        processId,
+        phase: "interaction",
+        output: "",
+        stdin,
+      }),
+      state: "running",
+    };
+  }
+
+  if (
     eventType !== "item.started" &&
     eventType !== "item.updated" &&
     eventType !== "item.completed"
@@ -396,6 +638,12 @@ export function buildCodexRuntimeCardFromEvent(
       typeof item.aggregated_output === "string"
         ? item.aggregated_output.trim()
         : "";
+    const processId =
+      typeof item.process_id === "string"
+        ? item.process_id.trim()
+        : typeof item.processId === "string"
+          ? item.processId.trim()
+          : "";
     if (effectiveStatus === "declined") {
       return {
         key: `${runID}:approval:${itemID}:${effectiveStatus}`,
@@ -414,6 +662,16 @@ export function buildCodexRuntimeCardFromEvent(
     if (output) {
       bodyParts.push(clipStreamText(output, 1200));
     }
+    bodyParts.push(
+      encodeCodexMetadata(CODEX_COMMAND_EVENT_METADATA_PREFIX, {
+        itemId: itemID,
+        command,
+        processId,
+        phase: "lifecycle",
+        output,
+        stdin: "",
+      }),
+    );
     return {
       key: `${runID}:command:${itemID}:${effectiveStatus}`,
       title,
@@ -514,8 +772,7 @@ export function buildCodexRuntimeCardFromEvent(
   }
 
   if (itemType === "error") {
-    const message =
-      typeof item.message === "string" ? item.message.trim() : "";
+    const message = typeof item.message === "string" ? item.message.trim() : "";
     if (!message || !codexEventIncludesApproval(message)) {
       return null;
     }

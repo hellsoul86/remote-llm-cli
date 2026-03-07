@@ -1,6 +1,7 @@
 import { type MutableRefObject, type ReactNode } from "react";
 
 import { type TimelineEntry } from "../../../domains/session";
+import { isSecondarySurfaceTimelineEntry } from "../../../domains/timeline-noise";
 
 type SessionTimelineProps = {
   timeline: TimelineEntry[];
@@ -27,6 +28,9 @@ export function SessionTimeline({
 }: SessionTimelineProps) {
   const isConversationEntry = (entry: TimelineEntry) =>
     entry.kind === "user" || entry.kind === "assistant";
+  const visibleTimeline = timeline.filter(
+    (entry) => !isSecondarySurfaceTimelineEntry(entry),
+  );
 
   return (
     <div className="timeline-shell">
@@ -36,7 +40,7 @@ export function SessionTimeline({
         ref={timelineViewportRef}
         onScroll={onTimelineScroll}
       >
-        {timeline.length === 0 ? (
+        {visibleTimeline.length === 0 ? (
           <article className="message message-system message-empty">
             <div className="message-title-row">
               <h4>{isRefreshing ? "Loading" : "Ready"}</h4>
@@ -48,7 +52,7 @@ export function SessionTimeline({
             </pre>
           </article>
         ) : (
-          timeline.map((entry) => (
+          visibleTimeline.map((entry) => (
             <article
               key={entry.id}
               className={`message message-${entry.kind} ${entry.state ? `message-${entry.state}` : ""}`}

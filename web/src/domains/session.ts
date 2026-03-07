@@ -126,7 +126,10 @@ function normalizeSessionMode(raw: unknown): CodexSessionMode {
   return "exec";
 }
 
-function forkTitleFromSource(sourceTitle: string, fallbackIndex: number): string {
+function forkTitleFromSource(
+  sourceTitle: string,
+  fallbackIndex: number,
+): string {
   const trimmed = sourceTitle.trim();
   if (!trimmed) return `Fork ${fallbackIndex}`;
   return `Fork · ${trimmed}`;
@@ -164,7 +167,7 @@ function createSession(index: number, title?: string): ConversationThread {
     activeJobID: "",
     lastJobStatus: "idle",
     unreadDone: false,
-    pinned: false
+    pinned: false,
   };
 }
 
@@ -185,11 +188,16 @@ function createForkSession(
     activeJobID: "",
     lastJobStatus: "idle",
     unreadDone: false,
-    pinned: false
+    pinned: false,
   };
 }
 
-function createWorkspace(index: number, path: string, hostID = "local", hostName = "local-default"): WorkspaceDirectory {
+function createWorkspace(
+  index: number,
+  path: string,
+  hostID = "local",
+  hostName = "local-default",
+): WorkspaceDirectory {
   const now = new Date().toISOString();
   const first = createSession(index, "Session 1");
   const title = projectTitleFromPath(path);
@@ -202,7 +210,7 @@ function createWorkspace(index: number, path: string, hostID = "local", hostName
     sessions: [first],
     activeSessionID: first.id,
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
   };
 }
 
@@ -210,7 +218,7 @@ function defaultState(): PersistedSessionState {
   const first = createWorkspace(1, DEFAULT_PROJECT_PATH);
   return {
     workspaces: [first],
-    activeWorkspaceID: first.id
+    activeWorkspaceID: first.id,
   };
 }
 
@@ -228,20 +236,35 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
         .filter((entry): entry is TimelineEntry => {
           if (!entry || typeof entry !== "object") return false;
           const record = entry as Partial<TimelineEntry>;
-          return typeof record.id === "string" && typeof record.kind === "string" && typeof record.title === "string" && typeof record.body === "string";
+          return (
+            typeof record.id === "string" &&
+            typeof record.kind === "string" &&
+            typeof record.title === "string" &&
+            typeof record.body === "string"
+          );
         })
         .map((entry) => ({
           ...entry,
-          createdAt: typeof entry.createdAt === "string" ? entry.createdAt : now
+          createdAt:
+            typeof entry.createdAt === "string" ? entry.createdAt : now,
         }))
         .filter((entry) => !isLegacySessionNoiseEntry(entry))
     : [];
   const sandbox = candidate.sandbox;
   const safeSandbox =
-    sandbox === "read-only" || sandbox === "workspace-write" || sandbox === "danger-full-access" || sandbox === "" ? sandbox : "workspace-write";
+    sandbox === "read-only" ||
+    sandbox === "workspace-write" ||
+    sandbox === "danger-full-access" ||
+    sandbox === ""
+      ? sandbox
+      : "workspace-write";
   const last = candidate.lastJobStatus;
   const safeLast =
-    last === "idle" || last === "running" || last === "succeeded" || last === "failed" || last === "canceled"
+    last === "idle" ||
+    last === "running" ||
+    last === "succeeded" ||
+    last === "failed" ||
+    last === "canceled"
       ? last
       : fallback.lastJobStatus;
   const addDirs = Array.isArray(candidate.addDirs)
@@ -270,12 +293,20 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     : [];
 
   return {
-    id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : fallback.id,
-    title: typeof candidate.title === "string" && candidate.title.trim() ? candidate.title : fallback.title,
+    id:
+      typeof candidate.id === "string" && candidate.id.trim()
+        ? candidate.id
+        : fallback.id,
+    title:
+      typeof candidate.title === "string" && candidate.title.trim()
+        ? candidate.title
+        : fallback.title,
     draft: typeof candidate.draft === "string" ? candidate.draft : "",
     timeline,
-    createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : now,
-    updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : now,
+    createdAt:
+      typeof candidate.createdAt === "string" ? candidate.createdAt : now,
+    updatedAt:
+      typeof candidate.updatedAt === "string" ? candidate.updatedAt : now,
     model: typeof candidate.model === "string" ? candidate.model : "",
     codexMode: normalizeSessionMode(candidate.codexMode),
     resumeLast:
@@ -285,10 +316,12 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
         ? candidate.resumeSessionID
         : "",
     reviewUncommitted: Boolean(candidate.reviewUncommitted),
-    reviewBase: typeof candidate.reviewBase === "string" ? candidate.reviewBase : "",
+    reviewBase:
+      typeof candidate.reviewBase === "string" ? candidate.reviewBase : "",
     reviewCommit:
       typeof candidate.reviewCommit === "string" ? candidate.reviewCommit : "",
-    reviewTitle: typeof candidate.reviewTitle === "string" ? candidate.reviewTitle : "",
+    reviewTitle:
+      typeof candidate.reviewTitle === "string" ? candidate.reviewTitle : "",
     sandbox: safeSandbox,
     approvalPolicy: normalizeApprovalPolicy(candidate.approvalPolicy),
     webSearch: Boolean(candidate.webSearch),
@@ -304,11 +337,17 @@ function normalizeSession(raw: unknown, index: number): ConversationThread {
     ephemeral: Boolean(candidate.ephemeral),
     jsonOutput:
       typeof candidate.jsonOutput === "boolean" ? candidate.jsonOutput : true,
-    imagePaths: Array.isArray(candidate.imagePaths) ? candidate.imagePaths.filter((path): path is string => typeof path === "string" && path.trim() !== "") : [],
-    activeJobID: typeof candidate.activeJobID === "string" ? candidate.activeJobID : "",
+    imagePaths: Array.isArray(candidate.imagePaths)
+      ? candidate.imagePaths.filter(
+          (path): path is string =>
+            typeof path === "string" && path.trim() !== "",
+        )
+      : [],
+    activeJobID:
+      typeof candidate.activeJobID === "string" ? candidate.activeJobID : "",
     lastJobStatus: safeLast,
     unreadDone: Boolean(candidate.unreadDone),
-    pinned: Boolean(candidate.pinned)
+    pinned: Boolean(candidate.pinned),
   };
 }
 
@@ -318,19 +357,32 @@ function normalizeWorkspace(raw: unknown, index: number): WorkspaceDirectory {
   const candidate = raw as Partial<WorkspaceDirectory>;
   const now = new Date().toISOString();
   const sessions = Array.isArray(candidate.sessions)
-    ? candidate.sessions.map((thread, threadIndex) => normalizeSession(thread, threadIndex + 1))
+    ? candidate.sessions.map((thread, threadIndex) =>
+        normalizeSession(thread, threadIndex + 1),
+      )
     : [];
   const safeSessions = sessions;
   const activeSessionID =
-    typeof candidate.activeSessionID === "string" && safeSessions.some((thread) => thread.id === candidate.activeSessionID)
+    typeof candidate.activeSessionID === "string" &&
+    safeSessions.some((thread) => thread.id === candidate.activeSessionID)
       ? candidate.activeSessionID
-      : safeSessions[0]?.id ?? "";
+      : (safeSessions[0]?.id ?? "");
 
   return {
-    id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : fallback.id,
-    hostID: typeof candidate.hostID === "string" ? candidate.hostID : fallback.hostID,
-    hostName: typeof candidate.hostName === "string" && candidate.hostName.trim() ? candidate.hostName : fallback.hostName,
-    path: typeof candidate.path === "string" && candidate.path.trim() ? candidate.path : DEFAULT_PROJECT_PATH,
+    id:
+      typeof candidate.id === "string" && candidate.id.trim()
+        ? candidate.id
+        : fallback.id,
+    hostID:
+      typeof candidate.hostID === "string" ? candidate.hostID : fallback.hostID,
+    hostName:
+      typeof candidate.hostName === "string" && candidate.hostName.trim()
+        ? candidate.hostName
+        : fallback.hostName,
+    path:
+      typeof candidate.path === "string" && candidate.path.trim()
+        ? candidate.path
+        : DEFAULT_PROJECT_PATH,
     title:
       typeof candidate.title === "string" && candidate.title.trim()
         ? candidate.title.trim()
@@ -341,8 +393,10 @@ function normalizeWorkspace(raw: unknown, index: number): WorkspaceDirectory {
           ),
     sessions: safeSessions,
     activeSessionID,
-    createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : now,
-    updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : now
+    createdAt:
+      typeof candidate.createdAt === "string" ? candidate.createdAt : now,
+    updatedAt:
+      typeof candidate.updatedAt === "string" ? candidate.updatedAt : now,
   };
 }
 
@@ -354,10 +408,14 @@ function loadPersistedState(): PersistedSessionState {
 
   try {
     const parsed = JSON.parse(raw) as Partial<PersistedSessionState>;
-    if (!Array.isArray(parsed.workspaces) || parsed.workspaces.length === 0) return fallback;
-    const workspaces = parsed.workspaces.map((workspace, index) => normalizeWorkspace(workspace, index + 1));
+    if (!Array.isArray(parsed.workspaces) || parsed.workspaces.length === 0)
+      return fallback;
+    const workspaces = parsed.workspaces.map((workspace, index) =>
+      normalizeWorkspace(workspace, index + 1),
+    );
     const activeWorkspaceID =
-      typeof parsed.activeWorkspaceID === "string" && workspaces.some((workspace) => workspace.id === parsed.activeWorkspaceID)
+      typeof parsed.activeWorkspaceID === "string" &&
+      workspaces.some((workspace) => workspace.id === parsed.activeWorkspaceID)
         ? parsed.activeWorkspaceID
         : workspaces[0].id;
     return { workspaces, activeWorkspaceID };
@@ -368,36 +426,69 @@ function loadPersistedState(): PersistedSessionState {
 
 export function useSessionDomain() {
   const initial = useMemo(() => loadPersistedState(), []);
-  const initialWorkspace = initial.workspaces.find((workspace) => workspace.id === initial.activeWorkspaceID) ?? initial.workspaces[0] ?? null;
+  const initialWorkspace =
+    initial.workspaces.find(
+      (workspace) => workspace.id === initial.activeWorkspaceID,
+    ) ??
+    initial.workspaces[0] ??
+    null;
   const initialThread = initialWorkspace
-    ? initialWorkspace.sessions.find((thread) => thread.id === initialWorkspace.activeSessionID) ?? initialWorkspace.sessions[0] ?? null
+    ? (initialWorkspace.sessions.find(
+        (thread) => thread.id === initialWorkspace.activeSessionID,
+      ) ??
+      initialWorkspace.sessions[0] ??
+      null)
     : null;
 
-  const [workspaces, setWorkspaces] = useState<WorkspaceDirectory[]>(initial.workspaces);
-  const [activeWorkspaceID, setActiveWorkspaceID] = useState<string>(initial.activeWorkspaceID);
-  const [threadRenameDraft, setThreadRenameDraft] = useState(initialThread?.title ?? "Session 1");
-  const [workspacePathDraft, setWorkspacePathDraft] = useState(initialWorkspace?.path ?? DEFAULT_PROJECT_PATH);
+  const [workspaces, setWorkspaces] = useState<WorkspaceDirectory[]>(
+    initial.workspaces,
+  );
+  const [activeWorkspaceID, setActiveWorkspaceID] = useState<string>(
+    initial.activeWorkspaceID,
+  );
+  const [threadRenameDraft, setThreadRenameDraft] = useState(
+    initialThread?.title ?? "Session 1",
+  );
+  const [workspacePathDraft, setWorkspacePathDraft] = useState(
+    initialWorkspace?.path ?? DEFAULT_PROJECT_PATH,
+  );
   const [workspaceAddDraft, setWorkspaceAddDraft] = useState("");
-  const [activeJobThreadID, setActiveJobThreadID] = useState(initialThread?.id ?? "");
+  const [activeJobThreadID, setActiveJobThreadID] = useState(
+    initialThread?.id ?? "",
+  );
 
   const completedJobsRef = useRef<Set<string>>(new Set());
   const workspacesRef = useRef<WorkspaceDirectory[]>(initial.workspaces);
   const activeWorkspaceIDRef = useRef<string>(initial.activeWorkspaceID);
   const entryCounter = useRef(0);
-  const sessionCounterRef = useRef(Math.max(1, initial.workspaces.reduce((sum, workspace) => sum + workspace.sessions.length, 0)));
+  const sessionCounterRef = useRef(
+    Math.max(
+      1,
+      initial.workspaces.reduce(
+        (sum, workspace) => sum + workspace.sessions.length,
+        0,
+      ),
+    ),
+  );
   const workspaceCounterRef = useRef(Math.max(1, initial.workspaces.length));
 
   const activeWorkspace = useMemo(
-    () => workspaces.find((workspace) => workspace.id === activeWorkspaceID) ?? workspaces[0] ?? null,
-    [workspaces, activeWorkspaceID]
+    () =>
+      workspaces.find((workspace) => workspace.id === activeWorkspaceID) ??
+      workspaces[0] ??
+      null,
+    [workspaces, activeWorkspaceID],
   );
 
   const threads = activeWorkspace?.sessions ?? [];
   const activeThreadID = activeWorkspace?.activeSessionID ?? "";
 
   const activeThread = useMemo(
-    () => threads.find((thread) => thread.id === activeThreadID) ?? threads[0] ?? null,
-    [threads, activeThreadID]
+    () =>
+      threads.find((thread) => thread.id === activeThreadID) ??
+      threads[0] ??
+      null,
+    [threads, activeThreadID],
   );
 
   const activeTimeline = activeThread?.timeline ?? [];
@@ -432,7 +523,7 @@ export function useSessionDomain() {
     if (typeof window === "undefined") return;
     const payload: PersistedSessionState = {
       workspaces,
-      activeWorkspaceID
+      activeWorkspaceID,
     };
     window.localStorage.setItem(SESSION_STATE_KEY, JSON.stringify(payload));
   }, [workspaces, activeWorkspaceID]);
@@ -467,9 +558,9 @@ export function useSessionDomain() {
         return {
           ...workspace,
           sessions: nextSessions,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
         };
-      })
+      }),
     );
   }
 
@@ -477,7 +568,8 @@ export function useSessionDomain() {
     setWorkspaces((prev) =>
       prev.map((workspace) => {
         if (workspace.id !== activeWorkspaceID) return workspace;
-        if (!workspace.sessions.some((thread) => thread.id === threadID)) return workspace;
+        if (!workspace.sessions.some((thread) => thread.id === threadID))
+          return workspace;
         return {
           ...workspace,
           activeSessionID: threadID,
@@ -485,17 +577,19 @@ export function useSessionDomain() {
             thread.id === threadID
               ? {
                   ...thread,
-                  unreadDone: false
+                  unreadDone: false,
                 }
-              : thread
-          )
+              : thread,
+          ),
         };
-      })
+      }),
     );
   }
 
   function activateThread(threadID: string) {
-    const workspace = workspaces.find((item) => item.sessions.some((thread) => thread.id === threadID));
+    const workspace = workspaces.find((item) =>
+      item.sessions.some((thread) => thread.id === threadID),
+    );
     if (!workspace) return;
     setActiveWorkspaceID(workspace.id);
     setWorkspaces((prev) =>
@@ -508,12 +602,12 @@ export function useSessionDomain() {
             thread.id === threadID
               ? {
                   ...thread,
-                  unreadDone: false
+                  unreadDone: false,
                 }
-              : thread
-          )
+              : thread,
+          ),
         };
-      })
+      }),
     );
   }
 
@@ -521,11 +615,14 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       draft,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
-  function addTimelineEntry(entry: Omit<TimelineEntry, "id" | "createdAt">, threadID = activeThreadID) {
+  function addTimelineEntry(
+    entry: Omit<TimelineEntry, "id" | "createdAt">,
+    threadID = activeThreadID,
+  ) {
     if (isLegacySessionNoiseEntry(entry)) {
       return;
     }
@@ -537,10 +634,10 @@ export function useSessionDomain() {
         {
           id: nextEntryID(),
           createdAt,
-          ...entry
-        }
+          ...entry,
+        },
       ],
-      updatedAt: createdAt
+      updatedAt: createdAt,
     }));
   }
 
@@ -563,7 +660,7 @@ export function useSessionDomain() {
         if (running.body === trimmed) return thread;
         timeline[runningIndex] = {
           ...running,
-          body: trimmed
+          body: trimmed,
         };
       } else {
         timeline.push({
@@ -572,18 +669,22 @@ export function useSessionDomain() {
           state: "running",
           title: "Assistant",
           body: trimmed,
-          createdAt: now
+          createdAt: now,
         });
       }
       return {
         ...thread,
         timeline,
-        updatedAt: now
+        updatedAt: now,
       };
     });
   }
 
-  function finalizeAssistantStreamEntry(threadID: string, state: "success" | "error", body?: string) {
+  function finalizeAssistantStreamEntry(
+    threadID: string,
+    state: "success" | "error",
+    body?: string,
+  ) {
     const trimmed = body?.trim() ?? "";
     const now = new Date().toISOString();
     updateWorkspacesByThread(threadID, (thread) => {
@@ -601,12 +702,12 @@ export function useSessionDomain() {
         timeline[runningIndex] = {
           ...running,
           state,
-          body: trimmed || running.body
+          body: trimmed || running.body,
         };
         return {
           ...thread,
           timeline,
-          updatedAt: now
+          updatedAt: now,
         };
       }
       if (!trimmed) return thread;
@@ -616,12 +717,12 @@ export function useSessionDomain() {
         state,
         title: "Assistant",
         body: trimmed,
-        createdAt: now
+        createdAt: now,
       });
       return {
         ...thread,
         timeline,
-        updatedAt: now
+        updatedAt: now,
       };
     });
   }
@@ -638,9 +739,9 @@ export function useSessionDomain() {
           ...workspace,
           sessions: [...workspace.sessions, next],
           activeSessionID: next.id,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
         };
-      })
+      }),
     );
     setThreadRenameDraft(next.title);
   }
@@ -666,9 +767,9 @@ export function useSessionDomain() {
           ...item,
           sessions: [...item.sessions, forked],
           activeSessionID: forked.id,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
         };
-      })
+      }),
     );
     setActiveWorkspaceID(workspace.id);
     setThreadRenameDraft(forked.title);
@@ -683,15 +784,22 @@ export function useSessionDomain() {
     setWorkspaces((prev) => {
       const now = new Date().toISOString();
       const next = prev.map((workspace) => {
-        const currentIndex = workspace.sessions.findIndex((thread) => thread.id === targetID);
+        const currentIndex = workspace.sessions.findIndex(
+          (thread) => thread.id === targetID,
+        );
         if (currentIndex < 0) return workspace;
         removed = true;
 
-        const nextSessions = workspace.sessions.filter((thread) => thread.id !== targetID);
+        const nextSessions = workspace.sessions.filter(
+          (thread) => thread.id !== targetID,
+        );
         let nextActiveSessionID = workspace.activeSessionID;
         if (workspace.activeSessionID === targetID) {
           if (nextSessions.length > 0) {
-            const fallbackIndex = Math.min(currentIndex, nextSessions.length - 1);
+            const fallbackIndex = Math.min(
+              currentIndex,
+              nextSessions.length - 1,
+            );
             nextActiveSessionID = nextSessions[fallbackIndex]?.id ?? "";
           } else {
             nextActiveSessionID = "";
@@ -701,7 +809,7 @@ export function useSessionDomain() {
           ...workspace,
           sessions: nextSessions,
           activeSessionID: nextActiveSessionID,
-          updatedAt: now
+          updatedAt: now,
         };
       });
 
@@ -711,7 +819,9 @@ export function useSessionDomain() {
       if (!next.some((workspace) => workspace.id === nextActiveWorkspaceID)) {
         nextActiveWorkspaceID = next[0]?.id ?? "";
       }
-      const nextActiveWorkspace = next.find((workspace) => workspace.id === nextActiveWorkspaceID);
+      const nextActiveWorkspace = next.find(
+        (workspace) => workspace.id === nextActiveWorkspaceID,
+      );
       fallbackThreadID = nextActiveWorkspace?.activeSessionID ?? "";
       return next;
     });
@@ -730,14 +840,17 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       title: trimmed,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
     setThreadRenameDraft(trimmed);
   }
 
   function switchThreadByOffset(offset: number) {
     if (threads.length === 0) return;
-    const currentIndex = Math.max(0, threads.findIndex((thread) => thread.id === activeThreadID));
+    const currentIndex = Math.max(
+      0,
+      threads.findIndex((thread) => thread.id === activeThreadID),
+    );
     const nextIndex = (currentIndex + offset + threads.length) % threads.length;
     setActiveThreadID(threads[nextIndex].id);
   }
@@ -764,10 +877,10 @@ export function useSessionDomain() {
           ? {
               ...workspace,
               path: trimmed,
-              updatedAt: new Date().toISOString()
+              updatedAt: new Date().toISOString(),
             }
-          : workspace
-      )
+          : workspace,
+      ),
     );
     setWorkspacePathDraft(trimmed);
   }
@@ -776,7 +889,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       model,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -785,7 +898,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       codexMode: safeMode,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -793,7 +906,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       resumeLast: enabled,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -801,7 +914,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       resumeSessionID: sessionID,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -809,7 +922,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       reviewUncommitted: enabled,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -817,7 +930,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       reviewBase: value,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -825,7 +938,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       reviewCommit: value,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -833,24 +946,30 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       reviewTitle: value,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
-  function setThreadSandbox(threadID: string, sandbox: "" | "read-only" | "workspace-write" | "danger-full-access") {
+  function setThreadSandbox(
+    threadID: string,
+    sandbox: "" | "read-only" | "workspace-write" | "danger-full-access",
+  ) {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       sandbox,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
-  function setThreadApprovalPolicy(threadID: string, policy: CodexApprovalPolicy) {
+  function setThreadApprovalPolicy(
+    threadID: string,
+    policy: CodexApprovalPolicy,
+  ) {
     const safePolicy = normalizeApprovalPolicy(policy);
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       approvalPolicy: safePolicy,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -858,7 +977,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       webSearch: enabled,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -866,7 +985,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       profile,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -878,7 +997,7 @@ export function useSessionDomain() {
       return {
         ...thread,
         configFlags: [...thread.configFlags, trimmed],
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       };
     });
   }
@@ -887,7 +1006,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       configFlags: thread.configFlags.filter((item) => item !== value),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -899,7 +1018,7 @@ export function useSessionDomain() {
       return {
         ...thread,
         enableFlags: [...thread.enableFlags, trimmed],
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       };
     });
   }
@@ -908,7 +1027,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       enableFlags: thread.enableFlags.filter((item) => item !== value),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -920,7 +1039,7 @@ export function useSessionDomain() {
       return {
         ...thread,
         disableFlags: [...thread.disableFlags, trimmed],
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       };
     });
   }
@@ -929,7 +1048,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       disableFlags: thread.disableFlags.filter((item) => item !== value),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -941,7 +1060,7 @@ export function useSessionDomain() {
       return {
         ...thread,
         addDirs: [...thread.addDirs, trimmed],
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       };
     });
   }
@@ -950,7 +1069,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       addDirs: thread.addDirs.filter((item) => item !== dir),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -958,7 +1077,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       skipGitRepoCheck: enabled,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -966,7 +1085,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       ephemeral: enabled,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -974,7 +1093,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       jsonOutput: enabled,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -984,7 +1103,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       imagePaths: [...thread.imagePaths, trimmed],
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -992,16 +1111,20 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       imagePaths: thread.imagePaths.filter((path) => path !== imagePath),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
-  function setThreadJobState(threadID: string, jobID: string, status?: ConversationThread["lastJobStatus"]) {
+  function setThreadJobState(
+    threadID: string,
+    jobID: string,
+    status?: ConversationThread["lastJobStatus"],
+  ) {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       activeJobID: jobID,
       lastJobStatus: status ?? (jobID ? "running" : thread.lastJobStatus),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -1009,7 +1132,7 @@ export function useSessionDomain() {
     updateWorkspacesByThread(threadID, (thread) => ({
       ...thread,
       unreadDone,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     }));
   }
 
@@ -1021,7 +1144,7 @@ export function useSessionDomain() {
       return {
         ...thread,
         title: trimmed,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       };
     });
   }
@@ -1032,7 +1155,7 @@ export function useSessionDomain() {
       return {
         ...thread,
         pinned,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       };
     });
   }
@@ -1072,9 +1195,17 @@ export function useSessionDomain() {
       };
       let source: Located | null = null;
       let target: Located | null = null;
-      for (let workspaceIndex = 0; workspaceIndex < prev.length; workspaceIndex += 1) {
+      for (
+        let workspaceIndex = 0;
+        workspaceIndex < prev.length;
+        workspaceIndex += 1
+      ) {
         const workspace = prev[workspaceIndex];
-        for (let threadIndex = 0; threadIndex < workspace.sessions.length; threadIndex += 1) {
+        for (
+          let threadIndex = 0;
+          threadIndex < workspace.sessions.length;
+          threadIndex += 1
+        ) {
           const thread = workspace.sessions[threadIndex];
           if (thread.id === sourceID) {
             source = { workspaceIndex, threadIndex, thread };
@@ -1122,10 +1253,7 @@ export function useSessionDomain() {
         const targetThread = targetWorkspace.sessions[target.threadIndex];
         const merged: ConversationThread = {
           ...targetThread,
-          title:
-            nextTitle ||
-            targetThread.title ||
-            sourceThread.title,
+          title: nextTitle || targetThread.title || sourceThread.title,
           draft: sourceThread.draft || targetThread.draft,
           timeline:
             targetThread.timeline.length > 0
@@ -1134,13 +1262,15 @@ export function useSessionDomain() {
           model: sourceThread.model || targetThread.model,
           codexMode: sourceThread.codexMode || targetThread.codexMode,
           resumeLast: sourceThread.resumeLast,
-          resumeSessionID: sourceThread.resumeSessionID || targetThread.resumeSessionID,
+          resumeSessionID:
+            sourceThread.resumeSessionID || targetThread.resumeSessionID,
           reviewUncommitted: sourceThread.reviewUncommitted,
           reviewBase: sourceThread.reviewBase || targetThread.reviewBase,
           reviewCommit: sourceThread.reviewCommit || targetThread.reviewCommit,
           reviewTitle: sourceThread.reviewTitle || targetThread.reviewTitle,
           sandbox: sourceThread.sandbox || targetThread.sandbox,
-          approvalPolicy: sourceThread.approvalPolicy || targetThread.approvalPolicy,
+          approvalPolicy:
+            sourceThread.approvalPolicy || targetThread.approvalPolicy,
           webSearch: sourceThread.webSearch || targetThread.webSearch,
           profile: sourceThread.profile || targetThread.profile,
           configFlags:
@@ -1198,7 +1328,11 @@ export function useSessionDomain() {
         }
       }
 
-      for (let workspaceIndex = 0; workspaceIndex < next.length; workspaceIndex += 1) {
+      for (
+        let workspaceIndex = 0;
+        workspaceIndex < next.length;
+        workspaceIndex += 1
+      ) {
         const workspace = next[workspaceIndex];
         if (workspace.activeSessionID === sourceID) {
           workspace.activeSessionID = targetID;
@@ -1231,14 +1365,11 @@ export function useSessionDomain() {
     const currentActiveWorkspaceID = activeWorkspaceIDRef.current;
     const source = options?.source ?? "discovery";
     const preserveMissingSessions =
-      options?.preserveMissingSessions ??
-      (source === "discovery");
+      options?.preserveMissingSessions ?? source === "discovery";
     const preserveMissingProjects =
-      options?.preserveMissingProjects ??
-      (source === "discovery");
+      options?.preserveMissingProjects ?? source === "discovery";
     const preserveOnEmptyResult =
-      options?.preserveOnEmptyResult ??
-      (source === "discovery");
+      options?.preserveOnEmptyResult ?? source === "discovery";
     const now = new Date().toISOString();
     const currentByThreadID = new Map<string, ConversationThread>();
     const currentByWorkspaceID = new Map<string, WorkspaceDirectory>();
@@ -1313,7 +1444,7 @@ export function useSessionDomain() {
           activeJobID: prior?.activeJobID ?? "",
           lastJobStatus: prior?.lastJobStatus ?? "idle",
           unreadDone: prior?.unreadDone ?? false,
-          pinned: prior?.pinned ?? false
+          pinned: prior?.pinned ?? false,
         });
       }
 
@@ -1326,9 +1457,10 @@ export function useSessionDomain() {
       }
 
       const activeSessionID =
-        existing && sessions.some((thread) => thread.id === existing.activeSessionID)
+        existing &&
+        sessions.some((thread) => thread.id === existing.activeSessionID)
           ? existing.activeSessionID
-          : sessions[0]?.id ?? "";
+          : (sessions[0]?.id ?? "");
 
       nextWorkspaces.push({
         id,
@@ -1339,18 +1471,20 @@ export function useSessionDomain() {
         sessions,
         activeSessionID,
         createdAt: existing?.createdAt ?? now,
-        updatedAt: now
+        updatedAt: now,
       });
     }
 
     for (const existing of currentWorkspaces) {
       if (!preserveMissingProjects) continue;
-      if (nextWorkspaces.some((workspace) => workspace.id === existing.id)) continue;
+      if (nextWorkspaces.some((workspace) => workspace.id === existing.id))
+        continue;
       const hostID = existing.hostID.trim();
-      if (incomingHostIDs.size > 0 && hostID && !incomingHostIDs.has(hostID)) continue;
+      if (incomingHostIDs.size > 0 && hostID && !incomingHostIDs.has(hostID))
+        continue;
       nextWorkspaces.push({
         ...existing,
-        updatedAt: now
+        updatedAt: now,
       });
     }
 
@@ -1365,7 +1499,9 @@ export function useSessionDomain() {
       return;
     }
 
-    const nextActiveWorkspaceID = nextWorkspaces.some((workspace) => workspace.id === currentActiveWorkspaceID)
+    const nextActiveWorkspaceID = nextWorkspaces.some(
+      (workspace) => workspace.id === currentActiveWorkspaceID,
+    )
       ? currentActiveWorkspaceID
       : (() => {
           const previousActive = currentWorkspaces.find(
@@ -1385,7 +1521,10 @@ export function useSessionDomain() {
         })();
     setWorkspaces(nextWorkspaces);
     setActiveWorkspaceID(nextActiveWorkspaceID);
-    const activeProject = nextWorkspaces.find((workspace) => workspace.id === nextActiveWorkspaceID) ?? nextWorkspaces[0];
+    const activeProject =
+      nextWorkspaces.find(
+        (workspace) => workspace.id === nextActiveWorkspaceID,
+      ) ?? nextWorkspaces[0];
     setActiveJobThreadID(activeProject?.activeSessionID ?? "");
   }
 
@@ -1476,6 +1615,6 @@ export function useSessionDomain() {
     bindThreadID,
     syncProjectsFromDiscovery,
     syncProjectsFromServer,
-    resetSessionDomain
+    resetSessionDomain,
   };
 }
