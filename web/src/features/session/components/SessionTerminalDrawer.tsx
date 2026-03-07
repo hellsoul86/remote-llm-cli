@@ -5,6 +5,8 @@ type TerminalCommandEntry = {
   title: string;
   command: string;
   output: string;
+  interactions: string[];
+  processId: string;
   timestamp: string;
   state: TimelineState;
 };
@@ -70,9 +72,24 @@ export function SessionTerminalDrawer({
                 <div>
                   <strong>{command.title}</strong>
                   <p>{command.command}</p>
+                  <div className="terminal-command-meta">
+                    {command.processId.trim() ? (
+                      <span>{command.processId}</span>
+                    ) : null}
+                    {command.interactions.length > 0 ? (
+                      <span>{command.interactions.length} inputs</span>
+                    ) : null}
+                  </div>
                 </div>
                 <time>{command.timestamp}</time>
               </header>
+              {command.interactions.length > 0 ? (
+                <div className="terminal-command-interactions">
+                  {command.interactions.map((stdin, index) => (
+                    <code key={`${command.id}:stdin:${index}`}>{stdin}</code>
+                  ))}
+                </div>
+              ) : null}
               {command.output ? (
                 <pre className="terminal-command-output">{command.output}</pre>
               ) : (

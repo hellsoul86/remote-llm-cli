@@ -149,6 +149,15 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
   return "";
 }
 
+function isAssistantDeltaEventType(eventType: string): boolean {
+  const normalized = eventType.trim().toLowerCase();
+  return (
+    normalized === "item.agent_message.delta" ||
+    normalized === "agent_message_delta" ||
+    normalized === "agent.message.delta"
+  );
+}
+
 export function parseCodexAssistantTextFromStdout(
   stdout: string,
   allowPlainTextFallback = true,
@@ -173,7 +182,7 @@ export function parseCodexAssistantTextFromStdout(
     const event = asRecord(parsed);
     if (!event) continue;
     const eventType = typeof event.type === "string" ? event.type : "";
-    if (eventType.endsWith(".delta")) {
+    if (isAssistantDeltaEventType(eventType)) {
       const deltaText = gatherMessageText(event.delta ?? event, 0, {
         preserveWhitespace: true,
       }).join("");
@@ -274,6 +283,16 @@ export type ParsedCodexFileChange = {
 const CODEX_FILE_CHANGE_METADATA_PREFIX = "__codex_file_changes__:";
 const CODEX_TURN_DIFF_METADATA_PREFIX = "__codex_turn_diff__:";
 const CODEX_PATCH_DELTA_METADATA_PREFIX = "__codex_patch_delta__:";
+const CODEX_COMMAND_EVENT_METADATA_PREFIX = "__codex_command_event__:";
+
+export type ParsedCodexCommandEvent = {
+  itemId: string;
+  command: string;
+  processId: string;
+  phase: "lifecycle" | "delta" | "interaction";
+  output: string;
+  stdin: string;
+};
 
 function normalizeCodexFileChange(raw: unknown): ParsedCodexFileChange | null {
   const change = asRecord(raw);
@@ -425,6 +444,15 @@ export function parseCodexPatchDeltaBody(body: string): string {
     .trim();
 }
 
+export function parseCodexCommandEventBody(
+  body: string,
+): ParsedCodexCommandEvent | null {
+  return decodeCodexMetadata<ParsedCodexCommandEvent>(
+    CODEX_COMMAND_EVENT_METADATA_PREFIX,
+    body,
+  );
+}
+
 export function buildCodexRuntimeCardFromEvent(
   event: Record<string, unknown>,
   runID: string,
@@ -504,6 +532,52 @@ export function buildCodexRuntimeCardFromEvent(
   }
 
   if (
+    eventType === "item.commandexecution.outputdelta" ||
+    eventType === "item.commandexecution.terminalinteraction"
+  ) {
+    const itemID =
+      typeof event.itemId === "string" && event.itemId.trim() !== ""
+        ? event.itemId.trim()
+        : "command";
+    if (eventType === "item.commandexecution.outputdelta") {
+      const delta =
+        typeof event.delta === "string" ? event.delta : "";
+      if (!delta.trim()) return null;
+      return {
+        key: `${runID}:command-delta:${itemID}:${delta.length}:${delta.slice(0, 80)}`,
+        title: "Command Output Delta",
+        body: encodeCodexMetadata(CODEX_COMMAND_EVENT_METADATA_PREFIX, {
+          itemId: itemID,
+          command: "",
+          processId: "",
+          phase: "delta",
+          output: delta,
+          stdin: "",
+        }),
+        state: "running",
+      };
+    }
+    const stdin =
+      typeof event.stdin === "string" ? event.stdin : "";
+    const processId =
+      typeof event.processId === "string" ? event.processId.trim() : "";
+    if (!stdin.trim()) return null;
+    return {
+      key: `${runID}:terminal-interaction:${itemID}:${processId}:${stdin.length}:${stdin.slice(0, 80)}`,
+      title: "Terminal Interaction",
+      body: encodeCodexMetadata(CODEX_COMMAND_EVENT_METADATA_PREFIX, {
+        itemId: itemID,
+        command: "",
+        processId,
+        phase: "interaction",
+        output: "",
+        stdin,
+      }),
+      state: "running",
+    };
+  }
+
+  if (
     eventType !== "item.started" &&
     eventType !== "item.updated" &&
     eventType !== "item.completed"
@@ -536,6 +610,12 @@ export function buildCodexRuntimeCardFromEvent(
       typeof item.aggregated_output === "string"
         ? item.aggregated_output.trim()
         : "";
+    const processId =
+      typeof item.process_id === "string"
+        ? item.process_id.trim()
+        : typeof item.processId === "string"
+          ? item.processId.trim()
+          : "";
     if (effectiveStatus === "declined") {
       return {
         key: `${runID}:approval:${itemID}:${effectiveStatus}`,
@@ -554,6 +634,16 @@ export function buildCodexRuntimeCardFromEvent(
     if (output) {
       bodyParts.push(clipStreamText(output, 1200));
     }
+    bodyParts.push(
+      encodeCodexMetadata(CODEX_COMMAND_EVENT_METADATA_PREFIX, {
+        itemId: itemID,
+        command,
+        processId,
+        phase: "lifecycle",
+        output,
+        stdin: "",
+      }),
+    );
     return {
       key: `${runID}:command:${itemID}:${effectiveStatus}`,
       title,

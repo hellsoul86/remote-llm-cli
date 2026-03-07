@@ -73,6 +73,8 @@ export function isSecondarySurfaceTimelineEntry(
   return (
     /^command (started|completed|failed)$/.test(title) ||
     /^patch (started|applied|failed)$/.test(title) ||
+    title === "command output delta" ||
+    title === "terminal interaction" ||
     title === "review diff updated" ||
     title === "patch diff delta"
   );

@@ -26,6 +26,7 @@ type MockOptions = {
   runtimeCommandEvents?: boolean;
   runtimeFileChangeEvents?: boolean;
   protocolDiffEvents?: boolean;
+  protocolTerminalEvents?: boolean;
   assistantDeltaEvents?: number;
   ignoreStreamAfterCursor?: boolean;
 };
@@ -74,6 +75,7 @@ async function mockSessionApi(
   const runtimeCommandEvents = options?.runtimeCommandEvents ?? false;
   const runtimeFileChangeEvents = options?.runtimeFileChangeEvents ?? false;
   const protocolDiffEvents = options?.protocolDiffEvents ?? false;
+  const protocolTerminalEvents = options?.protocolTerminalEvents ?? false;
   const assistantDeltaEvents = Math.max(1, options?.assistantDeltaEvents ?? 1);
   const ignoreStreamAfterCursor = options?.ignoreStreamAfterCursor ?? false;
 
@@ -254,6 +256,7 @@ async function mockSessionApi(
               id: "item_cmd_1",
               type: "command_execution",
               command: "ls -la",
+              process_id: "pty_cmd_1",
               aggregated_output: "",
               exit_code: null,
               status: "in_progress",
@@ -267,6 +270,7 @@ async function mockSessionApi(
               id: "item_cmd_1",
               type: "command_execution",
               command: "ls -la",
+              process_id: "pty_cmd_1",
               aggregated_output: "README.md",
               exit_code: 0,
               status: "completed",
@@ -368,6 +372,40 @@ async function mockSessionApi(
             turnId: turnState.runID,
             itemId: "item_patch_1",
             delta: "@@ streaming patch output @@\n+native workbench\n",
+          },
+        },
+        startedAt,
+      );
+    }
+
+    if (protocolTerminalEvents) {
+      pushSessionEvent(
+        turnState.sessionID,
+        turnState.runID,
+        "codexrpc.item.commandexecution.outputdelta",
+        {
+          method: "item/commandExecution/outputDelta",
+          params: {
+            threadId: turnState.sessionID,
+            turnId: turnState.runID,
+            itemId: "item_cmd_1",
+            delta: "total 4\n-rw-r--r-- README.md\n",
+          },
+        },
+        startedAt,
+      );
+      pushSessionEvent(
+        turnState.sessionID,
+        turnState.runID,
+        "codexrpc.item.commandexecution.terminalinteraction",
+        {
+          method: "item/commandExecution/terminalInteraction",
+          params: {
+            threadId: turnState.sessionID,
+            turnId: turnState.runID,
+            itemId: "item_cmd_1",
+            processId: "pty_cmd_1",
+            stdin: "q\n",
           },
         },
         startedAt,
@@ -1888,6 +1926,23 @@ test("codex parser preserves whitespace in streaming deltas", async () => {
   );
 });
 
+test("codex parser ignores terminal and file diff delta payloads", async () => {
+  const stdout = [
+    JSON.stringify({
+      type: "item.commandexecution.outputdelta",
+      itemId: "cmd_1",
+      delta: "README.md\n",
+    }),
+    JSON.stringify({
+      type: "item.filechange.outputdelta",
+      itemId: "patch_1",
+      delta: "@@ -1 +1 @@\n",
+    }),
+  ].join("\n");
+
+  expect(parseCodexAssistantTextFromStdout(stdout, false)).toBe("");
+});
+
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
@@ -2673,10 +2728,10 @@ test("terminal drawer mirrors project command output and supports clear shortcut
   await expect.poll(() => harness.runRequests()).toBe(1);
 
   const terminalList = page.getByTestId("terminal-command-list");
-  await expect(terminalList).toContainText("Command Started");
   await expect(terminalList).toContainText("Command Completed");
   await expect(terminalList).toContainText("ls -la");
   await expect(terminalList).toContainText("README.md");
+  await expect(terminalList).toContainText("pty_cmd_1");
 
   await page.keyboard.press("Control+l");
   await expect(page.getByTestId("terminal-command-list")).toHaveCount(0);
@@ -2686,6 +2741,34 @@ test("terminal drawer mirrors project command output and supports clear shortcut
   await expect(page.getByTestId("terminal-drawer")).toHaveCount(0);
   await page.keyboard.press("Control+j");
   await expect(page.getByTestId("terminal-drawer")).toBeVisible();
+});
+
+test("terminal drawer consumes app-server output delta and stdin interaction events", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TERMINAL_PROTOCOL_${Date.now()}`;
+  const harness = await mockSessionApi(page, `terminal protocol ${marker}`, marker, {
+    protocolTerminalEvents: true,
+  });
+  await unlock(page);
+
+  await page.getByTestId("terminal-drawer-toggle").click();
+  await expect(page.getByTestId("terminal-drawer")).toBeVisible();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`emit terminal protocol ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const terminalList = page.getByTestId("terminal-command-list");
+  await expect(terminalList).toContainText("pty_cmd_1");
+  await expect(terminalList).toContainText("total 4");
+  await expect(terminalList).toContainText("README.md");
+  await expect(terminalList).toContainText("1 inputs");
+  await expect(terminalList).toContainText("q");
 });
 
 test("pending command approval resumes the session after allow", async ({

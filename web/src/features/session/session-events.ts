@@ -120,7 +120,9 @@ export function normalizeSessionEvent(
       eventType = "assistant.delta";
     } else if (
       method === "turn/diff/updated" ||
-      method === "item/filechange/outputdelta"
+      method === "item/filechange/outputdelta" ||
+      method === "item/commandexecution/outputdelta" ||
+      method === "item/commandexecution/terminalinteraction"
     ) {
       const diffEvent = {
         type: method.replace(/\//g, "."),

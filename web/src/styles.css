@@ -1693,9 +1693,43 @@ pre {
   font-family: var(--font-mono);
 }
 
+.terminal-command-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.terminal-command-meta span {
+  border-radius: 999px;
+  border: 1px solid rgba(117, 138, 171, 0.28);
+  background: rgba(12, 20, 34, 0.58);
+  padding: 3px 7px;
+  font-size: 0.63rem;
+  color: #afbfdb;
+  font-family: var(--font-mono);
+}
+
 .terminal-command-card time {
   font-size: 0.66rem;
   color: #9aaccc;
+  font-family: var(--font-mono);
+}
+
+.terminal-command-interactions {
+  display: grid;
+  gap: 6px;
+}
+
+.terminal-command-interactions code {
+  display: block;
+  border-radius: 10px;
+  border: 1px solid rgba(91, 111, 145, 0.28);
+  background: rgba(8, 13, 24, 0.48);
+  padding: 7px 9px;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: #d7e1f1;
   font-family: var(--font-mono);
 }
 

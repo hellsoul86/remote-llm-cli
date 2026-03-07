@@ -85,6 +85,7 @@ import {
 } from "./features/session/session-run-events";
 import {
   parseCodexFileChangesBody,
+  parseCodexCommandEventBody,
   parseCodexPatchDeltaBody,
   parseCodexTurnDiffBody,
 } from "./features/session/codex-parsing";
@@ -529,35 +530,104 @@ export function App() {
     const cutoffMS = activeTerminalClearCutoff
       ? Date.parse(activeTerminalClearCutoff)
       : Number.NaN;
-    return activeTimeline
-      .filter((entry) => {
-        if (entry.kind !== "system") return false;
-        if (!/^Command (Started|Completed|Failed)$/i.test(entry.title.trim())) {
-          return false;
-        }
-        if (entry.body.trim() === "") return false;
-        if (!Number.isFinite(cutoffMS)) return true;
-        const createdAtMS = Date.parse(entry.createdAt);
-        return !Number.isFinite(createdAtMS) || createdAtMS > cutoffMS;
-      })
-      .slice(-8)
-      .map((entry) => {
-        const [commandLine, ...outputLines] = entry.body.split("\n");
-        return {
-          id: entry.id,
-          title: entry.title.trim() || "Command",
-          command: commandLine?.trim() || "command",
-          output: outputLines.join("\n").trim(),
+    const entries = activeTimeline.filter((entry) => {
+      if (entry.kind !== "system") return false;
+      if (
+        !/^Command (Started|Completed|Failed)$/i.test(entry.title.trim()) &&
+        entry.title.trim().toLowerCase() !== "command output delta" &&
+        entry.title.trim().toLowerCase() !== "terminal interaction"
+      ) {
+        return false;
+      }
+      if (entry.body.trim() === "") return false;
+      if (!Number.isFinite(cutoffMS)) return true;
+      const createdAtMS = Date.parse(entry.createdAt);
+      return !Number.isFinite(createdAtMS) || createdAtMS > cutoffMS;
+    });
+
+    const byCommand = new Map<
+      string,
+      {
+        id: string;
+        title: string;
+        command: string;
+        output: string;
+        interactions: string[];
+        processId: string;
+        timestamp: string;
+        state: "running" | "success" | "error";
+      }
+    >();
+
+    for (const entry of entries) {
+      const title = entry.title.trim() || "Command";
+      const metadata = parseCodexCommandEventBody(entry.body);
+      if (metadata) {
+        const key = metadata.itemId.trim() || entry.id;
+        const existing = byCommand.get(key) ?? {
+          id: key,
+          title,
+          command: metadata.command.trim() || "command",
+          output: "",
+          interactions: [],
+          processId: metadata.processId.trim(),
           timestamp: formatClock(entry.createdAt),
           state:
             entry.state ??
-            (entry.title.toLowerCase().includes("failed")
+            (title.toLowerCase().includes("failed")
               ? ("error" as const)
-              : entry.title.toLowerCase().includes("started")
-                ? ("running" as const)
-                : ("success" as const)),
+              : title.toLowerCase().includes("completed")
+                ? ("success" as const)
+                : ("running" as const)),
         };
+        if (metadata.command.trim()) {
+          existing.command = metadata.command.trim();
+        }
+        if (metadata.processId.trim()) {
+          existing.processId = metadata.processId.trim();
+        }
+        existing.timestamp = formatClock(entry.createdAt);
+        if (metadata.phase === "delta") {
+          existing.output = `${existing.output}${metadata.output}`;
+        } else if (metadata.phase === "interaction") {
+          existing.interactions.push(metadata.stdin);
+        } else {
+          existing.title = title;
+          existing.state =
+            entry.state ??
+            (title.toLowerCase().includes("failed")
+              ? ("error" as const)
+              : title.toLowerCase().includes("completed")
+                ? ("success" as const)
+                : ("running" as const));
+          if (metadata.output.trim()) {
+            existing.output = metadata.output;
+          }
+        }
+        byCommand.set(key, existing);
+        continue;
+      }
+
+      const [commandLine, ...outputLines] = entry.body.split("\n");
+      byCommand.set(entry.id, {
+        id: entry.id,
+        title,
+        command: commandLine?.trim() || "command",
+        output: outputLines.join("\n").trim(),
+        interactions: [],
+        processId: "",
+        timestamp: formatClock(entry.createdAt),
+        state:
+          entry.state ??
+          (title.toLowerCase().includes("failed")
+            ? ("error" as const)
+            : title.toLowerCase().includes("started")
+              ? ("running" as const)
+              : ("success" as const)),
       });
+    }
+
+    return Array.from(byCommand.values()).slice(-8);
   }, [activeTerminalClearCutoff, activeTimeline]);
   const sessionModelChoices = useMemo(() => {
     const seen = new Set<string>();
