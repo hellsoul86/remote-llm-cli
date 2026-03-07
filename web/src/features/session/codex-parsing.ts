@@ -9,7 +9,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-export function extractThreadIDFromCodexSessionResponse(value: unknown): string {
+function lowerTrimmedString(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+export function extractThreadIDFromCodexSessionResponse(
+  value: unknown,
+): string {
   const record = asRecord(value);
   if (!record) return "";
   const session = asRecord(record.session);
@@ -40,11 +46,12 @@ export function extractTurnIDFromPayload(value: unknown): string {
   }
   const item = asRecord(payload.item);
   if (item) {
-    const id = typeof item.turn_id === "string"
-      ? item.turn_id.trim()
-      : typeof item.turnId === "string"
-        ? item.turnId.trim()
-        : "";
+    const id =
+      typeof item.turn_id === "string"
+        ? item.turn_id.trim()
+        : typeof item.turnId === "string"
+          ? item.turnId.trim()
+          : "";
     if (id) return id;
   }
   return "";
@@ -57,9 +64,8 @@ export function codexRPCMethodAndParams(
   method: string;
   params: Record<string, unknown>;
 } {
-  const rawMethod = typeof payload.method === "string"
-    ? payload.method.trim()
-    : "";
+  const rawMethod =
+    typeof payload.method === "string" ? payload.method.trim() : "";
   const method = rawMethod
     ? rawMethod
     : eventType.startsWith("codexrpc.")
@@ -76,11 +82,12 @@ export function extractRunIDFromCodexRPC(
   payload: Record<string, unknown>,
 ): string {
   const { params } = codexRPCMethodAndParams("codexrpc", payload);
-  const direct = typeof params.run_id === "string"
-    ? params.run_id.trim()
-    : typeof params.runId === "string"
-      ? params.runId.trim()
-      : "";
+  const direct =
+    typeof params.run_id === "string"
+      ? params.run_id.trim()
+      : typeof params.runId === "string"
+        ? params.runId.trim()
+        : "";
   if (direct) return direct;
   return extractTurnIDFromPayload(params);
 }
@@ -122,15 +129,16 @@ function gatherMessageText(
 }
 
 function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
-  const eventType = typeof event.type === "string" ? event.type : "";
+  const eventType = lowerTrimmedString(event.type);
   if (eventType === "item.completed") {
     const item = asRecord(event.item);
     if (!item) return "";
-    const itemType = typeof item.type === "string" ? item.type : "";
-    const itemRole = typeof item.role === "string" ? item.role : "";
+    const itemType = lowerTrimmedString(item.type);
+    const itemRole = lowerTrimmedString(item.role);
     if (
       itemType !== "" &&
       itemType !== "agent_message" &&
+      itemType !== "agentmessage" &&
       itemType !== "assistant_message" &&
       itemType !== "message" &&
       itemRole !== "assistant"
@@ -144,6 +152,30 @@ function pickAssistantTextFromEvent(event: Record<string, unknown>): string {
     const response = asRecord(event.response);
     if (!response) return "";
     return gatherMessageText(response).join("\n").trim();
+  }
+
+  if (eventType === "response_item") {
+    const payload = asRecord(event.payload);
+    if (!payload) return "";
+    const payloadType = lowerTrimmedString(payload.type);
+    const payloadRole = lowerTrimmedString(payload.role);
+    if (payloadType === "message" && payloadRole === "assistant") {
+      return gatherMessageText(payload).join("\n").trim();
+    }
+    return "";
+  }
+
+  if (eventType === "event_msg") {
+    const payload = asRecord(event.payload);
+    if (!payload) return "";
+    const payloadType = lowerTrimmedString(payload.type);
+    if (payloadType === "agent_message") {
+      return gatherMessageText(payload.message).join("\n").trim();
+    }
+    if (payloadType === "task_complete") {
+      return gatherMessageText(payload.last_agent_message).join("\n").trim();
+    }
+    return "";
   }
 
   return "";
@@ -409,8 +441,7 @@ export function parseCodexTurnDiffBody(body: string): string {
     CODEX_TURN_DIFF_METADATA_PREFIX,
     body,
   );
-  const diff =
-    typeof parsed?.diff === "string" ? parsed.diff.trim() : "";
+  const diff = typeof parsed?.diff === "string" ? parsed.diff.trim() : "";
   if (diff) return diff;
   return body
     .split("\n")
@@ -429,8 +460,7 @@ export function parseCodexPatchDeltaBody(body: string): string {
     CODEX_PATCH_DELTA_METADATA_PREFIX,
     body,
   );
-  const delta =
-    typeof parsed?.delta === "string" ? parsed.delta : "";
+  const delta = typeof parsed?.delta === "string" ? parsed.delta : "";
   if (delta.trim()) return delta;
   return body
     .split("\n")
@@ -540,8 +570,7 @@ export function buildCodexRuntimeCardFromEvent(
         ? event.itemId.trim()
         : "command";
     if (eventType === "item.commandexecution.outputdelta") {
-      const delta =
-        typeof event.delta === "string" ? event.delta : "";
+      const delta = typeof event.delta === "string" ? event.delta : "";
       if (!delta.trim()) return null;
       return {
         key: `${runID}:command-delta:${itemID}:${delta.length}:${delta.slice(0, 80)}`,
@@ -557,8 +586,7 @@ export function buildCodexRuntimeCardFromEvent(
         state: "running",
       };
     }
-    const stdin =
-      typeof event.stdin === "string" ? event.stdin : "";
+    const stdin = typeof event.stdin === "string" ? event.stdin : "";
     const processId =
       typeof event.processId === "string" ? event.processId.trim() : "";
     if (!stdin.trim()) return null;
@@ -744,8 +772,7 @@ export function buildCodexRuntimeCardFromEvent(
   }
 
   if (itemType === "error") {
-    const message =
-      typeof item.message === "string" ? item.message.trim() : "";
+    const message = typeof item.message === "string" ? item.message.trim() : "";
     if (!message || !codexEventIncludesApproval(message)) {
       return null;
     }
