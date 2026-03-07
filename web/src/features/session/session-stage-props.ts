@@ -3,11 +3,13 @@ import type { ComponentProps } from "react";
 import { SessionHeader } from "./components/SessionHeader";
 import { SessionReviewPane } from "./components/SessionReviewPane";
 import { SessionStage } from "./components/SessionStage";
+import { SessionTerminalDrawer } from "./components/SessionTerminalDrawer";
 import { SessionTimeline } from "./components/SessionTimeline";
 
 type SessionStageProps = ComponentProps<typeof SessionStage>;
 type SessionHeaderProps = ComponentProps<typeof SessionHeader>;
 type SessionReviewPaneProps = ComponentProps<typeof SessionReviewPane>;
+type SessionTerminalDrawerProps = ComponentProps<typeof SessionTerminalDrawer>;
 type SessionTimelineProps = ComponentProps<typeof SessionTimeline>;
 
 type BuildSessionStagePropsDeps = {
@@ -18,6 +20,13 @@ type BuildSessionStagePropsDeps = {
   streamTone: string;
   streamCopy: string;
   streamLastError: string;
+  terminalDrawerOpen: boolean;
+  canToggleTerminal: boolean;
+  onToggleTerminalDrawer: () => void;
+  terminalWorkdir: SessionTerminalDrawerProps["workdir"];
+  terminalHostLabel: SessionTerminalDrawerProps["hostLabel"];
+  terminalCommands: SessionTerminalDrawerProps["commands"];
+  onClearTerminalDrawer: SessionTerminalDrawerProps["onClear"];
   reviewPaneOpen: boolean;
   canToggleReview: boolean;
   onToggleReviewPane: () => void;
@@ -58,6 +67,9 @@ export function buildSessionStageProps(
     streamTone: deps.streamTone,
     streamCopy: deps.streamCopy,
     streamLastError: deps.streamLastError,
+    terminalOpen: deps.terminalDrawerOpen,
+    canToggleTerminal: deps.canToggleTerminal,
+    onToggleTerminalDrawer: deps.onToggleTerminalDrawer,
     reviewOpen: deps.reviewPaneOpen,
     canToggleReview: deps.canToggleReview,
     onToggleReviewPane: deps.onToggleReviewPane,
@@ -82,6 +94,17 @@ export function buildSessionStageProps(
     onJumpTimelineToLatest: deps.onJumpTimelineToLatest,
   };
 
+  const terminalDrawerProps: SessionTerminalDrawerProps | null =
+    deps.canToggleTerminal
+      ? {
+          workdir: deps.terminalWorkdir,
+          hostLabel: deps.terminalHostLabel,
+          commands: deps.terminalCommands,
+          onClose: deps.onToggleTerminalDrawer,
+          onClear: deps.onClearTerminalDrawer,
+        }
+      : null;
+
   const reviewPaneProps: SessionReviewPaneProps | null = deps.canToggleReview
     ? {
         mode: deps.reviewMode,
@@ -105,6 +128,8 @@ export function buildSessionStageProps(
     headerProps,
     timelineProps,
     composerProps: deps.composerProps,
+    terminalDrawerOpen: deps.terminalDrawerOpen,
+    terminalDrawerProps,
     reviewPaneOpen: deps.reviewPaneOpen,
     reviewPaneProps,
   };

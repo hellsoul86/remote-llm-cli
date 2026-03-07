@@ -275,6 +275,9 @@ export function App() {
   const [imageUploadError, setImageUploadError] = useState("");
   const [sessionAdvancedOpen, setSessionAdvancedOpen] = useState(false);
   const [reviewPaneOpen, setReviewPaneOpen] = useState(false);
+  const [terminalDrawerOpen, setTerminalDrawerOpen] = useState(false);
+  const [terminalClearCutoffByThread, setTerminalClearCutoffByThread] =
+    useState<Record<string, string>>({});
   const [addDirDraft, setAddDirDraft] = useState("");
   const [configFlagDraft, setConfigFlagDraft] = useState("");
   const [enableFlagDraft, setEnableFlagDraft] = useState("");
@@ -421,6 +424,9 @@ export function App() {
     activeThreadID.trim() !== "" &&
     activeStreamState !== "live";
   const reviewMode = activeThread?.codexMode ?? "exec";
+  const activeTerminalClearCutoff = activeThreadID
+    ? terminalClearCutoffByThread[activeThreadID] ?? ""
+    : "";
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
     if (current) return current;
@@ -451,6 +457,40 @@ export function App() {
         })),
     [activeTimeline],
   );
+  const terminalCommands = useMemo(() => {
+    const cutoffMS = activeTerminalClearCutoff
+      ? Date.parse(activeTerminalClearCutoff)
+      : Number.NaN;
+    return activeTimeline
+      .filter((entry) => {
+        if (entry.kind !== "system") return false;
+        if (!/^Command (Started|Completed|Failed)$/i.test(entry.title.trim())) {
+          return false;
+        }
+        if (entry.body.trim() === "") return false;
+        if (!Number.isFinite(cutoffMS)) return true;
+        const createdAtMS = Date.parse(entry.createdAt);
+        return !Number.isFinite(createdAtMS) || createdAtMS > cutoffMS;
+      })
+      .slice(-8)
+      .map((entry) => {
+        const [commandLine, ...outputLines] = entry.body.split("\n");
+        return {
+          id: entry.id,
+          title: entry.title.trim() || "Command",
+          command: commandLine?.trim() || "command",
+          output: outputLines.join("\n").trim(),
+          timestamp: formatClock(entry.createdAt),
+          state:
+            entry.state ??
+            (entry.title.toLowerCase().includes("failed")
+              ? ("error" as const)
+              : entry.title.toLowerCase().includes("started")
+                ? ("running" as const)
+                : ("success" as const)),
+        };
+      });
+  }, [activeTerminalClearCutoff, activeTimeline]);
   const sessionModelChoices = useMemo(() => {
     const seen = new Set<string>();
     const out: string[] = [];
@@ -633,9 +673,28 @@ export function App() {
     }
   }, [activeThreadID, activeThread?.codexMode]);
 
+  useEffect(() => {
+    if (!activeThreadID.trim()) {
+      setTerminalDrawerOpen(false);
+    }
+  }, [activeThreadID]);
+
   function onToggleReviewPane() {
     if (!activeThread) return;
     setReviewPaneOpen((prev) => !prev);
+  }
+
+  function onToggleTerminalDrawer() {
+    if (!activeThread) return;
+    setTerminalDrawerOpen((prev) => !prev);
+  }
+
+  function onClearTerminalDrawer() {
+    if (!activeThreadID.trim()) return;
+    setTerminalClearCutoffByThread((prev) => ({
+      ...prev,
+      [activeThreadID]: new Date().toISOString(),
+    }));
   }
 
   function onSetActiveThreadReviewMode(mode: "exec" | "resume" | "review") {
@@ -674,6 +733,9 @@ export function App() {
     onCloseCommandPalette: () => closeCommandPalette(),
     onCreateThreadAndFocus: createThreadAndFocus,
     onSwitchThreadByOffset: switchThreadByOffset,
+    terminalDrawerOpen,
+    onToggleTerminalDrawer,
+    onClearTerminalDrawer,
     onToggleReviewPane,
   });
 
@@ -1437,6 +1499,13 @@ export function App() {
     streamTone: activeStreamTone,
     streamCopy: activeStreamCopy,
     streamLastError: activeStreamLastError,
+    terminalDrawerOpen,
+    canToggleTerminal: activeThread !== null,
+    onToggleTerminalDrawer,
+    terminalWorkdir: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+    terminalHostLabel: activeWorkspace?.hostName?.trim() || "",
+    terminalCommands,
+    onClearTerminalDrawer,
     reviewPaneOpen,
     canToggleReview: activeThread !== null,
     onToggleReviewPane,

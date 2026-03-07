@@ -2452,6 +2452,45 @@ test("session stream renders command runtime cards", async ({ page }) => {
   await expect(page.getByText(/^ls -la$/)).toBeVisible();
 });
 
+test("terminal drawer mirrors project command output and supports clear shortcut", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `TERMINAL_DRAWER_${Date.now()}`;
+  const harness = await mockSessionApi(page, `terminal ${marker}`, marker, {
+    streamPattern: "completion-once",
+    runtimeCommandEvents: true,
+  });
+  await unlock(page);
+
+  await expect(page.getByTestId("terminal-drawer")).toHaveCount(0);
+  await page.getByTestId("terminal-drawer-toggle").click();
+  await expect(page.getByTestId("terminal-drawer")).toBeVisible();
+  await expect(page.getByTestId("terminal-empty-copy")).toBeVisible();
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`emit terminal output ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  const terminalList = page.getByTestId("terminal-command-list");
+  await expect(terminalList).toContainText("Command Started");
+  await expect(terminalList).toContainText("Command Completed");
+  await expect(terminalList).toContainText("ls -la");
+  await expect(terminalList).toContainText("README.md");
+
+  await page.keyboard.press("Control+l");
+  await expect(page.getByTestId("terminal-command-list")).toHaveCount(0);
+  await expect(page.getByTestId("terminal-empty-copy")).toBeVisible();
+
+  await page.keyboard.press("Control+j");
+  await expect(page.getByTestId("terminal-drawer")).toHaveCount(0);
+  await page.keyboard.press("Control+j");
+  await expect(page.getByTestId("terminal-drawer")).toBeVisible();
+});
+
 test("pending command approval resumes the session after allow", async ({
   page,
 }) => {

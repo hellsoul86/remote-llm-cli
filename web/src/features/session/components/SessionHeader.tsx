@@ -4,6 +4,9 @@ type SessionHeaderProps = {
   streamTone: string;
   streamCopy: string;
   streamLastError: string;
+  terminalOpen: boolean;
+  canToggleTerminal: boolean;
+  onToggleTerminalDrawer: () => void;
   reviewOpen: boolean;
   canToggleReview: boolean;
   onToggleReviewPane: () => void;
@@ -20,6 +23,9 @@ export function SessionHeader({
   streamTone,
   streamCopy,
   streamLastError,
+  terminalOpen,
+  canToggleTerminal,
+  onToggleTerminalDrawer,
   reviewOpen,
   canToggleReview,
   onToggleReviewPane,
@@ -59,6 +65,17 @@ export function SessionHeader({
           </span>
         </div>
         <div className="chat-head-actions">
+          <button
+            type="button"
+            className={`ghost stream-reconnect-btn terminal-drawer-toggle${
+              terminalOpen ? " active" : ""
+            }`}
+            data-testid="terminal-drawer-toggle"
+            disabled={!canToggleTerminal}
+            onClick={onToggleTerminalDrawer}
+          >
+            Terminal
+          </button>
           <button
             type="button"
             className={`ghost stream-reconnect-btn review-pane-toggle${
