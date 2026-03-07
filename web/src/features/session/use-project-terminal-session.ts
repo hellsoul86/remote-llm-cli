@@ -150,14 +150,12 @@ export function useProjectTerminalSession({
     socketRef.current?.sendInput(data);
   }, []);
 
-  const sendLine = useCallback((line: string) => {
-    const nextLine = line.replace(/\r?\n$/, "");
-    if (!nextLine.trim()) return;
-    socketRef.current?.sendInput(`${nextLine}\n`);
-  }, []);
-
   const interrupt = useCallback(() => {
     socketRef.current?.interrupt();
+  }, []);
+
+  const resize = useCallback((rows: number, cols: number) => {
+    socketRef.current?.resize(rows, cols);
   }, []);
 
   const clear = useCallback(() => {
@@ -185,7 +183,7 @@ export function useProjectTerminalSession({
     output,
     error,
     sendInput,
-    sendLine,
+    resize,
     interrupt,
     clear,
     reconnect,

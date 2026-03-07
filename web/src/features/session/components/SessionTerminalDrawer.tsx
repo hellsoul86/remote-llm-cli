@@ -1,6 +1,5 @@
-import { useState } from "react";
-
 import type { TimelineState } from "../../../domains/session";
+import { LiveTerminalSurface } from "./LiveTerminalSurface";
 
 type TerminalCommandEntry = {
   id: string;
@@ -21,7 +20,8 @@ type SessionTerminalDrawerProps = {
   liveTransportAvailable: boolean;
   liveOutput: string;
   liveError: string;
-  onSendLine: (line: string) => void;
+  onSendInput: (data: string) => void;
+  onResize: (rows: number, cols: number) => void;
   onInterrupt: () => void;
   onReconnect: () => void;
   onClose: () => void;
@@ -53,7 +53,8 @@ export function SessionTerminalDrawer({
   liveTransportAvailable,
   liveOutput,
   liveError,
-  onSendLine,
+  onSendInput,
+  onResize,
   onInterrupt,
   onReconnect,
   onClose,
@@ -62,7 +63,6 @@ export function SessionTerminalDrawer({
   const context = [workdir.trim(), hostLabel.trim()]
     .filter(Boolean)
     .join(" · ");
-  const [draft, setDraft] = useState("");
   const showLiveShell = liveTransportAvailable && liveStatus !== "error";
 
   return (
@@ -123,45 +123,21 @@ export function SessionTerminalDrawer({
       </div>
 
       {showLiveShell ? (
-        <div className="terminal-live-shell" data-testid="terminal-live-shell">
-          <pre
-            className="terminal-live-output"
-            data-testid="terminal-live-output"
-          >
-            {liveOutput || "$ "}
-          </pre>
-          <form
-            className="terminal-live-composer"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const nextLine = draft.trim();
-              if (!nextLine) return;
-              onSendLine(nextLine);
-              setDraft("");
-            }}
-          >
-            <span className="terminal-live-prompt">$</span>
-            <input
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              className="terminal-live-input"
-              data-testid="terminal-live-input"
-              placeholder={
-                liveStatus === "connecting"
-                  ? "Waiting for shell…"
-                  : "Type a shell command"
-              }
-              disabled={liveStatus === "connecting" || liveStatus === "closed"}
-            />
-            <button
-              type="submit"
-              className="terminal-live-send"
-              disabled={liveStatus === "connecting" || liveStatus === "closed"}
-            >
-              Run
-            </button>
-          </form>
-        </div>
+        <>
+          <LiveTerminalSurface
+            output={liveOutput}
+            status={liveStatus}
+            onSendInput={onSendInput}
+            onResize={onResize}
+          />
+          <p className="terminal-live-hint">
+            {liveStatus === "connecting"
+              ? "Connecting to project shell…"
+              : liveStatus === "closed"
+                ? "Shell exited. Reconnect to open a new terminal."
+                : "Type directly in the terminal. Ctrl+C interrupts the active process."}
+          </p>
+        </>
       ) : commands.length === 0 ? (
         <div
           className="terminal-live-unavailable"

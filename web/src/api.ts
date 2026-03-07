@@ -1695,6 +1695,7 @@ type ProjectTerminalSocketOptions = {
 
 export type ProjectTerminalSocket = {
   sendInput: (data: string) => void;
+  resize: (rows: number, cols: number) => void;
   interrupt: () => void;
   close: () => void;
 };
@@ -1780,6 +1781,10 @@ export function openProjectTerminalSocket(
     sendInput(data: string) {
       if (data === "") return;
       sendPayload({ type: "stdin", data });
+    },
+    resize(rows: number, cols: number) {
+      if (rows <= 0 || cols <= 0) return;
+      sendPayload({ type: "resize", rows, cols });
     },
     interrupt() {
       sendPayload({ type: "interrupt" });

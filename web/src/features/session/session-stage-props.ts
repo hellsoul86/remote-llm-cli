@@ -30,7 +30,8 @@ type BuildSessionStagePropsDeps = {
   terminalLiveTransportAvailable: SessionTerminalDrawerProps["liveTransportAvailable"];
   terminalLiveOutput: SessionTerminalDrawerProps["liveOutput"];
   terminalLiveError: SessionTerminalDrawerProps["liveError"];
-  onTerminalSendLine: SessionTerminalDrawerProps["onSendLine"];
+  onTerminalSendInput: SessionTerminalDrawerProps["onSendInput"];
+  onTerminalResize: SessionTerminalDrawerProps["onResize"];
   onTerminalInterrupt: SessionTerminalDrawerProps["onInterrupt"];
   onTerminalReconnect: SessionTerminalDrawerProps["onReconnect"];
   onClearTerminalDrawer: SessionTerminalDrawerProps["onClear"];
@@ -127,7 +128,8 @@ export function buildSessionStageProps(
           liveTransportAvailable: deps.terminalLiveTransportAvailable,
           liveOutput: deps.terminalLiveOutput,
           liveError: deps.terminalLiveError,
-          onSendLine: deps.onTerminalSendLine,
+          onSendInput: deps.onTerminalSendInput,
+          onResize: deps.onTerminalResize,
           onInterrupt: deps.onTerminalInterrupt,
           onReconnect: deps.onTerminalReconnect,
           onClose: deps.onToggleTerminalDrawer,

@@ -41,11 +41,17 @@ func startLocalProjectTerminal(ctx context.Context, workdir string) (*Interactiv
 	}
 
 	proc := &InteractiveProcess{
-		command:  "local terminal " + program + " " + strings.Join(args, " "),
-		cmd:      cmd,
-		stdin:    ptmx,
-		stdout:   ptmx,
-		stderr:   nil,
+		command: "local terminal " + program + " " + strings.Join(args, " "),
+		cmd:     cmd,
+		stdin:   ptmx,
+		stdout:  ptmx,
+		stderr:  nil,
+		resize: func(rows int, cols int) error {
+			return pty.Setsize(ptmx, &pty.Winsize{
+				Rows: uint16(rows),
+				Cols: uint16(cols),
+			})
+		},
 		waitDone: make(chan struct{}),
 	}
 	go func() {
@@ -66,35 +72,25 @@ func startRemoteProjectTerminal(ctx context.Context, h model.Host, workdir strin
 	sshArgs := buildSSHTransportArgs(h)
 	sshArgs = append(sshArgs, "-tt", hostTarget(h), "--", "sh", "-lc", remoteCmd)
 	cmd := exec.Command("ssh", sshArgs...)
+	cmd.Env = append(os.Environ(), "TERM="+defaultTerminalTerm)
 
-	stdin, err := cmd.StdinPipe()
+	ptmx, err := pty.Start(cmd)
 	if err != nil {
-		return nil, err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-		return nil, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stderr.Close()
 		return nil, err
 	}
 
 	proc := &InteractiveProcess{
-		command:  "ssh " + strings.Join(sshArgs, " "),
-		cmd:      cmd,
-		stdin:    stdin,
-		stdout:   stdout,
-		stderr:   stderr,
+		command: "ssh " + strings.Join(sshArgs, " "),
+		cmd:     cmd,
+		stdin:   ptmx,
+		stdout:  ptmx,
+		stderr:  nil,
+		resize: func(rows int, cols int) error {
+			return pty.Setsize(ptmx, &pty.Winsize{
+				Rows: uint16(rows),
+				Cols: uint16(cols),
+			})
+		},
 		waitDone: make(chan struct{}),
 	}
 	go func() {

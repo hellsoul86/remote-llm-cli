@@ -205,6 +205,17 @@ func (t *projectTerminalSession) close() error {
 	return proc.Close()
 }
 
+func (t *projectTerminalSession) resize(rows int, cols int) error {
+	t.mu.Lock()
+	proc := t.proc
+	closed := t.closed
+	t.mu.Unlock()
+	if closed || proc == nil {
+		return errors.New("project terminal is not running")
+	}
+	return proc.Resize(rows, cols)
+}
+
 func (s *Server) handleProjectTerminalWS(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.PathValue("id"))
 	if projectID == "" {
@@ -262,6 +273,10 @@ func (s *Server) handleProjectTerminalWS(w http.ResponseWriter, r *http.Request)
 				_ = session.writeInput(asString(msg["data"]))
 			case "interrupt":
 				_ = session.writeInput(string([]byte{3}))
+			case "resize":
+				rows, _ := asInt(msg["rows"])
+				cols, _ := asInt(msg["cols"])
+				_ = session.resize(rows, cols)
 			case "close":
 				_ = session.close()
 			}
@@ -322,6 +337,19 @@ func (s *Server) handleProjectTerminalWS(w http.ResponseWriter, r *http.Request)
 			}
 			lastSeq = frame.Seq
 		}
+	}
+}
+
+func asInt(v any) (int, bool) {
+	switch value := v.(type) {
+	case float64:
+		return int(value), true
+	case int:
+		return value, true
+	case int64:
+		return int(value), true
+	default:
+		return 0, false
 	}
 }
 

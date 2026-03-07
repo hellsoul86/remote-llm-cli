@@ -268,3 +268,94 @@ func TestProjectTerminalWSStreamsLocalShellOutput(t *testing.T) {
 		t.Fatalf("terminal frame type=%q want=exit", got)
 	}
 }
+
+func TestProjectTerminalWSResizeAffectsLocalShell(t *testing.T) {
+	srv, httpSrv, token, host := newAuthedTestServer(t)
+	defer httpSrv.Close()
+
+	workdir := t.TempDir()
+	host.ConnectionMode = "local"
+	host.Workspace = workdir
+	host.Host = "localhost"
+	host.User = ""
+	updatedHost, err := srv.store.UpsertHost(host)
+	if err != nil {
+		t.Fatalf("upsert local host: %v", err)
+	}
+	project, err := srv.store.UpsertProject(model.ProjectRecord{
+		ID:       "project_terminal_resize_1",
+		HostID:   updatedHost.ID,
+		HostName: updatedHost.Name,
+		Path:     workdir,
+		Title:    "terminal resize",
+		Runtime:  "codex",
+	})
+	if err != nil {
+		t.Fatalf("upsert project: %v", err)
+	}
+
+	base, err := url.Parse(httpSrv.URL)
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	wsScheme := "ws"
+	if strings.EqualFold(base.Scheme, "https") {
+		wsScheme = "wss"
+	}
+	wsURL := url.URL{
+		Scheme: wsScheme,
+		Host:   base.Host,
+		Path:   fmt.Sprintf("/v2/projects/%s/terminal/ws", project.ID),
+	}
+	query := wsURL.Query()
+	query.Set("access_token", token)
+	wsURL.RawQuery = query.Encode()
+
+	conn, res, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	if err != nil {
+		body := ""
+		if res != nil {
+			raw, _ := io.ReadAll(res.Body)
+			_ = res.Body.Close()
+			body = string(raw)
+		}
+		t.Fatalf("dial terminal ws: %v body=%q", err, body)
+	}
+	defer conn.Close()
+
+	_ = readWSFrameType(t, conn, "terminal.ready", 5*time.Second)
+
+	if err := conn.WriteJSON(map[string]any{
+		"type": "resize",
+		"rows": 33,
+		"cols": 91,
+	}); err != nil {
+		t.Fatalf("write resize frame: %v", err)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"type": "stdin",
+		"data": "stty size\n",
+	}); err != nil {
+		t.Fatalf("write stdin frame: %v", err)
+	}
+
+	deadline := time.Now().Add(12 * time.Second)
+	found := false
+	for time.Now().Before(deadline) {
+		frame := readWSFrame(t, conn, 1500*time.Millisecond)
+		if strings.TrimSpace(asString(frame["type"])) != "terminal.frame" {
+			continue
+		}
+		payload, ok := frame["frame"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.Contains(asString(payload["data"]), "33 91") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected resized terminal size in shell output")
+	}
+}
