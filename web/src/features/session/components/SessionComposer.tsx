@@ -207,8 +207,8 @@ export function SessionComposer({
               )}
             </select>
           </label>
-          <label className="composer-select-pill" aria-label="Access">
-            <span>Access</span>
+          <label className="composer-select-pill" aria-label="Permissions">
+            <span>Permissions</span>
             <select
               data-testid="session-sandbox-select"
               value={activeThread?.sandbox ?? "workspace-write"}
@@ -244,7 +244,7 @@ export function SessionComposer({
             onClick={onToggleSessionAdvanced}
             disabled={!activeThread}
           >
-            {sessionAdvancedOpen ? "Hide Controls" : "Controls"}
+            {sessionAdvancedOpen ? "Hide More" : "More"}
           </button>
         </div>
         {!hasSessionModelChoices ? (

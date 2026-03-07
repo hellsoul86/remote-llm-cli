@@ -2254,11 +2254,29 @@ test("codex parser extracts assistant text from response_item envelopes", async 
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
-  await page.getByRole("button", { name: "Unlock Workspace" }).click();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await page.getByRole("button", { name: "Unlock Codex" }).click();
+  await expect(page.locator(".session-side")).toBeVisible();
+  await expect(
+    page.getByPlaceholder("Search projects or threads"),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Send", exact: true }),
   ).toBeEnabled();
+}
+
+async function revisitWorkspace(page: Page): Promise<void> {
+  await page.reload({ waitUntil: "domcontentloaded" });
+  const workspaceShell = page.locator(".session-side");
+  try {
+    await expect(workspaceShell).toBeVisible({ timeout: 15000 });
+    return;
+  } catch {
+    const tokenInput = page.getByPlaceholder("rlm_xxx.yyy");
+    await expect(tokenInput).toBeVisible({ timeout: 15000 });
+    await tokenInput.fill("rlm_test.token");
+    await page.getByRole("button", { name: "Unlock Codex" }).click();
+    await expect(workspaceShell).toBeVisible();
+  }
 }
 
 test("desktop session UX baseline (layout + interaction + scroll)", async ({
@@ -2364,9 +2382,7 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
   await unlock(page);
 
   const topbar = page.locator(".app-topbar");
-  await expect(
-    topbar.getByRole("button", { name: "Utilities", exact: true }),
-  ).toBeVisible();
+  await expect(topbar.getByRole("button", { name: "Tools", exact: true })).toBeVisible();
   await expect(
     topbar.getByRole("button", { name: "Session", exact: true }),
   ).toHaveCount(0);
@@ -2379,7 +2395,8 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
   await expect(
     topbar.getByRole("button", { name: "Lock", exact: true }),
   ).toHaveCount(0);
-  await expect(page.getByTestId("stream-status")).toContainText("Connected");
+  await expect(page).toHaveTitle(/Codex$/);
+  await expect(page.getByTestId("stream-status")).toContainText("Live");
 });
 
 test("jump-to-latest appears when timeline grows off-bottom", async ({
@@ -2553,7 +2570,7 @@ test("ops codex platform auth panel runs status action", async ({ page }) => {
   const harness = await mockSessionApi(page, `platform auth ${marker}`, marker);
   await unlock(page);
 
-  await page.getByRole("button", { name: "Utilities", exact: true }).click();
+  await page.getByRole("button", { name: "Tools", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Codex Platform" }),
   ).toBeVisible();
@@ -2576,7 +2593,7 @@ test("ops codex platform mcp/cloud controls map requests", async ({ page }) => {
   const harness = await mockSessionApi(page, `platform req ${marker}`, marker);
   await unlock(page);
 
-  await page.getByRole("button", { name: "Utilities", exact: true }).click();
+  await page.getByRole("button", { name: "Tools", exact: true }).click();
 
   await page.getByTestId("platform-mcp-action-select").selectOption("add");
   await page.getByTestId("platform-mcp-name-input").fill("memory");
@@ -3476,8 +3493,8 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
   await expect(page.getByText("Response Started")).toHaveCount(0);
   await expect(page.getByText("Server Completed")).toHaveCount(0);
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".session-side")).toBeVisible();
   await expect(
     page.locator(".message.message-assistant pre", { hasText: marker }),
   ).toHaveCount(1);
@@ -3548,8 +3565,7 @@ test("archived session can be restored and survives reload", async ({
   );
   expect(restoreResponse.ok).toBeTruthy();
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   const restoredSession = page
     .locator(`.session-chip-tree[data-session-id="${sessionID}"]`)
     .first();
@@ -3589,8 +3605,7 @@ test("server replay ignores cursor but timeline stays deduped", async ({
   });
   await expect(assistantEntry).toHaveCount(1);
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   await expect(assistantEntry).toHaveCount(1);
   await expect
     .poll(() =>
@@ -3620,8 +3635,7 @@ test("websocket stream replay renders once without SSE fallback", async ({
   await expect(assistantEntry).toHaveCount(1);
   await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   await expect(assistantEntry).toHaveCount(1);
   await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
   await expect
@@ -3799,8 +3813,7 @@ test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
     })
     .toContain("session 2");
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   await expect(projectFilter).toHaveValue("session 2");
   await expect(page.locator(".project-host-pill").first()).toBeVisible();
 });
@@ -4162,7 +4175,7 @@ test("stream status recovers after transient failures", async ({ page }) => {
   expect(sawRetryState).toBeTruthy();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(streamStatus).toContainText("Connected", { timeout: 15000 });
+  await expect(streamStatus).toContainText("Live", { timeout: 15000 });
 
   const composer = page.getByPlaceholder(
     "Ask Codex to work in this project...",
@@ -4207,8 +4220,7 @@ test("pinning session reorders tree and persists across reload", async ({
     page.locator(".project-session-list .session-chip-tree").first(),
   ).toHaveAttribute("data-session-id", "session_cli_2");
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   await expect(
     page.locator(
       '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.pinned',

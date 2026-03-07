@@ -5,6 +5,7 @@ const useLocalDevServer = liveBaseURL === "";
 
 export default defineConfig({
   testDir: "./e2e",
+  retries: 1,
   timeout: useLocalDevServer ? 30_000 : 300_000,
   expect: {
     timeout: useLocalDevServer ? 10_000 : 120_000
@@ -13,7 +14,10 @@ export default defineConfig({
     baseURL: useLocalDevServer ? "http://127.0.0.1:4173" : liveBaseURL,
     headless: true,
     trace: "retain-on-failure",
-    screenshot: "only-on-failure"
+    screenshot: "only-on-failure",
+    launchOptions: {
+      args: ["--disable-dev-shm-usage"]
+    }
   },
   webServer: useLocalDevServer
     ? {

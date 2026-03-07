@@ -1003,9 +1003,16 @@ export function App() {
 
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const title = activeThread?.title.trim() || "Session";
-    document.title = `${title} · Codex Control App`;
-  }, [activeThread?.title]);
+    if (authPhase !== "ready") {
+      document.title = "Sign In · Codex";
+      return;
+    }
+    const title =
+      activeThread?.title.trim() ||
+      activeWorkspace?.title.trim() ||
+      "Codex";
+    document.title = `${title} · Codex`;
+  }, [authPhase, activeThread?.title, activeWorkspace?.title]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1670,16 +1677,26 @@ export function App() {
     onSubmit: onAddHost,
     onCancelEdit: onCancelHostEdit,
   });
+  const headerHostLabel =
+    activeWorkspace?.hostName?.trim() &&
+    activeWorkspace.hostName.trim() !== "local-default"
+      ? activeWorkspace.hostName.trim()
+      : "";
+  const headerModeLabel =
+    activeThread?.codexMode === "review"
+      ? "Review"
+      : activeThread?.codexMode === "resume"
+        ? "Resume"
+        : "Exec";
   const sessionStageProps = buildSessionStageProps({
     sidebarProps: sessionSidebarProps,
     composerProps: sessionComposerProps,
+    headerProjectTitle: activeWorkspace?.title?.trim() || "Untitled Project",
+    headerProjectPath: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+    headerHostLabel,
     headerTitle: activeThread?.title ?? "Session",
-    headerContext:
-      (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH) +
-      ((activeWorkspace?.hostName?.trim() || "") &&
-      activeWorkspace?.hostName?.trim() !== "local-default"
-        ? ` · ${activeWorkspace.hostName.trim()}`
-        : ""),
+    headerModeLabel,
+    headerModelLabel: activeThreadModelValue,
     streamTone: activeStreamTone,
     streamCopy: activeStreamCopy,
     streamLastError: activeStreamLastError,
