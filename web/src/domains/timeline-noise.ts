@@ -64,3 +64,14 @@ export function isLegacySessionNoiseEntry(
   if (!body) return false;
   return allBodyLinesAreNoise(body);
 }
+
+export function isSecondarySurfaceTimelineEntry(
+  entry: TimelineNoiseEntryLike,
+): boolean {
+  if (entry.kind !== "system") return false;
+  const title = entry.title.trim().toLowerCase();
+  return (
+    /^command (started|completed|failed)$/.test(title) ||
+    /^patch (started|applied|failed)$/.test(title)
+  );
+}

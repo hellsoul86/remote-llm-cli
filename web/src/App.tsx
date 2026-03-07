@@ -13,6 +13,7 @@ import {
   clearStoredToken,
   loadStoredToken,
 } from "./domains/auth-token";
+import { isSecondarySurfaceTimelineEntry } from "./domains/timeline-noise";
 import {
   useSessionDomain,
 } from "./domains/session";
@@ -433,13 +434,21 @@ export function App() {
     if (sessionModelDefault.trim()) return sessionModelDefault.trim();
     return sessionModelOptions[0]?.trim() ?? "";
   }, [activeThread?.model, sessionModelDefault, sessionModelOptions]);
+  const visibleTimeline = useMemo(
+    () =>
+      activeTimeline.filter(
+        (entry) => !isSecondarySurfaceTimelineEntry(entry),
+      ),
+    [activeTimeline],
+  );
   const reviewFindings = useMemo(
     () =>
       activeTimeline
         .filter(
           (entry) =>
             (entry.kind === "assistant" || entry.kind === "system") &&
-            entry.body.trim() !== "",
+            entry.body.trim() !== "" &&
+            !isSecondarySurfaceTimelineEntry(entry),
         )
         .slice(-6)
         .reverse()
@@ -676,7 +685,7 @@ export function App() {
       .filter((action) => action.searchText.includes(query))
       .slice(0, 48);
   }, [commandPaletteActions, commandPaletteQuery]);
-  const activeTimelineTail = activeTimeline[activeTimeline.length - 1];
+  const activeTimelineTail = visibleTimeline[visibleTimeline.length - 1];
   const {
     timelineUnreadCount,
     timelineViewportRef,
@@ -686,7 +695,7 @@ export function App() {
     forceStickToBottom,
   } = useTimelineScrollController({
     activeThreadID,
-    timelineLength: activeTimeline.length,
+    timelineLength: visibleTimeline.length,
     timelineTailID: activeTimelineTail?.id ?? "",
     timelineTailState: activeTimelineTail?.state ?? "",
     timelineTailBody: activeTimelineTail?.body ?? "",
@@ -1564,7 +1573,7 @@ export function App() {
     onArchive: onArchiveActiveSession,
     canReconnect: canReconnectActiveStream,
     onReconnect: onReconnectActiveStream,
-    timeline: activeTimeline,
+    timeline: visibleTimeline,
     isRefreshing,
     renderTimelineEntryBody,
     formatClock,

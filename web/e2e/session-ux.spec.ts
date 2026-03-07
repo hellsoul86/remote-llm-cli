@@ -2383,6 +2383,7 @@ test("review pane surfaces changed files away from the main chat flow", async ({
   await composer.fill(`review changed files ${marker}`);
   await composer.press("Enter");
   await expect.poll(() => harness.runRequests()).toBe(1);
+  await expect(page.locator(".timeline")).not.toContainText("Patch Applied");
 
   const changeList = page.getByTestId("review-change-list");
   await expect(changeList).toContainText("src/app.ts");
@@ -2486,7 +2487,7 @@ test("session stream completion keeps a single assistant reply", async ({
   await expect(page.getByText(/^Done\.$/)).toHaveCount(0);
 });
 
-test("session stream renders command runtime cards", async ({ page }) => {
+test("session stream keeps command runtime cards out of the main chat flow", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 900 });
   const marker = `RUNTIME_CARD_${Date.now()}`;
   const harness = await mockSessionApi(page, `runtime ${marker}`, marker, {
@@ -2501,10 +2502,9 @@ test("session stream renders command runtime cards", async ({ page }) => {
   await composer.fill(`emit runtime command cards ${marker}`);
   await composer.press("Enter");
   await expect.poll(() => harness.runRequests()).toBe(1);
-
-  await expect(page.getByText("Command Started")).toBeVisible();
-  await expect(page.getByText("Command Completed")).toBeVisible();
-  await expect(page.getByText(/^ls -la$/)).toBeVisible();
+  await expect(page.locator(".timeline")).not.toContainText("Command Started");
+  await expect(page.locator(".timeline")).not.toContainText("Command Completed");
+  await expect(page.locator(".timeline")).not.toContainText("ls -la");
 });
 
 test("terminal drawer mirrors project command output and supports clear shortcut", async ({
