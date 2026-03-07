@@ -26,6 +26,13 @@ type BuildSessionStagePropsDeps = {
   terminalWorkdir: SessionTerminalDrawerProps["workdir"];
   terminalHostLabel: SessionTerminalDrawerProps["hostLabel"];
   terminalCommands: SessionTerminalDrawerProps["commands"];
+  terminalLiveStatus: SessionTerminalDrawerProps["liveStatus"];
+  terminalLiveTransportAvailable: SessionTerminalDrawerProps["liveTransportAvailable"];
+  terminalLiveOutput: SessionTerminalDrawerProps["liveOutput"];
+  terminalLiveError: SessionTerminalDrawerProps["liveError"];
+  onTerminalSendLine: SessionTerminalDrawerProps["onSendLine"];
+  onTerminalInterrupt: SessionTerminalDrawerProps["onInterrupt"];
+  onTerminalReconnect: SessionTerminalDrawerProps["onReconnect"];
   onClearTerminalDrawer: SessionTerminalDrawerProps["onClear"];
   reviewPaneOpen: boolean;
   canToggleReview: boolean;
@@ -40,6 +47,8 @@ type BuildSessionStagePropsDeps = {
   reviewPatchDelta: SessionReviewPaneProps["patchDelta"];
   reviewChanges: SessionReviewPaneProps["changes"];
   reviewFindings: SessionReviewPaneProps["findings"];
+  canStartReview: SessionReviewPaneProps["canStartReview"];
+  onStartReview: SessionReviewPaneProps["onStartReview"];
   onSetReviewMode: SessionReviewPaneProps["onSetMode"];
   onSetReviewUncommitted: SessionReviewPaneProps["onSetReviewUncommitted"];
   onSetReviewBase: SessionReviewPaneProps["onSetReviewBase"];
@@ -103,6 +112,13 @@ export function buildSessionStageProps(
           workdir: deps.terminalWorkdir,
           hostLabel: deps.terminalHostLabel,
           commands: deps.terminalCommands,
+          liveStatus: deps.terminalLiveStatus,
+          liveTransportAvailable: deps.terminalLiveTransportAvailable,
+          liveOutput: deps.terminalLiveOutput,
+          liveError: deps.terminalLiveError,
+          onSendLine: deps.onTerminalSendLine,
+          onInterrupt: deps.onTerminalInterrupt,
+          onReconnect: deps.onTerminalReconnect,
           onClose: deps.onToggleTerminalDrawer,
           onClear: deps.onClearTerminalDrawer,
         }
@@ -120,6 +136,8 @@ export function buildSessionStageProps(
         patchDelta: deps.reviewPatchDelta,
         changes: deps.reviewChanges,
         findings: deps.reviewFindings,
+        canStartReview: deps.canStartReview,
+        onStartReview: deps.onStartReview,
         onClose: deps.onToggleReviewPane,
         onSetMode: deps.onSetReviewMode,
         onSetReviewUncommitted: deps.onSetReviewUncommitted,

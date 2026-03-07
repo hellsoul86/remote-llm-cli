@@ -1,22 +1,9 @@
-import {
-  FormEvent,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import {
-  API_BASE,
-} from "./api";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { API_BASE } from "./api";
 import { useOpsDomain } from "./domains/ops";
-import {
-  clearStoredToken,
-  loadStoredToken,
-} from "./domains/auth-token";
+import { clearStoredToken, loadStoredToken } from "./domains/auth-token";
 import { isSecondarySurfaceTimelineEntry } from "./domains/timeline-noise";
-import {
-  useSessionDomain,
-} from "./domains/session";
+import { useSessionDomain } from "./domains/session";
 import { AppChrome } from "./features/session/components/AppChrome";
 import { CommandPalette } from "./features/session/components/CommandPalette";
 import { OpsStage } from "./features/session/components/OpsStage";
@@ -41,11 +28,13 @@ import { useSessionStreamHealth } from "./features/session/use-session-stream-he
 import { useTimelineEntryBody } from "./features/session/use-timeline-entry-body";
 import { useTimelineScrollController } from "./features/session/use-timeline-scroll";
 import { useCodexPendingRequests } from "./features/session/use-codex-pending-requests";
+import { useProjectTerminalSession } from "./features/session/use-project-terminal-session";
 import { createProjectSourceActions } from "./features/session/project-source-actions";
 import { createHostActions } from "./features/session/host-actions";
 import { createOpsJobActions } from "./features/session/ops-job-actions";
 import { createProjectActions } from "./features/session/project-actions";
 import { createComposerImageActions } from "./features/session/composer-image-actions";
+import { createSessionReviewAction } from "./features/session/session-review-action";
 import { createSessionControlActions } from "./features/session/session-control-actions";
 import { createSessionSecondaryActions } from "./features/session/session-secondary-actions";
 import { createSessionSubmitAction } from "./features/session/session-submit-action";
@@ -71,18 +60,14 @@ import {
   loadSessionTreePrefs,
   persistSessionTreePrefs,
 } from "./features/session/persistence";
-import {
-  type SessionTreeHost,
-} from "./features/session/types";
+import { type SessionTreeHost } from "./features/session/types";
 import {
   collectVisibleTreeSessionIDs,
   filterSessionTreeHosts,
   buildSessionTreeHosts,
 } from "./features/session/tree";
 import { buildSessionStreamTargetIDs } from "./features/session/stream-targets";
-import {
-  createSessionRunEventHandlers,
-} from "./features/session/session-run-events";
+import { createSessionRunEventHandlers } from "./features/session/session-run-events";
 import {
   parseCodexFileChangesBody,
   parseCodexCommandEventBody,
@@ -116,9 +101,7 @@ function isLocalDraftSessionID(sessionID: string): boolean {
 export function App() {
   const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
   const [token, setToken] = useState("");
-  const [tokenInput, setTokenInput] = useState<string>(
-    () => loadStoredToken(),
-  );
+  const [tokenInput, setTokenInput] = useState<string>(() => loadStoredToken());
   const [authError, setAuthError] = useState("");
   const { appMode, switchMode } = useAppMode();
 
@@ -291,7 +274,9 @@ export function App() {
   const [disableFlagDraft, setDisableFlagDraft] = useState("");
   const [composerDropActive, setComposerDropActive] = useState(false);
   const sessionTreePrefs = useMemo(() => loadSessionTreePrefs(), []);
-  const [projectFilter, setProjectFilter] = useState(sessionTreePrefs.projectFilter);
+  const [projectFilter, setProjectFilter] = useState(
+    sessionTreePrefs.projectFilter,
+  );
   const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
     sessionTreePrefs.collapsedHostIDs,
   );
@@ -362,6 +347,14 @@ export function App() {
   const activeSessionHostID = activeWorkspace?.hostID?.trim() ?? "";
   const activeWorkspaceHostID = activeWorkspace?.hostID?.trim() ?? "";
   const activeWorkspacePath = activeWorkspace?.path?.trim() ?? "";
+  const projectTerminal = useProjectTerminalSession({
+    enabled:
+      authPhase === "ready" &&
+      terminalDrawerOpen &&
+      activeWorkspaceID.trim() !== "",
+    token,
+    projectID: activeWorkspaceID,
+  });
   const sessionTreeHosts = useMemo<SessionTreeHost[]>(
     () => buildSessionTreeHosts(hosts, workspaces, activeWorkspaceID),
     [hosts, workspaces, activeWorkspaceID],
@@ -369,9 +362,7 @@ export function App() {
   const sourceProjectIDSet = useMemo(
     () =>
       new Set(
-        sourceProjectIDs
-          .map((id) => id.trim())
-          .filter((id) => id !== ""),
+        sourceProjectIDs.map((id) => id.trim()).filter((id) => id !== ""),
       ),
     [sourceProjectIDs],
   );
@@ -380,7 +371,8 @@ export function App() {
     [projectFilter, sessionTreeHosts],
   );
   const visibleTreeSessionIDs = useMemo(
-    () => collectVisibleTreeSessionIDs(filteredSessionTreeHosts, collapsedHostIDs),
+    () =>
+      collectVisibleTreeSessionIDs(filteredSessionTreeHosts, collapsedHostIDs),
     [collapsedHostIDs, filteredSessionTreeHosts],
   );
   const activeThreadBusy =
@@ -421,7 +413,10 @@ export function App() {
       ? "connecting"
       : "offline";
   const activeStreamRetries = activeSessionStreamHealth?.retries ?? 0;
-  const activeStreamCopy = streamHealthCopy(activeStreamState, activeStreamRetries);
+  const activeStreamCopy = streamHealthCopy(
+    activeStreamState,
+    activeStreamRetries,
+  );
   const activeStreamTone = streamHealthTone(activeStreamState);
   const activeStreamLastError =
     activeSessionStreamHealth?.lastError.trim() ?? "";
@@ -432,7 +427,7 @@ export function App() {
     activeStreamState !== "live";
   const reviewMode = activeThread?.codexMode ?? "exec";
   const activeTerminalClearCutoff = activeThreadID
-    ? terminalClearCutoffByThread[activeThreadID] ?? ""
+    ? (terminalClearCutoffByThread[activeThreadID] ?? "")
     : "";
   const activeThreadModelValue = useMemo(() => {
     const current = activeThread?.model.trim() ?? "";
@@ -442,9 +437,7 @@ export function App() {
   }, [activeThread?.model, sessionModelDefault, sessionModelOptions]);
   const visibleTimeline = useMemo(
     () =>
-      activeTimeline.filter(
-        (entry) => !isSecondarySurfaceTimelineEntry(entry),
-      ),
+      activeTimeline.filter((entry) => !isSecondarySurfaceTimelineEntry(entry)),
     [activeTimeline],
   );
   const reviewFindings = useMemo(
@@ -829,6 +822,7 @@ export function App() {
 
   function onClearTerminalDrawer() {
     if (!activeThreadID.trim()) return;
+    projectTerminal.clear();
     setTerminalClearCutoffByThread((prev) => ({
       ...prev,
       [activeThreadID]: new Date().toISOString(),
@@ -872,6 +866,7 @@ export function App() {
     onCreateThreadAndFocus: createThreadAndFocus,
     onSwitchThreadByOffset: switchThreadByOffset,
     terminalDrawerOpen,
+    terminalHasLiveTransport: projectTerminal.hasLiveTransport,
     onToggleTerminalDrawer,
     onClearTerminalDrawer,
     onToggleReviewPane,
@@ -896,12 +891,7 @@ export function App() {
     return byStatus.filter((job) => job.type === opsJobTypeFilter);
   }, [jobs, opsJobStatusFilter, opsJobTypeFilter]);
   const knownJobIDSet = useMemo(
-    () =>
-      new Set(
-        jobs
-          .map((job) => job.id.trim())
-          .filter((id) => id !== ""),
-      ),
+    () => new Set(jobs.map((job) => job.id.trim()).filter((id) => id !== "")),
     [jobs],
   );
   const runningJobPollTargets = useMemo(
@@ -1008,7 +998,10 @@ export function App() {
           }
         }
       }
-      for (const [sessionID, state] of sessionStreamStateRef.current.entries()) {
+      for (const [
+        sessionID,
+        state,
+      ] of sessionStreamStateRef.current.entries()) {
         if (!runningSessionIDs.has(sessionID)) continue;
         if (state.lastEventAt <= 0) continue;
         if (now - state.lastEventAt < 16_000) continue;
@@ -1040,7 +1033,8 @@ export function App() {
 
   useEffect(() => {
     if (!projectComposerOpen) return;
-    const fallbackHostID = activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
+    const fallbackHostID =
+      activeWorkspace?.hostID?.trim() || hosts[0]?.id || "";
     if (
       !projectFormHostID ||
       !hosts.some((host) => host.id === projectFormHostID)
@@ -1048,7 +1042,9 @@ export function App() {
       setProjectFormHostID(fallbackHostID);
     }
     if (!projectFormPath.trim()) {
-      setProjectFormPath(activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH);
+      setProjectFormPath(
+        activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+      );
     }
   }, [
     projectComposerOpen,
@@ -1078,7 +1074,9 @@ export function App() {
       return;
     }
     setTreeCursorSessionID((prev) =>
-      prev && visibleTreeSessionIDs.includes(prev) ? prev : visibleTreeSessionIDs[0],
+      prev && visibleTreeSessionIDs.includes(prev)
+        ? prev
+        : visibleTreeSessionIDs[0],
     );
   }, [visibleTreeSessionIDs]);
 
@@ -1092,7 +1090,8 @@ export function App() {
 
   const { ensureLocalCodexHost, refreshProjectsFromSource } =
     createProjectSourceActions({
-      activeWorkspacePath: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+      activeWorkspacePath:
+        activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
       workspaces,
       setSourceProjectIDs,
       syncProjectsFromDiscovery,
@@ -1298,28 +1297,31 @@ export function App() {
       refreshProjectsFromSource,
     });
 
-  const { onRefreshWorkspace, onArchiveActiveSession, onReconnectActiveStream } =
-    createSessionControlActions({
-      authPhase,
-      token,
-      activeThread,
-      activeThreadID,
-      submittingThreadID,
-      activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
-      activeWorkspaceHostName: activeWorkspace?.hostName?.trim() ?? "",
-      hosts,
-      sessionRunStateRef,
-      addTimelineEntry,
-      removeThread,
-      stopSessionStream,
-      deleteSessionEventCursor,
-      refreshProjectsFromSource,
-      updateSessionStreamHealth,
-      startSessionStream,
-      loadWorkspace,
-      isLocalDraftSessionID,
-      setDeletingThreadID,
-    });
+  const {
+    onRefreshWorkspace,
+    onArchiveActiveSession,
+    onReconnectActiveStream,
+  } = createSessionControlActions({
+    authPhase,
+    token,
+    activeThread,
+    activeThreadID,
+    submittingThreadID,
+    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+    activeWorkspaceHostName: activeWorkspace?.hostName?.trim() ?? "",
+    hosts,
+    sessionRunStateRef,
+    addTimelineEntry,
+    removeThread,
+    stopSessionStream,
+    deleteSessionEventCursor,
+    refreshProjectsFromSource,
+    updateSessionStreamHealth,
+    startSessionStream,
+    loadWorkspace,
+    isLocalDraftSessionID,
+    setDeletingThreadID,
+  });
   archiveSessionActionRef.current = onArchiveActiveSession;
   reconnectStreamActionRef.current = onReconnectActiveStream;
 
@@ -1353,6 +1355,30 @@ export function App() {
     startSessionStream,
     setSubmittingThreadID,
     finalizeAssistantStreamEntry,
+    isLocalDraftSessionID,
+  });
+  const { startReviewForActiveThread } = createSessionReviewAction({
+    authPhase,
+    token,
+    activeThread,
+    submittingThreadID,
+    activeWorkspaceHostID: activeWorkspace?.hostID?.trim() ?? "",
+    activeWorkspacePath: activeWorkspace?.path?.trim() ?? "",
+    hosts,
+    selectedHostIDs,
+    activeThreadIDRef,
+    sessionRunStateRef,
+    sessionStreamStateRef,
+    addTimelineEntry,
+    bindThreadID,
+    stopSessionStream,
+    deleteSessionEventCursor,
+    setThreadJobState,
+    setActiveJobThreadID,
+    setActiveJobID,
+    startSessionStream,
+    setSubmittingThreadID,
+    setThreadCodexMode,
     isLocalDraftSessionID,
   });
 
@@ -1643,6 +1669,13 @@ export function App() {
     terminalWorkdir: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
     terminalHostLabel: activeWorkspace?.hostName?.trim() || "",
     terminalCommands,
+    terminalLiveStatus: projectTerminal.status,
+    terminalLiveTransportAvailable: projectTerminal.hasLiveTransport,
+    terminalLiveOutput: projectTerminal.output,
+    terminalLiveError: projectTerminal.error,
+    onTerminalSendLine: projectTerminal.sendLine,
+    onTerminalInterrupt: projectTerminal.interrupt,
+    onTerminalReconnect: projectTerminal.reconnect,
     onClearTerminalDrawer,
     reviewPaneOpen,
     canToggleReview: activeThread !== null,
@@ -1657,6 +1690,12 @@ export function App() {
     reviewPatchDelta,
     reviewChanges,
     reviewFindings,
+    canStartReview:
+      Boolean(activeThread) &&
+      !activeThreadBusy &&
+      authPhase === "ready" &&
+      token.trim() !== "",
+    onStartReview: startReviewForActiveThread,
     onSetReviewMode: onSetActiveThreadReviewMode,
     onSetReviewUncommitted: onSetActiveThreadReviewUncommitted,
     onSetReviewBase: onSetActiveThreadReviewBase,
@@ -1709,7 +1748,6 @@ export function App() {
         onHoverAction={setCommandPaletteCursor}
         onRunAction={runCommandPaletteAction}
       />
-
     </div>
   );
 }

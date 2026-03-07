@@ -34,6 +34,8 @@ type SessionReviewPaneProps = {
   patchDelta: string;
   changes: ReviewChange[];
   findings: ReviewFinding[];
+  canStartReview: boolean;
+  onStartReview: () => void;
   onClose: () => void;
   onSetMode: (mode: CodexSessionMode) => void;
   onSetReviewUncommitted: (next: boolean) => void;
@@ -47,13 +49,14 @@ function pathTokens(path: string): string[] {
   if (!normalized) return [];
   const basename = normalized.split("/").filter(Boolean).at(-1) ?? "";
   return Array.from(
-    new Set(
-      [normalized, basename].filter((value) => value.trim().length >= 5),
-    ),
+    new Set([normalized, basename].filter((value) => value.trim().length >= 5)),
   );
 }
 
-function findingMatchesChange(finding: ReviewFinding, change: ReviewChange): boolean {
+function findingMatchesChange(
+  finding: ReviewFinding,
+  change: ReviewChange,
+): boolean {
   const haystack = `${finding.title}\n${finding.body}`.toLowerCase();
   return pathTokens(change.path).some((token) => haystack.includes(token));
 }
@@ -85,7 +88,11 @@ function parseDiffLines(diff: string): DiffLine[] {
     });
 }
 
-function diffStats(diff: string): { added: number; removed: number; hunks: number } {
+function diffStats(diff: string): {
+  added: number;
+  removed: number;
+  hunks: number;
+} {
   const lines = parseDiffLines(diff);
   let added = 0;
   let removed = 0;
@@ -109,6 +116,8 @@ export function SessionReviewPane({
   patchDelta,
   changes,
   findings,
+  canStartReview,
+  onStartReview,
   onClose,
   onSetMode,
   onSetReviewUncommitted,
@@ -132,12 +141,16 @@ export function SessionReviewPane({
   }, [changes, selectedChangeID]);
 
   const selectedChange =
-    changes.find((change) => change.id === selectedChangeID) ?? changes[0] ?? null;
+    changes.find((change) => change.id === selectedChangeID) ??
+    changes[0] ??
+    null;
 
   useEffect(() => {
     setDismissedNoteIDs((current) =>
       current.filter((id) =>
-        findings.some((finding) => id === finding.id || id.startsWith(`${finding.id}:`)),
+        findings.some(
+          (finding) => id === finding.id || id.startsWith(`${finding.id}:`),
+        ),
       ),
     );
   }, [findings]);
@@ -168,8 +181,7 @@ export function SessionReviewPane({
   );
 
   const visibleNotes = useMemo(
-    () =>
-      reviewNotes.filter((note) => !dismissedNoteIDs.includes(note.id)),
+    () => reviewNotes.filter((note) => !dismissedNoteIDs.includes(note.id)),
     [dismissedNoteIDs, reviewNotes],
   );
 
@@ -185,11 +197,10 @@ export function SessionReviewPane({
   }, [changes, visibleNotes]);
 
   const selectedChangeFindings = selectedChange
-    ? findingsByChangeID.get(selectedChange.id) ?? []
+    ? (findingsByChangeID.get(selectedChange.id) ?? [])
     : [];
   const generalFindings = visibleNotes.filter(
-    (note) =>
-      !changes.some((change) => findingMatchesChange(note, change)),
+    (note) => !changes.some((change) => findingMatchesChange(note, change)),
   );
   const selectedChangeReviewed =
     selectedChange !== null && reviewedChangeIDs.includes(selectedChange.id);
@@ -242,7 +253,11 @@ export function SessionReviewPane({
       <div className="review-mode-switch" data-testid="review-mode-switch">
         <button
           type="button"
-          className={reviewActive ? "ghost review-mode-btn" : "ghost review-mode-btn active"}
+          className={
+            reviewActive
+              ? "ghost review-mode-btn"
+              : "ghost review-mode-btn active"
+          }
           aria-pressed={!reviewActive}
           data-testid="review-mode-exec"
           onClick={() => onSetMode("exec")}
@@ -252,7 +267,11 @@ export function SessionReviewPane({
         </button>
         <button
           type="button"
-          className={reviewActive ? "ghost review-mode-btn active" : "ghost review-mode-btn"}
+          className={
+            reviewActive
+              ? "ghost review-mode-btn active"
+              : "ghost review-mode-btn"
+          }
           aria-pressed={reviewActive}
           data-testid="review-mode-review"
           onClick={() => onSetMode("review")}
@@ -266,8 +285,8 @@ export function SessionReviewPane({
         <div className="review-pane-copy">
           <strong>Turn diff</strong>
           <p>
-            Consume aggregated diff updates from the Codex app-server stream before
-            they are materialized as file cards.
+            Consume aggregated diff updates from the Codex app-server stream
+            before they are materialized as file cards.
           </p>
         </div>
         {turnDiff.trim() ? (
@@ -297,8 +316,8 @@ export function SessionReviewPane({
           </div>
         ) : (
           <p className="review-empty-copy" data-testid="review-turn-diff-empty">
-            Codex turn-level diff updates will appear here as soon as the app-server
-            starts streaming them.
+            Codex turn-level diff updates will appear here as soon as the
+            app-server starts streaming them.
           </p>
         )}
       </section>
@@ -307,8 +326,8 @@ export function SessionReviewPane({
         <div className="review-pane-copy">
           <strong>Changed files</strong>
           <p>
-            Keep file navigation and review notes here instead of interrupting the
-            conversation.
+            Keep file navigation and review notes here instead of interrupting
+            the conversation.
           </p>
         </div>
         {changes.length === 0 ? (
@@ -318,7 +337,10 @@ export function SessionReviewPane({
           </p>
         ) : (
           <div className="review-change-shell">
-            <div className="review-change-list" data-testid="review-change-list">
+            <div
+              className="review-change-list"
+              data-testid="review-change-list"
+            >
               {changes.map((change) => {
                 const active = selectedChange?.id === change.id;
                 return (
@@ -351,7 +373,10 @@ export function SessionReviewPane({
               })}
             </div>
             {selectedChange ? (
-              <article className="review-change-detail" data-testid="review-change-detail">
+              <article
+                className="review-change-detail"
+                data-testid="review-change-detail"
+              >
                 <header>
                   <div>
                     <p className="review-change-kindline">
@@ -384,7 +409,9 @@ export function SessionReviewPane({
                     </>
                   ) : null}
                 </div>
-                <p className="review-change-summary-title">{selectedChange.title}</p>
+                <p className="review-change-summary-title">
+                  {selectedChange.title}
+                </p>
                 <pre>{selectedChange.summary}</pre>
                 <div className="review-inline-thread">
                   <div className="review-subsection-head">
@@ -428,8 +455,8 @@ export function SessionReviewPane({
                       className="review-empty-copy"
                       data-testid="review-file-findings-empty"
                     >
-                      File-linked review notes will stack here when Codex calls out
-                      this file directly.
+                      File-linked review notes will stack here when Codex calls
+                      out this file directly.
                     </p>
                   ) : (
                     <div
@@ -488,12 +515,16 @@ export function SessionReviewPane({
         ) : null}
         {generalFindings.length === 0 ? (
           <p className="review-empty-copy" data-testid="review-empty-copy">
-            Switch to review mode, describe what to inspect, and send from the composer.
+            Switch to review mode, describe what to inspect, and send from the
+            composer.
           </p>
         ) : (
           <div className="review-finding-list" data-testid="review-findings">
             {generalFindings.map((finding) => (
-              <article key={finding.id} className={`review-finding-card review-finding-${finding.tone}`}>
+              <article
+                key={finding.id}
+                className={`review-finding-card review-finding-${finding.tone}`}
+              >
                 <header>
                   <div>
                     <strong>{finding.title}</strong>
@@ -522,6 +553,15 @@ export function SessionReviewPane({
             Keep scope controls available, but secondary to files and notes.
           </p>
         </div>
+        <button
+          type="button"
+          className="review-start-btn"
+          data-testid="review-start-btn"
+          disabled={!canStartReview || busy}
+          onClick={onStartReview}
+        >
+          {busy ? "Running review…" : "Run review"}
+        </button>
         <label className="review-toggle-row">
           <span>Review uncommitted changes</span>
           <input

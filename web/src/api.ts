@@ -423,6 +423,19 @@ export type CodexV2TurnStartRequest = {
   metadata?: Record<string, string>;
 };
 
+export type CodexV2ReviewStartRequest = {
+  host_id?: string;
+  project_id?: string;
+  path?: string;
+  title?: string;
+  review_uncommitted?: boolean;
+  review_base?: string;
+  review_commit?: string;
+  review_title?: string;
+  instructions?: string;
+  delivery?: "inline" | "detached";
+};
+
 export type CodexV2SessionResponse = {
   session: SessionRecord;
   project?: ProjectRecord;
@@ -436,6 +449,15 @@ export type CodexV2SessionSyncResponse = {
   run_id?: string;
   status?: string;
   assistant_text?: string;
+};
+
+export type CodexV2ReviewStartResponse = {
+  session: SessionRecord;
+  project: ProjectRecord;
+  review_thread_id: string;
+  turn?: Record<string, unknown>;
+  delivery?: string;
+  target?: Record<string, unknown>;
 };
 
 export type CodexV2SessionArchiveResponse = {
@@ -454,13 +476,39 @@ export type CodexV2PendingRequest = {
   received_at: string;
 };
 
-const ENV_API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
+export type ProjectTerminalSnapshot = {
+  id: string;
+  project_id: string;
+  host_id: string;
+  workdir: string;
+  command?: string;
+  state: "running" | "exited" | string;
+  cursor: number;
+  started_at: string;
+  updated_at: string;
+  exit_code?: number;
+  closed_at?: string;
+};
+
+export type ProjectTerminalFrameRecord = {
+  seq: number;
+  type: "output" | "exit" | string;
+  stream?: "stdout" | "stderr" | string;
+  data?: string;
+  exit_code?: number;
+  timestamp: string;
+};
+
+const ENV_API_BASE = (
+  import.meta.env.VITE_API_BASE as string | undefined
+)?.trim();
 const IS_DEV = import.meta.env.DEV;
 
 function defaultApiBase(): string {
   if (ENV_API_BASE) return ENV_API_BASE;
   if (IS_DEV) return "http://localhost:8080";
-  if (typeof window !== "undefined" && window.location?.origin) return window.location.origin;
+  if (typeof window !== "undefined" && window.location?.origin)
+    return window.location.origin;
   return "";
 }
 
@@ -486,17 +534,22 @@ export async function listHosts(token: string): Promise<Host[]> {
 }
 
 export async function listRuntimes(token: string): Promise<RuntimeInfo[]> {
-  const res = await fetch(`${API_BASE}/v1/runtimes`, { headers: headers(token) });
+  const res = await fetch(`${API_BASE}/v1/runtimes`, {
+    headers: headers(token),
+  });
   if (!res.ok) throw new Error(`list runtimes failed: ${res.status}`);
   const body = await res.json();
   return body.runtimes ?? [];
 }
 
-export async function upsertHost(token: string, host: Partial<Host>): Promise<Host> {
+export async function upsertHost(
+  token: string,
+  host: Partial<Host>,
+): Promise<Host> {
   const res = await fetch(`${API_BASE}/v1/hosts`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(host)
+    body: JSON.stringify(host),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -506,14 +559,22 @@ export async function upsertHost(token: string, host: Partial<Host>): Promise<Ho
   return body.host;
 }
 
-export async function deleteHost(token: string, hostID: string): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/v1/hosts/${encodeURIComponent(hostID)}`, {
-    method: "DELETE",
-    headers: headers(token)
-  });
+export async function deleteHost(
+  token: string,
+  hostID: string,
+): Promise<boolean> {
+  const res = await fetch(
+    `${API_BASE}/v1/hosts/${encodeURIComponent(hostID)}`,
+    {
+      method: "DELETE",
+      headers: headers(token),
+    },
+  );
   const body = await res.json();
   if (!res.ok) {
-    throw new Error(`delete host failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `delete host failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return Boolean(body?.deleted);
 }
@@ -521,22 +582,35 @@ export async function deleteHost(token: string, hostID: string): Promise<boolean
 export async function probeHost(
   token: string,
   hostID: string,
-  request?: { preflight?: boolean }
+  request?: { preflight?: boolean },
 ): Promise<{
   host: Host;
   ssh: { ok: boolean; error?: string; error_hint?: string };
-  codex: { ok: boolean; error?: string; error_hint?: string; result?: { stdout?: string } };
-  codex_login: { ok: boolean; error?: string; error_hint?: string; result?: { stdout?: string } };
+  codex: {
+    ok: boolean;
+    error?: string;
+    error_hint?: string;
+    result?: { stdout?: string };
+  };
+  codex_login: {
+    ok: boolean;
+    error?: string;
+    error_hint?: string;
+    result?: { stdout?: string };
+  };
   preflight?: {
     ok: boolean;
     checks?: Array<{ name: string; ok: boolean; message?: string }>;
   };
 }> {
-  const res = await fetch(`${API_BASE}/v1/hosts/${encodeURIComponent(hostID)}/probe`, {
-    method: "POST",
-    headers: headers(token),
-    body: JSON.stringify(request ?? {})
-  });
+  const res = await fetch(
+    `${API_BASE}/v1/hosts/${encodeURIComponent(hostID)}/probe`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request ?? {}),
+    },
+  );
   const body = await res.json();
   if (!res.ok) {
     throw new Error(`probe host failed: ${res.status} ${JSON.stringify(body)}`);
@@ -544,26 +618,34 @@ export async function probeHost(
   return body;
 }
 
-export async function uploadImage(token: string, file: File): Promise<{ path: string; name: string; bytes: number }> {
+export async function uploadImage(
+  token: string,
+  file: File,
+): Promise<{ path: string; name: string; bytes: number }> {
   const form = new FormData();
   form.append("file", file);
   const res = await fetch(`${API_BASE}/v1/files/images`, {
     method: "POST",
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    body: form
+    body: form,
   });
   const body = await res.json();
   if (!res.ok || !body?.path) {
-    throw new Error(`upload image failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `upload image failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
 
-export async function runFanout(token: string, request: RunRequest): Promise<{ status: number; body: RunResponse }> {
+export async function runFanout(
+  token: string,
+  request: RunRequest,
+): Promise<{ status: number; body: RunResponse }> {
   const res = await fetch(`${API_BASE}/v1/run`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
   });
   const body = await res.json();
   if (!res.ok && !body?.summary) {
@@ -572,28 +654,38 @@ export async function runFanout(token: string, request: RunRequest): Promise<{ s
   return { status: res.status, body };
 }
 
-export async function enqueueRunJob(token: string, request: RunRequest): Promise<{ status: number; body: { job: RunJobRecord } }> {
+export async function enqueueRunJob(
+  token: string,
+  request: RunRequest,
+): Promise<{ status: number; body: { job: RunJobRecord } }> {
   const res = await fetch(`${API_BASE}/v1/jobs/run`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
   });
   const body = await res.json();
   if (!res.ok || !body?.job) {
-    throw new Error(`enqueue run job failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `enqueue run job failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return { status: res.status, body };
 }
 
-export async function enqueueSyncJob(token: string, request: SyncRequest): Promise<{ status: number; body: { job: RunJobRecord } }> {
+export async function enqueueSyncJob(
+  token: string,
+  request: SyncRequest,
+): Promise<{ status: number; body: { job: RunJobRecord } }> {
   const res = await fetch(`${API_BASE}/v1/jobs/sync`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
   });
   const body = await res.json();
   if (!res.ok || !body?.job) {
-    throw new Error(`enqueue sync job failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `enqueue sync job failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return { status: res.status, body };
 }
@@ -607,22 +699,36 @@ type JobListFilters = {
   to?: string;
 };
 
-export async function listRunJobs(token: string, limit = 30, filters?: JobListFilters): Promise<RunJobRecord[]> {
+export async function listRunJobs(
+  token: string,
+  limit = 30,
+  filters?: JobListFilters,
+): Promise<RunJobRecord[]> {
   const params = new URLSearchParams({ limit: String(limit) });
-  if (filters?.status && filters.status.length > 0) params.set("status", filters.status.join(","));
-  if (filters?.type && filters.type.length > 0) params.set("type", filters.type.join(","));
-  if (filters?.runtime && filters.runtime.length > 0) params.set("runtime", filters.runtime.join(","));
+  if (filters?.status && filters.status.length > 0)
+    params.set("status", filters.status.join(","));
+  if (filters?.type && filters.type.length > 0)
+    params.set("type", filters.type.join(","));
+  if (filters?.runtime && filters.runtime.length > 0)
+    params.set("runtime", filters.runtime.join(","));
   if (filters?.host_id) params.set("host_id", filters.host_id);
   if (filters?.from) params.set("from", filters.from);
   if (filters?.to) params.set("to", filters.to);
-  const res = await fetch(`${API_BASE}/v1/jobs?${params.toString()}`, { headers: headers(token) });
+  const res = await fetch(`${API_BASE}/v1/jobs?${params.toString()}`, {
+    headers: headers(token),
+  });
   if (!res.ok) throw new Error(`list jobs failed: ${res.status}`);
   const body = await res.json();
   return body.jobs ?? [];
 }
 
-export async function getRunJob(token: string, id: string): Promise<RunJobRecord> {
-  const res = await fetch(`${API_BASE}/v1/jobs/${encodeURIComponent(id)}`, { headers: headers(token) });
+export async function getRunJob(
+  token: string,
+  id: string,
+): Promise<RunJobRecord> {
+  const res = await fetch(`${API_BASE}/v1/jobs/${encodeURIComponent(id)}`, {
+    headers: headers(token),
+  });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`get job failed: ${res.status} ${text}`);
@@ -636,13 +742,16 @@ export async function listRunJobEvents(
   token: string,
   id: string,
   after = 0,
-  limit = 200
+  limit = 200,
 ): Promise<{ events: RunJobEvent[]; next_after: number }> {
   const params = new URLSearchParams({
     after: String(after),
-    limit: String(limit)
+    limit: String(limit),
   });
-  const res = await fetch(`${API_BASE}/v1/jobs/${encodeURIComponent(id)}/events?${params.toString()}`, { headers: headers(token) });
+  const res = await fetch(
+    `${API_BASE}/v1/jobs/${encodeURIComponent(id)}/events?${params.toString()}`,
+    { headers: headers(token) },
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`list job events failed: ${res.status} ${text}`);
@@ -650,15 +759,21 @@ export async function listRunJobEvents(
   const body = await res.json();
   return {
     events: Array.isArray(body?.events) ? body.events : [],
-    next_after: typeof body?.next_after === "number" ? body.next_after : after
+    next_after: typeof body?.next_after === "number" ? body.next_after : after,
   };
 }
 
-export async function cancelRunJob(token: string, id: string): Promise<{ state: string; job: RunJobRecord }> {
-  const res = await fetch(`${API_BASE}/v1/jobs/${encodeURIComponent(id)}/cancel`, {
-    method: "POST",
-    headers: headers(token)
-  });
+export async function cancelRunJob(
+  token: string,
+  id: string,
+): Promise<{ state: string; job: RunJobRecord }> {
+  const res = await fetch(
+    `${API_BASE}/v1/jobs/${encodeURIComponent(id)}/cancel`,
+    {
+      method: "POST",
+      headers: headers(token),
+    },
+  );
   const body = await res.json();
   if (!res.ok || !body?.job) {
     throw new Error(`cancel job failed: ${res.status} ${JSON.stringify(body)}`);
@@ -668,89 +783,111 @@ export async function cancelRunJob(token: string, id: string): Promise<{ state: 
 
 export async function discoverCodexSessions(
   token: string,
-  request: { host_id?: string; host_ids?: string[]; all_hosts?: boolean; fanout?: number; timeout_sec?: number; limit_per_host?: number }
+  request: {
+    host_id?: string;
+    host_ids?: string[];
+    all_hosts?: boolean;
+    fanout?: number;
+    timeout_sec?: number;
+    limit_per_host?: number;
+  },
 ): Promise<{ status: number; body: { targets: CodexSessionTarget[] } }> {
   const res = await fetch(`${API_BASE}/v1/codex/sessions/discover`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
   });
   const body = await res.json();
   if (!res.ok && !body?.targets) {
-    throw new Error(`discover codex sessions failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `discover codex sessions failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return { status: res.status, body };
 }
 
 export async function discoverCodexModels(
   token: string,
-  request?: { host_id?: string }
+  request?: { host_id?: string },
 ): Promise<CodexModelCatalog> {
   const params = new URLSearchParams();
   if (request?.host_id) params.set("host_id", request.host_id);
   const query = params.toString();
-  const url = query ? `${API_BASE}/v1/codex/models?${query}` : `${API_BASE}/v1/codex/models`;
+  const url = query
+    ? `${API_BASE}/v1/codex/models?${query}`
+    : `${API_BASE}/v1/codex/models`;
   const res = await fetch(url, { headers: headers(token) });
   const body = await res.json();
   if (!res.ok || !Array.isArray(body?.models)) {
-    throw new Error(`discover codex models failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `discover codex models failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
 
 export async function codexPlatformLogin(
   token: string,
-  request: CodexPlatformLoginRequest
+  request: CodexPlatformLoginRequest,
 ): Promise<CodexPlatformResult> {
   const res = await fetch(`${API_BASE}/v1/codex/platform/login`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
   });
   const body = await res.json();
   if (!res.ok || !body?.operation) {
-    throw new Error(`codex platform login failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `codex platform login failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
 
 export async function codexPlatformMCP(
   token: string,
-  request: CodexPlatformMCPRequest
+  request: CodexPlatformMCPRequest,
 ): Promise<CodexPlatformResult> {
   const res = await fetch(`${API_BASE}/v1/codex/platform/mcp`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
   });
   const body = await res.json();
   if (!res.ok || !body?.operation) {
-    throw new Error(`codex platform mcp failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `codex platform mcp failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
 
 export async function codexPlatformCloud(
   token: string,
-  request: CodexPlatformCloudRequest
+  request: CodexPlatformCloudRequest,
 ): Promise<CodexPlatformResult> {
   const res = await fetch(`${API_BASE}/v1/codex/platform/cloud`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
   });
   const body = await res.json();
   if (!res.ok || !body?.operation) {
-    throw new Error(`codex platform cloud failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `codex platform cloud failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
 
-export async function syncHosts(token: string, request: SyncRequest): Promise<{ status: number; body: SyncResponse }> {
+export async function syncHosts(
+  token: string,
+  request: SyncRequest,
+): Promise<{ status: number; body: SyncResponse }> {
   const res = await fetch(`${API_BASE}/v1/sync`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
   });
   const body = await res.json();
   if (!res.ok && !body?.summary) {
@@ -759,8 +896,14 @@ export async function syncHosts(token: string, request: SyncRequest): Promise<{ 
   return { status: res.status, body };
 }
 
-export async function listRuns(token: string, limit = 20): Promise<RunRecord[]> {
-  const res = await fetch(`${API_BASE}/v1/runs?limit=${encodeURIComponent(String(limit))}`, { headers: headers(token) });
+export async function listRuns(
+  token: string,
+  limit = 20,
+): Promise<RunRecord[]> {
+  const res = await fetch(
+    `${API_BASE}/v1/runs?limit=${encodeURIComponent(String(limit))}`,
+    { headers: headers(token) },
+  );
   if (!res.ok) throw new Error(`list runs failed: ${res.status}`);
   const body = await res.json();
   return body.runs ?? [];
@@ -775,7 +918,11 @@ type AuditListFilters = {
   to?: string;
 };
 
-export async function listAudit(token: string, limit = 100, filters?: AuditListFilters): Promise<AuditEvent[]> {
+export async function listAudit(
+  token: string,
+  limit = 100,
+  filters?: AuditListFilters,
+): Promise<AuditEvent[]> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (filters?.status) params.set("status", String(filters.status));
   if (filters?.action) params.set("action", filters.action);
@@ -783,46 +930,62 @@ export async function listAudit(token: string, limit = 100, filters?: AuditListF
   if (filters?.path_prefix) params.set("path_prefix", filters.path_prefix);
   if (filters?.from) params.set("from", filters.from);
   if (filters?.to) params.set("to", filters.to);
-  const res = await fetch(`${API_BASE}/v1/audit?${params.toString()}`, { headers: headers(token) });
+  const res = await fetch(`${API_BASE}/v1/audit?${params.toString()}`, {
+    headers: headers(token),
+  });
   if (!res.ok) throw new Error(`list audit failed: ${res.status}`);
   const body = await res.json();
   return body.events ?? [];
 }
 
 export async function getMetrics(token: string): Promise<MetricsResponse> {
-  const res = await fetch(`${API_BASE}/v1/metrics`, { headers: headers(token) });
+  const res = await fetch(`${API_BASE}/v1/metrics`, {
+    headers: headers(token),
+  });
   if (!res.ok) throw new Error(`metrics failed: ${res.status}`);
   return res.json();
 }
 
-export async function getRetentionPolicy(token: string): Promise<RetentionPolicy> {
-  const res = await fetch(`${API_BASE}/v1/admin/retention`, { headers: headers(token) });
+export async function getRetentionPolicy(
+  token: string,
+): Promise<RetentionPolicy> {
+  const res = await fetch(`${API_BASE}/v1/admin/retention`, {
+    headers: headers(token),
+  });
   if (!res.ok) throw new Error(`get retention failed: ${res.status}`);
   const body = await res.json();
   return body.retention;
 }
 
-export async function setRetentionPolicy(token: string, retention: RetentionPolicy): Promise<RetentionPolicy> {
+export async function setRetentionPolicy(
+  token: string,
+  retention: RetentionPolicy,
+): Promise<RetentionPolicy> {
   const res = await fetch(`${API_BASE}/v1/admin/retention`, {
     method: "POST",
     headers: headers(token),
-    body: JSON.stringify(retention)
+    body: JSON.stringify(retention),
   });
   const body = await res.json();
-  if (!res.ok || !body?.retention) throw new Error(`set retention failed: ${res.status} ${JSON.stringify(body)}`);
+  if (!res.ok || !body?.retention)
+    throw new Error(
+      `set retention failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   return body.retention;
 }
 
 export async function listProjects(
   token: string,
   limit = 200,
-  filters?: { host_id?: string; path?: string; runtime?: string }
+  filters?: { host_id?: string; path?: string; runtime?: string },
 ): Promise<ProjectRecord[]> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (filters?.host_id) params.set("host_id", filters.host_id);
   if (filters?.path) params.set("path", filters.path);
   if (filters?.runtime) params.set("runtime", filters.runtime);
-  const res = await fetch(`${API_BASE}/v1/projects?${params.toString()}`, { headers: headers(token) });
+  const res = await fetch(`${API_BASE}/v1/projects?${params.toString()}`, {
+    headers: headers(token),
+  });
   if (!res.ok) throw new Error(`list projects failed: ${res.status}`);
   const body = await res.json();
   return body.projects ?? [];
@@ -839,7 +1002,9 @@ export async function upsertProject(
   });
   const body = await res.json();
   if (!res.ok || !body?.project) {
-    throw new Error(`upsert project failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `upsert project failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body.project;
 }
@@ -847,14 +1012,23 @@ export async function upsertProject(
 export async function deleteProject(
   token: string,
   projectID: string,
-): Promise<{ deleted: boolean; project?: ProjectRecord; session_count?: number }> {
-  const res = await fetch(`${API_BASE}/v1/projects/${encodeURIComponent(projectID)}`, {
-    method: "DELETE",
-    headers: headers(token),
-  });
+): Promise<{
+  deleted: boolean;
+  project?: ProjectRecord;
+  session_count?: number;
+}> {
+  const res = await fetch(
+    `${API_BASE}/v1/projects/${encodeURIComponent(projectID)}`,
+    {
+      method: "DELETE",
+      headers: headers(token),
+    },
+  );
   const body = await res.json();
   if (!res.ok) {
-    throw new Error(`delete project failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `delete project failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return {
     deleted: Boolean(body?.deleted),
@@ -867,34 +1041,56 @@ export async function deleteProject(
 export async function listSessions(
   token: string,
   limit = 200,
-  filters?: { project_id?: string; host_id?: string; path?: string; runtime?: string }
+  filters?: {
+    project_id?: string;
+    host_id?: string;
+    path?: string;
+    runtime?: string;
+  },
 ): Promise<SessionRecord[]> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (filters?.project_id) params.set("project_id", filters.project_id);
   if (filters?.host_id) params.set("host_id", filters.host_id);
   if (filters?.path) params.set("path", filters.path);
   if (filters?.runtime) params.set("runtime", filters.runtime);
-  const res = await fetch(`${API_BASE}/v1/sessions?${params.toString()}`, { headers: headers(token) });
+  const res = await fetch(`${API_BASE}/v1/sessions?${params.toString()}`, {
+    headers: headers(token),
+  });
   if (!res.ok) throw new Error(`list sessions failed: ${res.status}`);
   const body = await res.json();
   return body.sessions ?? [];
 }
 
-export async function getSession(token: string, sessionID: string): Promise<SessionRecord> {
-  const res = await fetch(`${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}`, { headers: headers(token) });
+export async function getSession(
+  token: string,
+  sessionID: string,
+): Promise<SessionRecord> {
+  const res = await fetch(
+    `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}`,
+    { headers: headers(token) },
+  );
   if (!res.ok) throw new Error(`get session failed: ${res.status}`);
   const body = await res.json();
   if (!body?.session) throw new Error("get session failed: invalid response");
   return body.session;
 }
 
-export async function archiveSession(token: string, sessionID: string): Promise<{ deleted: boolean; session?: SessionRecord }> {
-  const res = await fetch(`${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}`, {
-    method: "DELETE",
-    headers: headers(token)
-  });
+export async function archiveSession(
+  token: string,
+  sessionID: string,
+): Promise<{ deleted: boolean; session?: SessionRecord }> {
+  const res = await fetch(
+    `${API_BASE}/v1/sessions/${encodeURIComponent(sessionID)}`,
+    {
+      method: "DELETE",
+      headers: headers(token),
+    },
+  );
   const body = await res.json();
-  if (!res.ok) throw new Error(`archive session failed: ${res.status} ${JSON.stringify(body)}`);
+  if (!res.ok)
+    throw new Error(
+      `archive session failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   return { deleted: Boolean(body?.deleted), session: body?.session };
 }
 
@@ -911,7 +1107,9 @@ export async function startCodexV2Session(
   });
   const body = await res.json();
   if (!res.ok || !body?.session) {
-    throw new Error(`start codex v2 session failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `start codex v2 session failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
@@ -921,14 +1119,19 @@ export async function resumeCodexV2Session(
   sessionID: string,
   request: CodexV2SessionActionRequest,
 ): Promise<CodexV2SessionResponse> {
-  const res = await fetch(`${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/resume`, {
-    method: "POST",
-    headers: headers(token),
-    body: JSON.stringify(request),
-  });
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/resume`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request),
+    },
+  );
   const body = await res.json();
   if (!res.ok || !body?.session) {
-    throw new Error(`resume codex v2 session failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `resume codex v2 session failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
@@ -938,14 +1141,19 @@ export async function forkCodexV2Session(
   sessionID: string,
   request: CodexV2SessionActionRequest,
 ): Promise<CodexV2SessionResponse> {
-  const res = await fetch(`${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/fork`, {
-    method: "POST",
-    headers: headers(token),
-    body: JSON.stringify(request),
-  });
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/fork`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request),
+    },
+  );
   const body = await res.json();
   if (!res.ok || !body?.session) {
-    throw new Error(`fork codex v2 session failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `fork codex v2 session failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
@@ -955,14 +1163,19 @@ export async function archiveCodexV2Session(
   sessionID: string,
   request?: CodexV2SessionActionRequest,
 ): Promise<CodexV2SessionArchiveResponse> {
-  const res = await fetch(`${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/archive`, {
-    method: "POST",
-    headers: headers(token),
-    body: JSON.stringify(request ?? {}),
-  });
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/archive`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request ?? {}),
+    },
+  );
   const body = await res.json();
   if (!res.ok || body?.archived !== true) {
-    throw new Error(`archive codex v2 session failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `archive codex v2 session failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
@@ -972,14 +1185,19 @@ export async function setCodexV2SessionName(
   sessionID: string,
   request: { host_id?: string; name: string },
 ): Promise<{ session: SessionRecord }> {
-  const res = await fetch(`${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/name`, {
-    method: "POST",
-    headers: headers(token),
-    body: JSON.stringify(request),
-  });
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/name`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request),
+    },
+  );
   const body = await res.json();
   if (!res.ok || !body?.session) {
-    throw new Error(`set codex v2 session name failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `set codex v2 session name failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body;
 }
@@ -989,14 +1207,19 @@ export async function syncCodexV2Session(
   sessionID: string,
   request?: CodexV2SessionActionRequest,
 ): Promise<CodexV2SessionSyncResponse> {
-  const res = await fetch(`${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/sync`, {
-    method: "POST",
-    headers: headers(token),
-    body: JSON.stringify(request ?? {}),
-  });
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/sync`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request ?? {}),
+    },
+  );
   const body = await res.json();
   if (!res.ok || !body?.session) {
-    throw new Error(`sync codex v2 session failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `sync codex v2 session failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return body as CodexV2SessionSyncResponse;
 }
@@ -1006,16 +1229,43 @@ export async function startCodexV2Turn(
   sessionID: string,
   request: CodexV2TurnStartRequest,
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/turns/start`, {
-    method: "POST",
-    headers: headers(token),
-    body: JSON.stringify(request),
-  });
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/turns/start`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request),
+    },
+  );
   const body = await res.json();
   if (!res.ok) {
-    throw new Error(`start codex v2 turn failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `start codex v2 turn failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return (body ?? {}) as Record<string, unknown>;
+}
+
+export async function startCodexV2Review(
+  token: string,
+  sessionID: string,
+  request: CodexV2ReviewStartRequest,
+): Promise<CodexV2ReviewStartResponse> {
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/review/start`,
+    {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify(request),
+    },
+  );
+  const body = await res.json();
+  if (!res.ok || !body?.session || !body?.review_thread_id) {
+    throw new Error(
+      `start codex v2 review failed: ${res.status} ${JSON.stringify(body)}`,
+    );
+  }
+  return body as CodexV2ReviewStartResponse;
 }
 
 export async function interruptCodexV2Turn(
@@ -1034,7 +1284,9 @@ export async function interruptCodexV2Turn(
   );
   const body = await res.json();
   if (!res.ok) {
-    throw new Error(`interrupt codex v2 turn failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `interrupt codex v2 turn failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return (body ?? {}) as Record<string, unknown>;
 }
@@ -1043,12 +1295,17 @@ export async function listCodexV2PendingRequests(
   token: string,
   sessionID: string,
 ): Promise<CodexV2PendingRequest[]> {
-  const res = await fetch(`${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/requests/pending`, {
-    headers: headers(token),
-  });
+  const res = await fetch(
+    `${API_BASE}/v2/codex/sessions/${encodeURIComponent(sessionID)}/requests/pending`,
+    {
+      headers: headers(token),
+    },
+  );
   const body = await res.json();
   if (!res.ok) {
-    throw new Error(`list codex v2 pending requests failed: ${res.status} ${JSON.stringify(body)}`);
+    throw new Error(
+      `list codex v2 pending requests failed: ${res.status} ${JSON.stringify(body)}`,
+    );
   }
   return Array.isArray(body?.requests)
     ? (body.requests as CodexV2PendingRequest[])
@@ -1088,7 +1345,11 @@ type StreamSessionEventsOptions = {
   onFrame: (frame: SessionStreamFrame) => void;
 };
 
-export async function streamSessionEvents(token: string, sessionID: string, options: StreamSessionEventsOptions): Promise<void> {
+export async function streamSessionEvents(
+  token: string,
+  sessionID: string,
+  options: StreamSessionEventsOptions,
+): Promise<void> {
   const params = new URLSearchParams();
   if (typeof options.after === "number" && options.after > 0) {
     params.set("after", String(options.after));
@@ -1207,7 +1468,11 @@ async function streamSessionEventsViaWS(
   });
 }
 
-function buildSessionWSURL(token: string, sessionID: string, after?: number): string {
+function buildSessionWSURL(
+  token: string,
+  sessionID: string,
+  after?: number,
+): string {
   const base = new URL(API_BASE);
   base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
   base.pathname = `/v2/codex/sessions/${encodeURIComponent(sessionID)}/ws`;
@@ -1227,8 +1492,10 @@ async function streamSessionEventsViaSSE(
 ): Promise<void> {
   const res = await fetch(url, {
     method: "GET",
-    headers: token ? { Authorization: `Bearer ${token}`, Accept: "text/event-stream" } : { Accept: "text/event-stream" },
-    signal: options.signal
+    headers: token
+      ? { Authorization: `Bearer ${token}`, Accept: "text/event-stream" }
+      : { Accept: "text/event-stream" },
+    signal: options.signal,
   });
   if (!res.ok) {
     const text = await res.text();
@@ -1264,7 +1531,7 @@ async function streamSessionEventsViaSSE(
     options.onFrame({
       event: eventType || "message",
       id: eventID,
-      data: parsed
+      data: parsed,
     });
     eventType = "message";
     eventID = "";
@@ -1321,4 +1588,134 @@ async function streamSessionEventsViaSSE(
     consumeLine(tail);
   }
   emitFrame();
+}
+
+type ProjectTerminalSocketOptions = {
+  after?: number;
+  signal?: AbortSignal;
+  onReady: (terminal: ProjectTerminalSnapshot) => void;
+  onFrame: (frame: ProjectTerminalFrameRecord) => void;
+  onError?: (error: Error) => void;
+  onClose?: () => void;
+};
+
+export type ProjectTerminalSocket = {
+  sendInput: (data: string) => void;
+  interrupt: () => void;
+  close: () => void;
+};
+
+export function openProjectTerminalSocket(
+  token: string,
+  projectID: string,
+  options: ProjectTerminalSocketOptions,
+): ProjectTerminalSocket {
+  if (typeof WebSocket === "undefined") {
+    throw new Error("websocket not supported");
+  }
+  const wsURL = buildProjectTerminalWSURL(token, projectID, options.after);
+  const socket = new WebSocket(wsURL);
+  let closed = false;
+  const queuedMessages: string[] = [];
+
+  const sendPayload = (payload: Record<string, unknown>) => {
+    const raw = JSON.stringify(payload);
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(raw);
+      return;
+    }
+    if (socket.readyState === WebSocket.CONNECTING) {
+      queuedMessages.push(raw);
+    }
+  };
+
+  const onAbort = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      socket.close(1000, "aborted");
+    } catch {
+      // ignore close errors
+    }
+  };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  if (options.signal?.aborted) {
+    onAbort();
+  }
+
+  socket.onopen = () => {
+    while (queuedMessages.length > 0 && socket.readyState === WebSocket.OPEN) {
+      const raw = queuedMessages.shift();
+      if (!raw) break;
+      socket.send(raw);
+    }
+  };
+
+  socket.onmessage = (event) => {
+    const raw = typeof event.data === "string" ? event.data : "";
+    if (!raw.trim()) return;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    const type = typeof parsed.type === "string" ? parsed.type.trim() : "";
+    if (type === "terminal.ready" && parsed.terminal) {
+      options.onReady(parsed.terminal as ProjectTerminalSnapshot);
+      return;
+    }
+    if (type === "terminal.frame" && parsed.frame) {
+      options.onFrame(parsed.frame as ProjectTerminalFrameRecord);
+      return;
+    }
+  };
+
+  socket.onerror = () => {
+    options.onError?.(new Error("project terminal websocket failed"));
+  };
+
+  socket.onclose = () => {
+    if (!closed) {
+      options.onClose?.();
+    }
+    options.signal?.removeEventListener("abort", onAbort);
+  };
+
+  return {
+    sendInput(data: string) {
+      if (data === "") return;
+      sendPayload({ type: "stdin", data });
+    },
+    interrupt() {
+      sendPayload({ type: "interrupt" });
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      try {
+        socket.close(1000, "client close");
+      } catch {
+        // ignore close errors
+      }
+      options.signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+function buildProjectTerminalWSURL(
+  token: string,
+  projectID: string,
+  after?: number,
+): string {
+  const base = new URL(API_BASE);
+  base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  base.pathname = `/v2/projects/${encodeURIComponent(projectID)}/terminal/ws`;
+  if (token.trim()) {
+    base.searchParams.set("access_token", token.trim());
+  }
+  if (typeof after === "number" && after > 0) {
+    base.searchParams.set("after", String(after));
+  }
+  return base.toString();
 }

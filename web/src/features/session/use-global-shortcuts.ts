@@ -9,6 +9,7 @@ type UseGlobalShortcutsOptions = {
   onCreateThreadAndFocus: () => void;
   onSwitchThreadByOffset: (offset: number) => void;
   terminalDrawerOpen: boolean;
+  terminalHasLiveTransport: boolean;
   onToggleTerminalDrawer: () => void;
   onClearTerminalDrawer: () => void;
   onToggleReviewPane: () => void;
@@ -23,6 +24,7 @@ export function useGlobalShortcuts({
   onCreateThreadAndFocus,
   onSwitchThreadByOffset,
   terminalDrawerOpen,
+  terminalHasLiveTransport,
   onToggleTerminalDrawer,
   onClearTerminalDrawer,
   onToggleReviewPane,
@@ -64,6 +66,7 @@ export function useGlobalShortcuts({
 
       if (
         terminalDrawerOpen &&
+        !terminalHasLiveTransport &&
         event.ctrlKey &&
         !event.metaKey &&
         !event.altKey &&
@@ -128,6 +131,7 @@ export function useGlobalShortcuts({
     onOpenCommandPalette,
     onSwitchThreadByOffset,
     terminalDrawerOpen,
+    terminalHasLiveTransport,
     onToggleTerminalDrawer,
     onClearTerminalDrawer,
     onToggleReviewPane,
