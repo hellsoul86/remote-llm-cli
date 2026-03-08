@@ -1692,7 +1692,7 @@ export function App() {
       ? "Review"
       : activeThread?.codexMode === "resume"
         ? "Resume"
-        : "Exec";
+        : "";
   const sessionStageProps = buildSessionStageProps({
     sidebarProps: sessionSidebarProps,
     sidebarCollapsed,

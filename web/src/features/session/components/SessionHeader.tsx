@@ -57,6 +57,8 @@ export function SessionHeader({
               : streamCopy;
   const statusDetail =
     streamTone === "ok" || !streamLastError.trim() ? "" : streamLastError.trim();
+  const showStatus = statusCopy !== "Live" || Boolean(statusDetail);
+  const showHostLabel = hostLabel.trim() !== "";
 
   return (
     <header className="chat-head">
@@ -66,9 +68,7 @@ export function SessionHeader({
           <strong className="chat-head-project-title">
             {projectTitle.trim() || "Untitled Project"}
           </strong>
-          <span className={`chat-head-host-chip${hostLabel ? "" : " quiet"}`}>
-            {hostLabel || "Local"}
-          </span>
+          {showHostLabel ? <span className="chat-head-host-chip">{hostLabel}</span> : null}
         </div>
         <div className="chat-head-thread-row">
           <div className="chat-head-thread-copy">
@@ -82,15 +82,17 @@ export function SessionHeader({
         </div>
       </div>
       <div className="chat-head-side">
-        <div
-          className={`chat-head-status ${streamTone}`}
-          data-testid="stream-status"
-          title={statusDetail || statusCopy}
-        >
-          <span className="chat-status-dot" aria-hidden="true" />
-          <span className="chat-status-copy">{statusCopy}</span>
-          {statusDetail ? <span className="chat-status-detail">{statusDetail}</span> : null}
-        </div>
+        {showStatus ? (
+          <div
+            className={`chat-head-status ${streamTone}`}
+            data-testid="stream-status"
+            title={statusDetail || statusCopy}
+          >
+            <span className="chat-status-dot" aria-hidden="true" />
+            <span className="chat-status-copy">{statusCopy}</span>
+            {statusDetail ? <span className="chat-status-detail">{statusDetail}</span> : null}
+          </div>
+        ) : null}
         <div className="chat-head-actions">
           <button
             type="button"

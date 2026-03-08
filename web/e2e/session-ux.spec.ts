@@ -2401,7 +2401,13 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
     topbar.getByRole("button", { name: "Lock", exact: true }),
   ).toHaveCount(0);
   await expect(page).toHaveTitle(/Codex$/);
-  await expect(page.getByTestId("stream-status")).toContainText("Live");
+  await expect(page.getByTestId("stream-status")).toHaveCount(0);
+  const composerShell = page.locator(".composer-input-shell");
+  await expect(composerShell.getByTestId("session-model-select")).toBeVisible();
+  await expect(composerShell.getByTestId("session-sandbox-select")).toBeVisible();
+  await expect(
+    page.locator('[data-testid="session-sandbox-select"] option'),
+  ).toHaveText(["Read only", "Workspace write", "Full access"]);
 });
 
 test("sidebar toggles from topbar and Cmd/Ctrl+B", async ({ page }) => {
@@ -4198,7 +4204,7 @@ test("stream status recovers after transient failures", async ({ page }) => {
   expect(sawRetryState).toBeTruthy();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(streamStatus).toContainText("Live", { timeout: 15000 });
+  await expect(streamStatus).toHaveCount(0, { timeout: 15000 });
 
   const composer = page.getByPlaceholder(
     "Ask Codex to work in this project...",

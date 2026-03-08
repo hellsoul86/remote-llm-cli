@@ -3128,6 +3128,13 @@ pre {
   flex-wrap: wrap;
 }
 
+.composer-context-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .composer-pill {
   border-radius: 999px;
 }
@@ -3190,6 +3197,11 @@ pre {
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.composer-shell-note {
+  display: inline-flex;
+  margin-top: -2px;
 }
 
 .composer-attach-btn {
@@ -3290,6 +3302,7 @@ pre {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .composer-inline-action {
@@ -3309,8 +3322,13 @@ pre {
     width: 100%;
   }
 
+  .composer-context-cluster {
+    width: 100%;
+  }
+
   .composer-input-tools {
     width: 100%;
+    justify-content: flex-start;
   }
 
   .composer-select-pill {

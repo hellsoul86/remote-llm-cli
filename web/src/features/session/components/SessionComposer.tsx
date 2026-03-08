@@ -13,6 +13,15 @@ import {
   type ConversationThread,
 } from "../../../domains/session";
 
+const SANDBOX_OPTIONS: Array<{
+  value: "" | "read-only" | "workspace-write" | "danger-full-access";
+  label: string;
+}> = [
+  { value: "read-only", label: "Read only" },
+  { value: "workspace-write", label: "Workspace write" },
+  { value: "danger-full-access", label: "Full access" },
+];
+
 type SessionComposerProps = {
   formRef: MutableRefObject<HTMLFormElement | null>;
   promptInputRef: MutableRefObject<HTMLTextAreaElement | null>;
@@ -183,56 +192,6 @@ export function SessionComposer({
         onRefresh={onRefreshPendingRequests}
         onResolve={onResolvePendingRequest}
       />
-
-      <div className="composer-toolbar composer-toolbar-native">
-        <div className="composer-context-strip">
-          <label className="composer-select-pill" aria-label="Model">
-            <span>Model</span>
-            <select
-              data-testid="session-model-select"
-              value={activeThreadModelValue}
-              disabled={!activeThread || !hasSessionModelChoices || activeThreadBusy}
-              onChange={(event) => onSetThreadModel(event.target.value)}
-            >
-              {hasSessionModelChoices ? (
-                sessionModelChoices.map((modelName) => (
-                  <option key={modelName} value={modelName}>
-                    {modelName === sessionModelDefault
-                      ? `${modelName} (default)`
-                      : modelName}
-                  </option>
-                ))
-              ) : (
-                <option value="">model unavailable</option>
-              )}
-            </select>
-          </label>
-          <label className="composer-select-pill" aria-label="Permissions">
-            <span>Permissions</span>
-            <select
-              data-testid="session-sandbox-select"
-              value={activeThread?.sandbox ?? "workspace-write"}
-              disabled={!activeThread || activeThreadBusy}
-              onChange={(event) =>
-                onSetThreadSandbox(
-                  event.target.value as
-                    | ""
-                    | "read-only"
-                    | "workspace-write"
-                    | "danger-full-access",
-                )
-              }
-            >
-              <option value="read-only">read-only</option>
-              <option value="workspace-write">workspace-write</option>
-              <option value="danger-full-access">danger-full-access</option>
-            </select>
-          </label>
-        </div>
-        {!hasSessionModelChoices ? (
-          <small className="pane-subtle-light">No models discovered on this server.</small>
-        ) : null}
-      </div>
 
       {sessionAdvancedOpen ? (
         <div className="session-advanced-panel composer-secondary-panel">
@@ -469,6 +428,52 @@ export function SessionComposer({
 
       <div className="composer-input-shell">
         <div className="composer-input-topbar">
+          <div className="composer-context-cluster">
+            <label className="composer-select-pill" aria-label="Model">
+              <span>Model</span>
+              <select
+                data-testid="session-model-select"
+                value={activeThreadModelValue}
+                disabled={!activeThread || !hasSessionModelChoices || activeThreadBusy}
+                onChange={(event) => onSetThreadModel(event.target.value)}
+              >
+                {hasSessionModelChoices ? (
+                  sessionModelChoices.map((modelName) => (
+                    <option key={modelName} value={modelName}>
+                      {modelName === sessionModelDefault
+                        ? `${modelName} (default)`
+                        : modelName}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">model unavailable</option>
+                )}
+              </select>
+            </label>
+            <label className="composer-select-pill" aria-label="Permissions">
+              <span>Permissions</span>
+              <select
+                data-testid="session-sandbox-select"
+                value={activeThread?.sandbox ?? "workspace-write"}
+                disabled={!activeThread || activeThreadBusy}
+                onChange={(event) =>
+                  onSetThreadSandbox(
+                    event.target.value as
+                      | ""
+                      | "read-only"
+                      | "workspace-write"
+                      | "danger-full-access",
+                  )
+                }
+              >
+                {SANDBOX_OPTIONS.map((option) => (
+                  <option key={option.value || "default"} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           <div className="composer-input-tools">
             <label
               className={`ghost composer-attach-btn file-chip ${
@@ -487,8 +492,8 @@ export function SessionComposer({
                   event.currentTarget.value = "";
                 }}
               />
-              {uploadingImage ? "Uploading..." : "Attach Image"}
-            </label>
+                {uploadingImage ? "Uploading..." : "Attach Image"}
+              </label>
             <button
               type="button"
               className="ghost composer-inline-action"
@@ -507,11 +512,16 @@ export function SessionComposer({
             >
               {sessionAdvancedOpen ? "Hide More" : "More"}
             </button>
+            <span className="shortcut-hint composer-shortcut-hint">
+              / commands · @ context · paste image
+            </span>
           </div>
-          <span className="shortcut-hint composer-shortcut-hint">
-            / commands · @ context · paste image
-          </span>
         </div>
+        {!hasSessionModelChoices ? (
+          <small className="pane-subtle-light composer-shell-note">
+            No models discovered on this server.
+          </small>
+        ) : null}
 
         {(activeThread?.imagePaths ?? []).length > 0 || imageUploadError ? (
           <div className="quick-strip quick-strip-attachments">
