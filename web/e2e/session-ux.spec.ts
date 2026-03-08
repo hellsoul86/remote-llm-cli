@@ -2690,6 +2690,7 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await addDirInput.fill("/srv/extra");
   await addDirInput.press("Enter");
   await page.getByTestId("advanced-skip-git-toggle").uncheck();
+  await page.getByTestId("advanced-json-output-toggle").uncheck();
   await page.getByTestId("advanced-ephemeral-toggle").check();
 
   const composer = page.getByPlaceholder(
@@ -2800,7 +2801,7 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await expect
     .poll(() => {
       const req = harness.lastRunRequest() as { json_output?: boolean } | null;
-      return Boolean(req?.json_output);
+      return req?.json_output === false;
     })
     .toBe(true);
 });
@@ -2865,6 +2866,35 @@ test("composer submits codex exec payload", async ({ page }) => {
       return `${String(first?.type ?? "")}:${String(first?.text ?? "")}|${String(req?.cwd ?? "")}|${String(req?.mode ?? "")}`;
     })
     .toBe(`text:exec payload ${marker}|/srv/work|exec`);
+});
+
+test("composer model and permissions controls map into run payload", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `COMPOSER_CONTROLS_${Date.now()}`;
+  const harness = await mockSessionApi(page, `controls ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByTestId("session-model-select").selectOption("gpt-5");
+  await page.getByTestId("session-sandbox-select").selectOption("read-only");
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`controls payload ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as {
+        model?: string;
+        sandbox?: string;
+      } | null;
+      return `${String(req?.model ?? "")}|${String(req?.sandbox ?? "")}`;
+    })
+    .toBe("gpt-5|read-only");
 });
 
 test("review pane stays secondary but drives review payloads", async ({

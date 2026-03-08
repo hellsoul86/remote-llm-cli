@@ -3173,6 +3173,24 @@ pre {
   font-family: var(--font-mono);
 }
 
+.composer-select-pill-compact {
+  gap: 0;
+  padding: 4px 10px;
+  min-height: 34px;
+}
+
+.composer-select-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .composer-select-pill select {
   min-width: 130px;
   width: auto;
@@ -3185,6 +3203,13 @@ pre {
   font-family: var(--font-sans);
   text-transform: none;
   letter-spacing: normal;
+}
+
+.composer-select-pill-compact select {
+  min-width: 0;
+  max-width: 192px;
+  font-size: 0.75rem;
+  font-weight: 600;
 }
 
 .composer-select-pill select:focus {

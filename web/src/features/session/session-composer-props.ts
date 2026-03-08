@@ -1,8 +1,4 @@
-import type {
-  ComponentProps,
-  Dispatch,
-  SetStateAction,
-} from "react";
+import type { ComponentProps, Dispatch, SetStateAction } from "react";
 
 import type { CodexApprovalPolicy } from "../../domains/session";
 import { SessionComposer } from "./components/SessionComposer";
@@ -12,6 +8,7 @@ type SessionSandbox = Parameters<SessionComposerProps["onSetThreadSandbox"]>[0];
 type ResolvePendingRequestPayload = Parameters<
   SessionComposerProps["onResolvePendingRequest"]
 >[1];
+type SessionComposerAdvancedPanelProps = SessionComposerProps["advancedPanelProps"];
 
 type BuildSessionComposerPropsDeps = Pick<
   SessionComposerProps,
@@ -31,19 +28,6 @@ type BuildSessionComposerPropsDeps = Pick<
   | "sessionModelChoices"
   | "sessionModelDefault"
   | "sessionAdvancedOpen"
-  | "approvalPolicyOptions"
-  | "configFlagDraft"
-  | "onConfigFlagDraftChange"
-  | "onConfigFlagDraftSubmit"
-  | "enableFlagDraft"
-  | "onEnableFlagDraftChange"
-  | "onEnableFlagDraftSubmit"
-  | "disableFlagDraft"
-  | "onDisableFlagDraftChange"
-  | "onDisableFlagDraftSubmit"
-  | "addDirDraft"
-  | "onAddDirDraftChange"
-  | "onAddDirDraftSubmit"
   | "pendingRequests"
   | "pendingRequestsLoading"
   | "pendingRequestsError"
@@ -60,15 +44,28 @@ type BuildSessionComposerPropsDeps = Pick<
   setThreadSandbox: (threadID: string, value: SessionSandbox) => void;
   onForkActiveSession: () => Promise<void>;
   setSessionAdvancedOpen: Dispatch<SetStateAction<boolean>>;
+  approvalPolicyOptions: SessionComposerAdvancedPanelProps["approvalPolicyOptions"];
   setThreadApprovalPolicy: (
     threadID: string,
     value: CodexApprovalPolicy,
   ) => void;
   setThreadWebSearch: (threadID: string, next: boolean) => void;
   setThreadProfile: (threadID: string, value: string) => void;
+  configFlagDraft: SessionComposerAdvancedPanelProps["configFlagDraft"];
+  onConfigFlagDraftChange: SessionComposerAdvancedPanelProps["onConfigFlagDraftChange"];
+  onConfigFlagDraftSubmit: SessionComposerAdvancedPanelProps["onConfigFlagDraftSubmit"];
   removeThreadConfigFlag: (threadID: string, value: string) => void;
+  enableFlagDraft: SessionComposerAdvancedPanelProps["enableFlagDraft"];
+  onEnableFlagDraftChange: SessionComposerAdvancedPanelProps["onEnableFlagDraftChange"];
+  onEnableFlagDraftSubmit: SessionComposerAdvancedPanelProps["onEnableFlagDraftSubmit"];
   removeThreadEnableFlag: (threadID: string, value: string) => void;
+  disableFlagDraft: SessionComposerAdvancedPanelProps["disableFlagDraft"];
+  onDisableFlagDraftChange: SessionComposerAdvancedPanelProps["onDisableFlagDraftChange"];
+  onDisableFlagDraftSubmit: SessionComposerAdvancedPanelProps["onDisableFlagDraftSubmit"];
   removeThreadDisableFlag: (threadID: string, value: string) => void;
+  addDirDraft: SessionComposerAdvancedPanelProps["addDirDraft"];
+  onAddDirDraftChange: SessionComposerAdvancedPanelProps["onAddDirDraftChange"];
+  onAddDirDraftSubmit: SessionComposerAdvancedPanelProps["onAddDirDraftSubmit"];
   removeThreadAddDir: (threadID: string, value: string) => void;
   setThreadSkipGitRepoCheck: (threadID: string, next: boolean) => void;
   setThreadJSONOutput: (threadID: string, next: boolean) => void;
@@ -99,30 +96,11 @@ export function buildSessionComposerProps(
     };
   };
 
-  return {
-    formRef: deps.formRef,
-    promptInputRef: deps.promptInputRef,
-    composerDropActive: deps.composerDropActive,
-    onSubmit: deps.onSubmit,
-    onDragEnter: deps.onDragEnter,
-    onDragOver: deps.onDragOver,
-    onDragLeave: deps.onDragLeave,
-    onDrop: deps.onDrop,
-    activeThreadStatusCopy: deps.activeThreadStatusCopy,
+  const advancedPanelProps: SessionComposerAdvancedPanelProps = {
     activeThread: deps.activeThread,
     activeThreadBusy: deps.activeThreadBusy,
-    activeThreadModelValue: deps.activeThreadModelValue,
-    hasSessionModelChoices: deps.hasSessionModelChoices,
-    sessionModelChoices: deps.sessionModelChoices,
-    sessionModelDefault: deps.sessionModelDefault,
-    onSetThreadModel: withActiveThread(deps.setThreadModel),
-    onSetThreadSandbox: withActiveThread(deps.setThreadSandbox),
     onForkSession: () => {
       void deps.onForkActiveSession();
-    },
-    sessionAdvancedOpen: deps.sessionAdvancedOpen,
-    onToggleSessionAdvanced: () => {
-      deps.setSessionAdvancedOpen((prev) => !prev);
     },
     approvalPolicyOptions: deps.approvalPolicyOptions,
     onSetThreadApprovalPolicy: withActiveThread(deps.setThreadApprovalPolicy),
@@ -149,6 +127,31 @@ export function buildSessionComposerProps(
     ),
     onSetThreadJSONOutput: withActiveThread(deps.setThreadJSONOutput),
     onSetThreadEphemeral: withActiveThread(deps.setThreadEphemeral),
+  };
+
+  return {
+    formRef: deps.formRef,
+    promptInputRef: deps.promptInputRef,
+    composerDropActive: deps.composerDropActive,
+    onSubmit: deps.onSubmit,
+    onDragEnter: deps.onDragEnter,
+    onDragOver: deps.onDragOver,
+    onDragLeave: deps.onDragLeave,
+    onDrop: deps.onDrop,
+    activeThreadStatusCopy: deps.activeThreadStatusCopy,
+    activeThread: deps.activeThread,
+    activeThreadBusy: deps.activeThreadBusy,
+    activeThreadModelValue: deps.activeThreadModelValue,
+    hasSessionModelChoices: deps.hasSessionModelChoices,
+    sessionModelChoices: deps.sessionModelChoices,
+    sessionModelDefault: deps.sessionModelDefault,
+    onSetThreadModel: withActiveThread(deps.setThreadModel),
+    onSetThreadSandbox: withActiveThread(deps.setThreadSandbox),
+    sessionAdvancedOpen: deps.sessionAdvancedOpen,
+    onToggleSessionAdvanced: () => {
+      deps.setSessionAdvancedOpen((prev) => !prev);
+    },
+    advancedPanelProps,
     pendingRequests: deps.pendingRequests,
     pendingRequestsLoading: deps.pendingRequestsLoading,
     pendingRequestsError: deps.pendingRequestsError,
