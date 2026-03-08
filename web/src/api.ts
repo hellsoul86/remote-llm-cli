@@ -354,6 +354,7 @@ export type ProjectGitFileStatus = {
 export type ProjectGitStatusResponse = {
   project_id: string;
   host_id: string;
+  branch?: string;
   files: ProjectGitFileStatus[];
   changed_paths: string[];
   staged_paths: string[];

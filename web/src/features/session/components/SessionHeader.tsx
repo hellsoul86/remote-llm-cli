@@ -5,6 +5,8 @@ type SessionHeaderProps = {
   title: string;
   modeLabel: string;
   modelLabel: string;
+  branchLabel: string;
+  repoChangesLabel: string;
   streamTone: string;
   streamCopy: string;
   streamLastError: string;
@@ -28,6 +30,8 @@ export function SessionHeader({
   title,
   modeLabel,
   modelLabel,
+  branchLabel,
+  repoChangesLabel,
   streamTone,
   streamCopy,
   streamLastError,
@@ -59,6 +63,7 @@ export function SessionHeader({
     streamTone === "ok" || !streamLastError.trim() ? "" : streamLastError.trim();
   const showStatus = statusCopy !== "Live" || Boolean(statusDetail);
   const showHostLabel = hostLabel.trim() !== "";
+  const showContextMeta = branchLabel.trim() !== "" || repoChangesLabel.trim() !== "";
 
   return (
     <header className="chat-head">
@@ -73,7 +78,23 @@ export function SessionHeader({
         <div className="chat-head-thread-row">
           <div className="chat-head-thread-copy">
             <h1>{title || "New Thread"}</h1>
-            <p className="chat-context">{projectPath}</p>
+            <div className="chat-head-context-row">
+              <p className="chat-context">{projectPath}</p>
+              {showContextMeta ? (
+                <div className="chat-head-context-meta">
+                  {branchLabel.trim() ? (
+                    <span className="chat-meta-chip" data-testid="header-branch-chip">
+                      {branchLabel}
+                    </span>
+                  ) : null}
+                  {repoChangesLabel.trim() ? (
+                    <span className="chat-meta-chip" data-testid="header-repo-changes-chip">
+                      {repoChangesLabel}
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </div>
           <div className="chat-head-meta">
             {modeLabel.trim() ? <span className="chat-meta-chip">{modeLabel}</span> : null}

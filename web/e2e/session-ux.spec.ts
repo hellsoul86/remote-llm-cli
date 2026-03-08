@@ -267,6 +267,7 @@ async function mockSessionApi(
     return {
       project_id: "project_local_1__srv_work",
       host_id: "local_1",
+      branch: "main",
       files: changedPaths.map((path) => ({
         path,
         code: projectGitStagedPaths.has(path) ? "M " : " M",
@@ -2402,9 +2403,12 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
   ).toHaveCount(0);
   await expect(page).toHaveTitle(/Codex$/);
   await expect(page.getByTestId("stream-status")).toHaveCount(0);
+  await expect(page.getByTestId("header-branch-chip")).toContainText("main");
+  await expect(page.getByTestId("header-repo-changes-chip")).toHaveCount(0);
   const composerShell = page.locator(".composer-input-shell");
   await expect(composerShell.getByTestId("session-model-select")).toBeVisible();
   await expect(composerShell.getByTestId("session-sandbox-select")).toBeVisible();
+  await expect(composerShell.getByTestId("fork-session-btn")).toHaveCount(0);
   await expect(
     page.locator('[data-testid="session-sandbox-select"] option'),
   ).toHaveText(["Read only", "Workspace write", "Full access"]);
@@ -3201,6 +3205,7 @@ test("fork session creates a branch session in project list", async ({
 
   const sessionChips = page.locator(".project-session-list .session-chip-tree");
   const initialCount = await sessionChips.count();
+  await page.getByTestId("advanced-toggle-btn").click();
   await page.getByTestId("fork-session-btn").click();
   await expect.poll(async () => sessionChips.count()).toBe(initialCount + 1);
   await expect(

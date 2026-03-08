@@ -22,6 +22,8 @@ type BuildSessionStagePropsDeps = {
   headerTitle: string;
   headerModeLabel: string;
   headerModelLabel: string;
+  headerBranchLabel: string;
+  headerRepoChangesLabel: string;
   streamTone: string;
   streamCopy: string;
   streamLastError: string;
@@ -97,6 +99,8 @@ export function buildSessionStageProps(
     title: deps.headerTitle,
     modeLabel: deps.headerModeLabel,
     modelLabel: deps.headerModelLabel,
+    branchLabel: deps.headerBranchLabel,
+    repoChangesLabel: deps.headerRepoChangesLabel,
     streamTone: deps.streamTone,
     streamCopy: deps.streamCopy,
     streamLastError: deps.streamLastError,

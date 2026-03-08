@@ -423,6 +423,20 @@ pre {
   line-height: 1.45;
 }
 
+.chat-head-context-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chat-head-context-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .chat-head-project-row {
   display: inline-flex;
   flex-wrap: wrap;
@@ -3021,6 +3035,10 @@ pre {
     align-items: flex-start;
   }
 
+  .chat-head-context-row {
+    width: 100%;
+  }
+
   .chat-head-side {
     width: 100%;
     justify-items: start;
@@ -3202,6 +3220,30 @@ pre {
 .composer-shell-note {
   display: inline-flex;
   margin-top: -2px;
+}
+
+.composer-secondary-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0 4px;
+  flex-wrap: wrap;
+}
+
+.composer-secondary-copy {
+  display: grid;
+  gap: 3px;
+}
+
+.composer-secondary-copy strong {
+  font-size: 0.76rem;
+  color: #1f304c;
+}
+
+.composer-secondary-copy p {
+  font-size: 0.73rem;
+  color: var(--text-soft);
 }
 
 .composer-attach-btn {

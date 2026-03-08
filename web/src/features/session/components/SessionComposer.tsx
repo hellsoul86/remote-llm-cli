@@ -195,6 +195,21 @@ export function SessionComposer({
 
       {sessionAdvancedOpen ? (
         <div className="session-advanced-panel composer-secondary-panel">
+          <div className="composer-secondary-actions">
+            <div className="composer-secondary-copy">
+              <strong>Thread actions</strong>
+              <p>Keep branch/fork controls secondary to the prompt input.</p>
+            </div>
+            <button
+              type="button"
+              className="ghost"
+              data-testid="fork-session-btn"
+              onClick={onForkSession}
+              disabled={!activeThread || activeThreadBusy}
+            >
+              Fork thread
+            </button>
+          </div>
           <label className="session-setting-row">
             approval
             <select
@@ -494,15 +509,6 @@ export function SessionComposer({
               />
                 {uploadingImage ? "Uploading..." : "Attach Image"}
               </label>
-            <button
-              type="button"
-              className="ghost composer-inline-action"
-              data-testid="fork-session-btn"
-              onClick={onForkSession}
-              disabled={!activeThread || activeThreadBusy}
-            >
-              Fork
-            </button>
             <button
               type="button"
               className="ghost composer-inline-action"

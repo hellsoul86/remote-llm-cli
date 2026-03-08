@@ -361,9 +361,7 @@ export function App() {
   });
   const projectReviewGit = useProjectReviewGit({
     enabled:
-      authPhase === "ready" &&
-      reviewPaneOpen &&
-      activeWorkspaceID.trim() !== "",
+      authPhase === "ready" && activeWorkspaceID.trim() !== "",
     token,
     projectID: activeWorkspaceID,
   });
@@ -1693,6 +1691,13 @@ export function App() {
       : activeThread?.codexMode === "resume"
         ? "Resume"
         : "";
+  const headerBranchLabel = projectReviewGit.branch.trim();
+  const headerRepoChangesLabel =
+    projectReviewGit.known && projectReviewGit.changedPaths.length > 0
+      ? `${projectReviewGit.changedPaths.length} ${
+          projectReviewGit.changedPaths.length === 1 ? "change" : "changes"
+        }`
+      : "";
   const sessionStageProps = buildSessionStageProps({
     sidebarProps: sessionSidebarProps,
     sidebarCollapsed,
@@ -1703,6 +1708,8 @@ export function App() {
     headerTitle: activeThread?.title ?? "Session",
     headerModeLabel,
     headerModelLabel: activeThreadModelValue,
+    headerBranchLabel,
+    headerRepoChangesLabel,
     streamTone: activeStreamTone,
     streamCopy: activeStreamCopy,
     streamLastError: activeStreamLastError,

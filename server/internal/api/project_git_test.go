@@ -97,6 +97,9 @@ func TestProjectGitActionsTrackRepoStatus(t *testing.T) {
 	if !slices.Equal(status.ChangedPaths, []string{"docs/review-plan.md", "src/app.ts"}) {
 		t.Fatalf("changed_paths=%v", status.ChangedPaths)
 	}
+	if status.Branch != "main" {
+		t.Fatalf("branch=%q want=main", status.Branch)
+	}
 	if len(status.StagedPaths) != 0 {
 		t.Fatalf("staged_paths=%v want empty", status.StagedPaths)
 	}
@@ -117,6 +120,9 @@ func TestProjectGitActionsTrackRepoStatus(t *testing.T) {
 	if !slices.Contains(stageResp.Status.StagedPaths, "src/app.ts") {
 		t.Fatalf("staged_paths=%v should contain src/app.ts", stageResp.Status.StagedPaths)
 	}
+	if stageResp.Status.Branch != "main" {
+		t.Fatalf("branch=%q want=main", stageResp.Status.Branch)
+	}
 
 	var revertResp projectGitActionResponse
 	statusCode = doJSON(
@@ -133,6 +139,9 @@ func TestProjectGitActionsTrackRepoStatus(t *testing.T) {
 	}
 	if slices.Contains(revertResp.Status.ChangedPaths, "docs/review-plan.md") {
 		t.Fatalf("changed_paths=%v should not contain reverted docs file", revertResp.Status.ChangedPaths)
+	}
+	if revertResp.Status.Branch != "main" {
+		t.Fatalf("branch=%q want=main", revertResp.Status.Branch)
 	}
 	if _, err := os.Stat(filepath.Join(workdir, "docs", "review-plan.md")); !os.IsNotExist(err) {
 		t.Fatalf("expected reverted docs file to be removed, stat err=%v", err)
@@ -156,6 +165,9 @@ func TestProjectGitActionsTrackRepoStatus(t *testing.T) {
 	}
 	if len(commitResp.Status.StagedPaths) != 0 {
 		t.Fatalf("staged_paths=%v want empty after commit", commitResp.Status.StagedPaths)
+	}
+	if commitResp.Status.Branch != "main" {
+		t.Fatalf("branch=%q want=main", commitResp.Status.Branch)
 	}
 	if got := strings.TrimSpace(runGitCommand(t, workdir, "log", "-1", "--pretty=%s")); got != "Native review commit" {
 		t.Fatalf("last commit message=%q want=Native review commit", got)
