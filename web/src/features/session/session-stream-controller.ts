@@ -202,6 +202,15 @@ export function createSessionStreamController(
           streamState.suppressReplaySurface = value;
         }
       },
+      onOpen: () => {
+        const active = deps.sessionStreamStateRef.current.get(trimmedSessionID);
+        if (!active || active.controller !== controller) return;
+        deps.updateSessionStreamHealth(trimmedSessionID, "live", {
+          lastEventAt: Date.now(),
+          lastError: "",
+          throttleMS: 0,
+        });
+      },
       onFrame: (frame) => handleSessionStreamFrame(trimmedSessionID, frame),
       isRunningSession: () =>
         deps.runningSessionIDsRef.current.has(trimmedSessionID),
