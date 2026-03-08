@@ -6,6 +6,7 @@ type UseGlobalShortcutsOptions = {
   commandPaletteOpen: boolean;
   onOpenCommandPalette: () => void;
   onCloseCommandPalette: () => void;
+  onToggleSidebar: () => void;
   onCreateThreadAndFocus: () => void;
   onSwitchThreadByOffset: (offset: number) => void;
   terminalDrawerOpen: boolean;
@@ -21,6 +22,7 @@ export function useGlobalShortcuts({
   commandPaletteOpen,
   onOpenCommandPalette,
   onCloseCommandPalette,
+  onToggleSidebar,
   onCreateThreadAndFocus,
   onSwitchThreadByOffset,
   terminalDrawerOpen,
@@ -52,6 +54,17 @@ export function useGlobalShortcuts({
       }
 
       if (appMode !== "session") return;
+
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "b"
+      ) {
+        event.preventDefault();
+        onToggleSidebar();
+        return;
+      }
 
       if (
         (event.metaKey || event.ctrlKey) &&
@@ -129,6 +142,7 @@ export function useGlobalShortcuts({
     onCloseCommandPalette,
     onCreateThreadAndFocus,
     onOpenCommandPalette,
+    onToggleSidebar,
     onSwitchThreadByOffset,
     terminalDrawerOpen,
     terminalHasLiveTransport,

@@ -9,6 +9,7 @@ import { SessionTimeline } from "./SessionTimeline";
 
 type SessionStageProps = {
   sidebarProps: ComponentProps<typeof SessionSidebar>;
+  sidebarCollapsed: boolean;
   headerProps: ComponentProps<typeof SessionHeader>;
   timelineProps: ComponentProps<typeof SessionTimeline>;
   composerProps: ComponentProps<typeof SessionComposer>;
@@ -20,6 +21,7 @@ type SessionStageProps = {
 
 export function SessionStage({
   sidebarProps,
+  sidebarCollapsed,
   headerProps,
   timelineProps,
   composerProps,
@@ -29,8 +31,12 @@ export function SessionStage({
   reviewPaneProps,
 }: SessionStageProps) {
   return (
-    <div className={`session-stage${reviewPaneOpen ? " session-stage-review-open" : ""}`}>
-      <SessionSidebar {...sidebarProps} />
+    <div
+      className={`session-stage${reviewPaneOpen ? " session-stage-review-open" : ""}${
+        sidebarCollapsed ? " session-stage-sidebar-collapsed" : ""
+      }`}
+    >
+      {!sidebarCollapsed ? <SessionSidebar {...sidebarProps} /> : null}
       <main className={`chat-pane${terminalDrawerOpen ? " chat-pane-terminal-open" : ""}`}>
         <SessionHeader {...headerProps} />
         <SessionTimeline {...timelineProps} />

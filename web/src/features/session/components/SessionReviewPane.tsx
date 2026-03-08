@@ -75,27 +75,59 @@ function findingMatchesChange(
 type DiffLine = {
   kind: "header" | "hunk" | "add" | "remove" | "context";
   text: string;
+  anchorKey: string;
+  anchorable: boolean;
 };
 
 function parseDiffLines(diff: string): DiffLine[] {
+  let hunkIndex = 0;
+  let lineIndex = 0;
   return diff
     .split("\n")
     .map((line) => line.replace(/\r$/, ""))
     .filter((line) => line !== "")
     .map((line) => {
       if (line.startsWith("@@")) {
-        return { kind: "hunk", text: line };
+        hunkIndex += 1;
+        lineIndex = 0;
+        return {
+          kind: "hunk" as const,
+          text: line,
+          anchorKey: `hunk:${hunkIndex}`,
+          anchorable: true,
+        };
       }
       if (line.startsWith("+++ ") || line.startsWith("--- ")) {
-        return { kind: "header", text: line };
+        return {
+          kind: "header" as const,
+          text: line,
+          anchorKey: `header:${line}`,
+          anchorable: false,
+        };
       }
+      lineIndex += 1;
       if (line.startsWith("+")) {
-        return { kind: "add", text: line };
+        return {
+          kind: "add" as const,
+          text: line,
+          anchorKey: `hunk:${hunkIndex || 1}:line:${lineIndex}`,
+          anchorable: true,
+        };
       }
       if (line.startsWith("-")) {
-        return { kind: "remove", text: line };
+        return {
+          kind: "remove" as const,
+          text: line,
+          anchorKey: `hunk:${hunkIndex || 1}:line:${lineIndex}`,
+          anchorable: true,
+        };
       }
-      return { kind: "context", text: line };
+      return {
+        kind: "context" as const,
+        text: line,
+        anchorKey: `hunk:${hunkIndex || 1}:line:${lineIndex}`,
+        anchorable: true,
+      };
     });
 }
 
@@ -114,6 +146,56 @@ function diffStats(diff: string): {
     if (line.kind === "remove") removed += 1;
   }
   return { added, removed, hunks };
+}
+
+function normalizeInlineText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[`"'():.,/\\_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pickInlineAnchorKey(
+  note: ReviewNote,
+  diffLines: DiffLine[],
+): string | null {
+  const anchorableLines = diffLines.filter((line) => line.anchorable);
+  if (anchorableLines.length === 0) return null;
+
+  const normalizedNote = normalizeInlineText(`${note.title} ${note.body}`);
+  let bestKey = "";
+  let bestScore = 0;
+
+  for (const line of anchorableLines) {
+    const normalizedLine = normalizeInlineText(
+      line.text.replace(/^[+\-\s]/, ""),
+    );
+    if (!normalizedLine || normalizedLine.length < 4) continue;
+    if (normalizedNote.includes(normalizedLine)) {
+      const score = normalizedLine.length;
+      if (score > bestScore) {
+        bestScore = score;
+        bestKey = line.anchorKey;
+      }
+      continue;
+    }
+    const tokens = normalizedLine.split(" ").filter((token) => token.length >= 4);
+    const overlaps = tokens.filter((token) => normalizedNote.includes(token)).length;
+    if (overlaps <= 0) continue;
+    const score = overlaps * 10 + normalizedLine.length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestKey = line.anchorKey;
+    }
+  }
+
+  if (bestKey) return bestKey;
+
+  const preferredChangedLine =
+    anchorableLines.find((line) => line.kind === "add" || line.kind === "remove") ??
+    anchorableLines[0];
+  return preferredChangedLine?.anchorKey ?? null;
 }
 
 export function SessionReviewPane({
@@ -236,6 +318,25 @@ export function SessionReviewPane({
   const selectedChangeDiffLines = selectedChange
     ? parseDiffLines(selectedChange.diff)
     : [];
+  const inlineAnchoredFindings = useMemo(() => {
+    if (!selectedChange || selectedChangeDiffLines.length === 0) {
+      return {
+        anchors: new Map<string, ReviewNote[]>(),
+        floating: selectedChangeFindings,
+      };
+    }
+    const anchors = new Map<string, ReviewNote[]>();
+    const floating: ReviewNote[] = [];
+    for (const note of selectedChangeFindings) {
+      const anchorKey = pickInlineAnchorKey(note, selectedChangeDiffLines);
+      if (!anchorKey) {
+        floating.push(note);
+        continue;
+      }
+      anchors.set(anchorKey, [...(anchors.get(anchorKey) ?? []), note]);
+    }
+    return { anchors, floating };
+  }, [selectedChange, selectedChangeDiffLines, selectedChangeFindings]);
 
   const dismissFinding = (findingID: string) => {
     setDismissedNoteIDs((current) =>
@@ -543,14 +644,57 @@ export function SessionReviewPane({
                       className="review-diff-view"
                       data-testid="review-change-diff"
                     >
-                      {selectedChangeDiffLines.map((line, index) => (
-                        <code
-                          key={`${selectedChange.id}:diff:${index}`}
-                          className={`review-diff-line review-diff-${line.kind}`}
-                        >
-                          {line.text}
-                        </code>
-                      ))}
+                      {selectedChangeDiffLines.map((line, index) => {
+                        const anchoredNotes =
+                          inlineAnchoredFindings.anchors.get(line.anchorKey) ?? [];
+                        return (
+                          <div
+                            key={`${selectedChange.id}:diff:${index}`}
+                            className="review-diff-row"
+                          >
+                            <code
+                              className={`review-diff-line review-diff-${line.kind}`}
+                            >
+                              {line.text}
+                            </code>
+                            {anchoredNotes.length > 0 ? (
+                              <div
+                                className="review-inline-anchor"
+                                data-testid="review-inline-anchor"
+                              >
+                                <div className="review-inline-anchor-head">
+                                  <span>{anchoredNotes.length} inline note{anchoredNotes.length === 1 ? "" : "s"}</span>
+                                </div>
+                                <div className="review-inline-anchor-list">
+                                  {anchoredNotes.map((finding) => (
+                                    <article
+                                      key={finding.id}
+                                      className={`review-inline-note review-finding-${finding.tone}`}
+                                      data-testid="review-inline-note"
+                                    >
+                                      <header>
+                                        <div>
+                                          <strong>{finding.title}</strong>
+                                          <time>{finding.timestamp}</time>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          className="ghost review-inline-action"
+                                          data-testid="review-finding-dismiss"
+                                          onClick={() => dismissFinding(finding.id)}
+                                        >
+                                          Dismiss
+                                        </button>
+                                      </header>
+                                      <pre>{finding.body}</pre>
+                                    </article>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
                     </div>
                   ) : (
                     <p
@@ -564,22 +708,22 @@ export function SessionReviewPane({
                 <div className="review-inline-thread">
                   <div className="review-subsection-head">
                     <strong>Discussion</strong>
-                    <span>{selectedChangeFindings.length}</span>
+                    <span>{inlineAnchoredFindings.floating.length}</span>
                   </div>
-                  {selectedChangeFindings.length === 0 ? (
+                  {inlineAnchoredFindings.floating.length === 0 ? (
                     <p
                       className="review-empty-copy"
                       data-testid="review-file-findings-empty"
                     >
-                      File-linked review notes will stack here when Codex calls
-                      out this file directly.
+                      File-linked notes are anchored inline in the diff when
+                      Codex can map them to this patch.
                     </p>
                   ) : (
                     <div
                       className="review-finding-list"
                       data-testid="review-file-findings"
                     >
-                      {selectedChangeFindings.map((finding) => (
+                      {inlineAnchoredFindings.floating.map((finding) => (
                         <article
                           key={finding.id}
                           className={`review-finding-card review-finding-${finding.tone}`}

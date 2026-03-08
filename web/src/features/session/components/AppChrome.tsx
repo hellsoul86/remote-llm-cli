@@ -1,8 +1,10 @@
 type AppChromeProps = {
   appMode: "session" | "ops";
+  sidebarCollapsed: boolean;
   isRefreshing: boolean;
   healthIsError: boolean;
   health: string;
+  onToggleSidebar: () => void;
   onRefreshWorkspace: () => Promise<void>;
   onOpenUtilities: () => void;
   onReturnToSession: () => void;
@@ -11,77 +13,78 @@ type AppChromeProps = {
 
 export function AppChrome({
   appMode,
+  sidebarCollapsed,
   isRefreshing,
   healthIsError,
   health,
+  onToggleSidebar,
   onRefreshWorkspace,
   onOpenUtilities,
   onReturnToSession,
   onLogout,
 }: AppChromeProps) {
   const statusCopy = healthIsError
-    ? "Connection needs attention"
+    ? "Controller paused"
     : appMode === "ops" && isRefreshing
-      ? "Syncing workspace"
+      ? "Refreshing"
       : "";
 
   return (
-    <>
-      <header className={`app-topbar ${appMode === "ops" ? "app-topbar-utility" : ""}`}>
-        <div className="topbar-title">
-          <p className="topbar-context">{appMode === "ops" ? "secondary surfaces" : "workspace"}</p>
-          <h1>{appMode === "ops" ? "Utilities" : "Codex"}</h1>
-        </div>
-        <div className="topbar-controls">
-          {statusCopy ? (
-            <span
-              className={`sync-pill ${isRefreshing ? "busy" : "error"}`}
-              role="status"
-              title={health}
-            >
-              {statusCopy}
-            </span>
-          ) : null}
-          {appMode === "ops" ? (
+    <header className={`app-topbar ${appMode === "ops" ? "app-topbar-utility" : ""}`}>
+      <div className="topbar-title">
+        <h1>Codex</h1>
+        {appMode === "ops" ? <span className="topbar-surface-tag">Tools</span> : null}
+      </div>
+      <div className="topbar-controls">
+        {statusCopy ? (
+          <span
+            className={`sync-pill ${healthIsError ? "error" : "busy"}`}
+            role="status"
+            title={health}
+          >
+            {statusCopy}
+          </span>
+        ) : null}
+        {appMode === "ops" ? (
+          <>
             <button
               type="button"
               className="ghost topbar-utility-btn"
               onClick={onReturnToSession}
             >
-              Back to Codex
+              Return to workbench
             </button>
-          ) : (
+            <button
+              type="button"
+              className="ghost topbar-quiet-btn"
+              onClick={() => void onRefreshWorkspace()}
+              disabled={isRefreshing}
+            >
+              {isRefreshing ? "Refreshing..." : "Refresh"}
+            </button>
+            <button type="button" className="ghost topbar-quiet-btn" onClick={onLogout}>
+              Lock
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={`ghost topbar-sidebar-btn${sidebarCollapsed ? " active" : ""}`}
+              onClick={onToggleSidebar}
+            >
+              Sidebar
+            </button>
             <button
               type="button"
               className="ghost topbar-utility-btn"
               onClick={onOpenUtilities}
             >
-              Utilities
+              Tools
             </button>
-          )}
-          {appMode === "ops" ? (
-            <>
-              <button
-                type="button"
-                className="ghost topbar-quiet-btn"
-                onClick={() => void onRefreshWorkspace()}
-                disabled={isRefreshing}
-              >
-                {isRefreshing ? "Refreshing..." : "Refresh"}
-              </button>
-              <button type="button" className="ghost topbar-quiet-btn" onClick={onLogout}>
-                Lock
-              </button>
-            </>
-          ) : null}
-        </div>
-      </header>
-
-      {healthIsError ? (
-        <section className="workspace-alert" role="status">
-          Connection needs attention. Session sync may pause until the controller recovers.
-        </section>
-      ) : null}
-    </>
+          </>
+        )}
+      </div>
+    </header>
   );
 }

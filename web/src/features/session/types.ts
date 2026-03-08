@@ -41,4 +41,5 @@ export type SessionTreeHost = {
 export type SessionTreePrefs = {
   projectFilter: string;
   collapsedHostIDs: string[];
+  sidebarCollapsed: boolean;
 };

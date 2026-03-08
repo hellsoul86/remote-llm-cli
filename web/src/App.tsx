@@ -281,6 +281,9 @@ export function App() {
   const [collapsedHostIDs, setCollapsedHostIDs] = useState<string[]>(
     sessionTreePrefs.collapsedHostIDs,
   );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    sessionTreePrefs.sidebarCollapsed,
+  );
   const [treeCursorSessionID, setTreeCursorSessionID] = useState("");
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -358,9 +361,7 @@ export function App() {
   });
   const projectReviewGit = useProjectReviewGit({
     enabled:
-      authPhase === "ready" &&
-      reviewPaneOpen &&
-      activeWorkspaceID.trim() !== "",
+      authPhase === "ready" && activeWorkspaceID.trim() !== "",
     token,
     projectID: activeWorkspaceID,
   });
@@ -883,6 +884,7 @@ export function App() {
     commandPaletteOpen,
     onOpenCommandPalette: () => openCommandPalette(),
     onCloseCommandPalette: () => closeCommandPalette(),
+    onToggleSidebar: () => setSidebarCollapsed((prev) => !prev),
     onCreateThreadAndFocus: createThreadAndFocus,
     onSwitchThreadByOffset: switchThreadByOffset,
     terminalDrawerOpen,
@@ -1003,9 +1005,16 @@ export function App() {
 
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const title = activeThread?.title.trim() || "Session";
-    document.title = `${title} · Codex Control App`;
-  }, [activeThread?.title]);
+    if (authPhase !== "ready") {
+      document.title = "Sign In · Codex";
+      return;
+    }
+    const title =
+      activeThread?.title.trim() ||
+      activeWorkspace?.title.trim() ||
+      "Codex";
+    document.title = `${title} · Codex`;
+  }, [authPhase, activeThread?.title, activeWorkspace?.title]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1039,8 +1048,9 @@ export function App() {
     persistSessionTreePrefs({
       projectFilter,
       collapsedHostIDs,
+      sidebarCollapsed,
     });
-  }, [projectFilter, collapsedHostIDs]);
+  }, [projectFilter, collapsedHostIDs, sidebarCollapsed]);
 
   useEffect(() => {
     if (sessionTreeHosts.length === 0) return;
@@ -1670,16 +1680,36 @@ export function App() {
     onSubmit: onAddHost,
     onCancelEdit: onCancelHostEdit,
   });
+  const headerHostLabel =
+    activeWorkspace?.hostName?.trim() &&
+    activeWorkspace.hostName.trim() !== "local-default"
+      ? activeWorkspace.hostName.trim()
+      : "";
+  const headerModeLabel =
+    activeThread?.codexMode === "review"
+      ? "Review"
+      : activeThread?.codexMode === "resume"
+        ? "Resume"
+        : "";
+  const headerBranchLabel = projectReviewGit.branch.trim();
+  const headerRepoChangesLabel =
+    projectReviewGit.known && projectReviewGit.changedPaths.length > 0
+      ? `${projectReviewGit.changedPaths.length} ${
+          projectReviewGit.changedPaths.length === 1 ? "change" : "changes"
+        }`
+      : "";
   const sessionStageProps = buildSessionStageProps({
     sidebarProps: sessionSidebarProps,
+    sidebarCollapsed,
     composerProps: sessionComposerProps,
+    headerProjectTitle: activeWorkspace?.title?.trim() || "Untitled Project",
+    headerProjectPath: activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH,
+    headerHostLabel,
     headerTitle: activeThread?.title ?? "Session",
-    headerContext:
-      (activeWorkspace?.path?.trim() || DEFAULT_WORKSPACE_PATH) +
-      ((activeWorkspace?.hostName?.trim() || "") &&
-      activeWorkspace?.hostName?.trim() !== "local-default"
-        ? ` · ${activeWorkspace.hostName.trim()}`
-        : ""),
+    headerModeLabel,
+    headerModelLabel: activeThreadModelValue,
+    headerBranchLabel,
+    headerRepoChangesLabel,
     streamTone: activeStreamTone,
     streamCopy: activeStreamCopy,
     streamLastError: activeStreamLastError,
@@ -1753,9 +1783,11 @@ export function App() {
     <div className="workspace-shell">
       <AppChrome
         appMode={appMode}
+        sidebarCollapsed={sidebarCollapsed}
         isRefreshing={isRefreshing}
         healthIsError={healthIsError}
         health={health}
+        onToggleSidebar={() => setSidebarCollapsed((prev) => !prev)}
         onRefreshWorkspace={onRefreshWorkspace}
         onOpenUtilities={() => switchMode("ops")}
         onReturnToSession={() => switchMode("session")}

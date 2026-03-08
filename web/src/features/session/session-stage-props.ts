@@ -14,9 +14,16 @@ type SessionTimelineProps = ComponentProps<typeof SessionTimeline>;
 
 type BuildSessionStagePropsDeps = {
   sidebarProps: SessionStageProps["sidebarProps"];
+  sidebarCollapsed: boolean;
   composerProps: SessionStageProps["composerProps"];
+  headerProjectTitle: string;
+  headerProjectPath: string;
+  headerHostLabel: string;
   headerTitle: string;
-  headerContext: string;
+  headerModeLabel: string;
+  headerModelLabel: string;
+  headerBranchLabel: string;
+  headerRepoChangesLabel: string;
   streamTone: string;
   streamCopy: string;
   streamLastError: string;
@@ -86,8 +93,14 @@ export function buildSessionStageProps(
   deps: BuildSessionStagePropsDeps,
 ): SessionStageProps {
   const headerProps: SessionHeaderProps = {
+    projectTitle: deps.headerProjectTitle,
+    projectPath: deps.headerProjectPath,
+    hostLabel: deps.headerHostLabel,
     title: deps.headerTitle,
-    context: deps.headerContext,
+    modeLabel: deps.headerModeLabel,
+    modelLabel: deps.headerModelLabel,
+    branchLabel: deps.headerBranchLabel,
+    repoChangesLabel: deps.headerRepoChangesLabel,
     streamTone: deps.streamTone,
     streamCopy: deps.streamCopy,
     streamLastError: deps.streamLastError,
@@ -173,6 +186,7 @@ export function buildSessionStageProps(
 
   return {
     sidebarProps: deps.sidebarProps,
+    sidebarCollapsed: deps.sidebarCollapsed,
     headerProps,
     timelineProps,
     composerProps: deps.composerProps,

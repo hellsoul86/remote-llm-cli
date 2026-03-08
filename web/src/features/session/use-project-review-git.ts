@@ -164,6 +164,7 @@ export function useProjectReviewGit({
       status?.staged_paths?.map((item) => item.trim()).filter(Boolean) ?? [],
     [status],
   );
+  const branch = useMemo(() => status?.branch?.trim() ?? "", [status]);
 
   return {
     known,
@@ -171,6 +172,7 @@ export function useProjectReviewGit({
     busyAction,
     message,
     tone,
+    branch,
     changedPaths,
     stagedPaths,
     refresh,

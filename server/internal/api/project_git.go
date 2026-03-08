@@ -28,6 +28,7 @@ type projectGitFileStatus struct {
 type projectGitStatusSnapshot struct {
 	ProjectID    string                 `json:"project_id"`
 	HostID       string                 `json:"host_id"`
+	Branch       string                 `json:"branch,omitempty"`
 	Files        []projectGitFileStatus `json:"files"`
 	ChangedPaths []string               `json:"changed_paths"`
 	StagedPaths  []string               `json:"staged_paths"`
@@ -147,6 +148,17 @@ func (s *Server) collectProjectGitStatus(
 	if err != nil {
 		return projectGitStatusSnapshot{}, err
 	}
+	branchResult, err := s.runViaSSH(ctx, host, runtime.CommandSpec{
+		Program: "git",
+		Args:    []string{"rev-parse", "--abbrev-ref", "HEAD"},
+	}, workdir, executor.ExecOptions{
+		MaxStdoutBytes: 8 * 1024,
+		MaxStderrBytes: 8 * 1024,
+	})
+	if err != nil {
+		return projectGitStatusSnapshot{}, err
+	}
+	branch := strings.TrimSpace(branchResult.Stdout)
 	files := parseProjectGitStatus(result.Stdout)
 	changedPaths := make([]string, 0, len(files))
 	stagedPaths := make([]string, 0, len(files))
@@ -163,6 +175,7 @@ func (s *Server) collectProjectGitStatus(
 	return projectGitStatusSnapshot{
 		ProjectID:    projectID,
 		HostID:       hostID,
+		Branch:       branch,
 		Files:        files,
 		ChangedPaths: changedPaths,
 		StagedPaths:  stagedPaths,

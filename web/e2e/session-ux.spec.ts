@@ -267,6 +267,7 @@ async function mockSessionApi(
     return {
       project_id: "project_local_1__srv_work",
       host_id: "local_1",
+      branch: "main",
       files: changedPaths.map((path) => ({
         path,
         code: projectGitStagedPaths.has(path) ? "M " : " M",
@@ -2254,11 +2255,33 @@ test("codex parser extracts assistant text from response_item envelopes", async 
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
-  await page.getByRole("button", { name: "Unlock Workspace" }).click();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await page.getByRole("button", { name: "Unlock Codex" }).click();
+  await expect(page.locator(".session-side")).toBeVisible();
+  await expect(
+    page.getByPlaceholder("Search projects or threads"),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Send", exact: true }),
   ).toBeEnabled();
+}
+
+async function revisitWorkspace(page: Page): Promise<void> {
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+  } catch {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+  }
+  const workspaceShell = page.locator(".session-side");
+  try {
+    await expect(workspaceShell).toBeVisible({ timeout: 15000 });
+    return;
+  } catch {
+    const tokenInput = page.getByPlaceholder("rlm_xxx.yyy");
+    await expect(tokenInput).toBeVisible({ timeout: 15000 });
+    await tokenInput.fill("rlm_test.token");
+    await page.getByRole("button", { name: "Unlock Codex" }).click();
+    await expect(workspaceShell).toBeVisible();
+  }
 }
 
 test("desktop session UX baseline (layout + interaction + scroll)", async ({
@@ -2276,7 +2299,7 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
   await expect(chatPane).toBeVisible();
   await expect(page.locator(".chat-context")).toContainText("/srv/work");
   await expect(page.locator(".pane-summary-copy").first()).toContainText(
-    "1 project across 1",
+    "1 project · recent threads",
   );
   await expect(
     page.getByText("Servers, project paths, and session history."),
@@ -2297,7 +2320,7 @@ test("desktop session UX baseline (layout + interaction + scroll)", async ({
     page.getByText("No matching projects or threads."),
   ).toBeVisible();
   await projectFilter.fill("");
-  await expect(page.locator(".project-host-pill").first()).toBeVisible();
+  await expect(page.locator(".project-host-pill")).toHaveCount(0);
 
   const composer = page.getByPlaceholder(
     "Ask Codex to work in this project...",
@@ -2364,9 +2387,8 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
   await unlock(page);
 
   const topbar = page.locator(".app-topbar");
-  await expect(
-    topbar.getByRole("button", { name: "Utilities", exact: true }),
-  ).toBeVisible();
+  await expect(topbar.getByRole("button", { name: "Sidebar", exact: true })).toBeVisible();
+  await expect(topbar.getByRole("button", { name: "Tools", exact: true })).toBeVisible();
   await expect(
     topbar.getByRole("button", { name: "Session", exact: true }),
   ).toHaveCount(0);
@@ -2379,7 +2401,34 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
   await expect(
     topbar.getByRole("button", { name: "Lock", exact: true }),
   ).toHaveCount(0);
-  await expect(page.getByTestId("stream-status")).toContainText("Connected");
+  await expect(page).toHaveTitle(/Codex$/);
+  await expect(page.getByTestId("stream-status")).toHaveCount(0);
+  await expect(page.getByTestId("header-branch-chip")).toContainText("main");
+  await expect(page.getByTestId("header-repo-changes-chip")).toHaveCount(0);
+  const composerShell = page.locator(".composer-input-shell");
+  await expect(composerShell.getByTestId("session-model-select")).toBeVisible();
+  await expect(composerShell.getByTestId("session-sandbox-select")).toBeVisible();
+  await expect(composerShell.getByTestId("fork-session-btn")).toHaveCount(0);
+  await expect(
+    page.locator('[data-testid="session-sandbox-select"] option'),
+  ).toHaveText(["Read only", "Workspace write", "Full access"]);
+});
+
+test("sidebar toggles from topbar and Cmd/Ctrl+B", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `SIDEBAR_TOGGLE_${Date.now()}`;
+  await mockSessionApi(page, `sidebar toggle ${marker}`, marker);
+  await unlock(page);
+
+  await expect(page.locator(".session-side")).toBeVisible();
+  await page.getByRole("button", { name: "Sidebar", exact: true }).click();
+  await expect(page.locator(".session-side")).toHaveCount(0);
+
+  await page.keyboard.press("Control+b");
+  await expect(page.locator(".session-side")).toBeVisible();
+  await expect(
+    page.getByPlaceholder("Search projects or threads"),
+  ).toBeVisible();
 });
 
 test("jump-to-latest appears when timeline grows off-bottom", async ({
@@ -2553,7 +2602,7 @@ test("ops codex platform auth panel runs status action", async ({ page }) => {
   const harness = await mockSessionApi(page, `platform auth ${marker}`, marker);
   await unlock(page);
 
-  await page.getByRole("button", { name: "Utilities", exact: true }).click();
+  await page.getByRole("button", { name: "Tools", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Codex Platform" }),
   ).toBeVisible();
@@ -2576,7 +2625,7 @@ test("ops codex platform mcp/cloud controls map requests", async ({ page }) => {
   const harness = await mockSessionApi(page, `platform req ${marker}`, marker);
   await unlock(page);
 
-  await page.getByRole("button", { name: "Utilities", exact: true }).click();
+  await page.getByRole("button", { name: "Tools", exact: true }).click();
 
   await page.getByTestId("platform-mcp-action-select").selectOption("add");
   await page.getByTestId("platform-mcp-name-input").fill("memory");
@@ -2641,6 +2690,7 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await addDirInput.fill("/srv/extra");
   await addDirInput.press("Enter");
   await page.getByTestId("advanced-skip-git-toggle").uncheck();
+  await page.getByTestId("advanced-json-output-toggle").uncheck();
   await page.getByTestId("advanced-ephemeral-toggle").check();
 
   const composer = page.getByPlaceholder(
@@ -2751,7 +2801,7 @@ test("advanced codex controls map into run payload", async ({ page }) => {
   await expect
     .poll(() => {
       const req = harness.lastRunRequest() as { json_output?: boolean } | null;
-      return Boolean(req?.json_output);
+      return req?.json_output === false;
     })
     .toBe(true);
 });
@@ -2816,6 +2866,35 @@ test("composer submits codex exec payload", async ({ page }) => {
       return `${String(first?.type ?? "")}:${String(first?.text ?? "")}|${String(req?.cwd ?? "")}|${String(req?.mode ?? "")}`;
     })
     .toBe(`text:exec payload ${marker}|/srv/work|exec`);
+});
+
+test("composer model and permissions controls map into run payload", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `COMPOSER_CONTROLS_${Date.now()}`;
+  const harness = await mockSessionApi(page, `controls ${marker}`, marker);
+  await unlock(page);
+
+  await page.getByTestId("session-model-select").selectOption("gpt-5");
+  await page.getByTestId("session-sandbox-select").selectOption("read-only");
+
+  const composer = page.getByPlaceholder(
+    "Ask Codex to work in this project...",
+  );
+  await composer.fill(`controls payload ${marker}`);
+  await composer.press("Enter");
+  await expect.poll(() => harness.runRequests()).toBe(1);
+
+  await expect
+    .poll(() => {
+      const req = harness.lastRunRequest() as {
+        model?: string;
+        sandbox?: string;
+      } | null;
+      return `${String(req?.model ?? "")}|${String(req?.sandbox ?? "")}`;
+    })
+    .toBe("gpt-5|read-only");
 });
 
 test("review pane stays secondary but drives review payloads", async ({
@@ -3092,12 +3171,13 @@ test("review pane scopes notes to the selected file and lets the reviewer dismis
     hasText: "docs/review-plan.md",
   });
   await docsChange.click();
-  await expect(page.getByTestId("review-file-findings")).toContainText(
+  await expect(page.getByTestId("review-inline-anchor")).toContainText(
     "docs/review-plan.md",
   );
-  await expect(page.getByTestId("review-file-findings")).not.toContainText(
+  await expect(page.getByTestId("review-inline-anchor")).not.toContainText(
     "src/app.ts",
   );
+  await expect(page.getByTestId("review-file-findings-empty")).toBeVisible();
 
   await page.getByTestId("review-change-mark-reviewed").click();
   await expect(page.getByTestId("review-change-mark-reviewed")).toContainText(
@@ -3105,10 +3185,10 @@ test("review pane scopes notes to the selected file and lets the reviewer dismis
   );
 
   await page
-    .getByTestId("review-file-findings")
+    .getByTestId("review-inline-anchor")
     .getByTestId("review-finding-dismiss")
     .click();
-  await expect(page.getByTestId("review-file-findings")).toHaveCount(0);
+  await expect(page.getByTestId("review-inline-anchor")).toHaveCount(0);
   await expect(page.getByTestId("review-restore-dismissed")).toBeVisible();
 });
 
@@ -3155,6 +3235,7 @@ test("fork session creates a branch session in project list", async ({
 
   const sessionChips = page.locator(".project-session-list .session-chip-tree");
   const initialCount = await sessionChips.count();
+  await page.getByTestId("advanced-toggle-btn").click();
   await page.getByTestId("fork-session-btn").click();
   await expect.poll(async () => sessionChips.count()).toBe(initialCount + 1);
   await expect(
@@ -3476,8 +3557,8 @@ test("refresh resumes stream from persisted cursor without duplicate timeline", 
   await expect(page.getByText("Response Started")).toHaveCount(0);
   await expect(page.getByText("Server Completed")).toHaveCount(0);
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".session-side")).toBeVisible();
   await expect(
     page.locator(".message.message-assistant pre", { hasText: marker }),
   ).toHaveCount(1);
@@ -3548,8 +3629,7 @@ test("archived session can be restored and survives reload", async ({
   );
   expect(restoreResponse.ok).toBeTruthy();
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   const restoredSession = page
     .locator(`.session-chip-tree[data-session-id="${sessionID}"]`)
     .first();
@@ -3589,8 +3669,7 @@ test("server replay ignores cursor but timeline stays deduped", async ({
   });
   await expect(assistantEntry).toHaveCount(1);
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   await expect(assistantEntry).toHaveCount(1);
   await expect
     .poll(() =>
@@ -3620,8 +3699,7 @@ test("websocket stream replay renders once without SSE fallback", async ({
   await expect(assistantEntry).toHaveCount(1);
   await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   await expect(assistantEntry).toHaveCount(1);
   await expect.poll(() => harness.sessionOneSSECalls()).toBe(0);
   await expect
@@ -3799,10 +3877,9 @@ test("session tree keyboard nav and prefs survive reload", async ({ page }) => {
     })
     .toContain("session 2");
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   await expect(projectFilter).toHaveValue("session 2");
-  await expect(page.locator(".project-host-pill").first()).toBeVisible();
+  await expect(page.locator(".project-host-pill")).toHaveCount(0);
 });
 
 test("project create and rename use project name as primary label", async ({
@@ -4162,7 +4239,7 @@ test("stream status recovers after transient failures", async ({ page }) => {
   expect(sawRetryState).toBeTruthy();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(streamStatus).toContainText("Connected", { timeout: 15000 });
+  await expect(streamStatus).toHaveCount(0, { timeout: 15000 });
 
   const composer = page.getByPlaceholder(
     "Ask Codex to work in this project...",
@@ -4207,8 +4284,7 @@ test("pinning session reorders tree and persists across reload", async ({
     page.locator(".project-session-list .session-chip-tree").first(),
   ).toHaveAttribute("data-session-id", "session_cli_2");
 
-  await page.reload();
-  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await revisitWorkspace(page);
   await expect(
     page.locator(
       '.session-chip-tree[data-session-id="session_cli_2"] .session-chip-badge.pinned',
