@@ -418,7 +418,7 @@ async function mockSessionApi(
 async function unlock(page: Page): Promise<void> {
   await page.goto("/");
   await page.getByPlaceholder("rlm_xxx.yyy").fill("rlm_test.token");
-  await page.getByRole("button", { name: "Unlock Workspace" }).click();
+  await page.getByRole("button", { name: "Unlock Codex" }).click();
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Send", exact: true }),
