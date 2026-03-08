@@ -8,6 +8,7 @@ type RunSessionStreamLoopOptions = {
   controller: AbortController;
   getAfter: () => number;
   setSuppressReplaySurface: (value: boolean) => void;
+  onOpen?: () => void;
   onFrame: (frame: SessionStreamFrame) => void;
   isRunningSession: () => boolean;
   onState: (
@@ -43,6 +44,7 @@ export async function runSessionStreamLoop(
     controller,
     getAfter,
     setSuppressReplaySurface,
+    onOpen,
     onFrame,
     isRunningSession,
     onState,
@@ -62,6 +64,7 @@ export async function runSessionStreamLoop(
       await streamSessionEvents(authToken, sessionID, {
         after,
         signal: controller.signal,
+        onOpen,
         onFrame,
       });
       if (controller.signal.aborted) break;

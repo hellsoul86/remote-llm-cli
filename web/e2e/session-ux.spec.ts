@@ -1648,14 +1648,22 @@ async function installMockSessionWebSocket(
   opts: {
     sessionID: string;
     marker: string;
-    mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
+    mode?:
+      | "replay-once"
+      | "reset-reconnect"
+      | "flaky-reset-reconnect"
+      | "open-no-ready";
   },
 ): Promise<void> {
   await page.addInitScript(
     (config: {
       sessionID: string;
       marker: string;
-      mode?: "replay-once" | "reset-reconnect" | "flaky-reset-reconnect";
+      mode?:
+        | "replay-once"
+        | "reset-reconnect"
+        | "flaky-reset-reconnect"
+        | "open-no-ready";
     }) => {
       const globalAny = window as unknown as {
         __mockWsState?: { calls: Array<{ sessionID: string; after: number }> };
@@ -1877,6 +1885,9 @@ async function installMockSessionWebSocket(
                 session_id: sessionID,
                 cursor: readyCursor,
               });
+              return;
+            }
+            if (mode === "open-no-ready") {
               return;
             }
 
@@ -2412,6 +2423,22 @@ test("top shell keeps utilities secondary to the active session workspace", asyn
   await expect(
     page.locator('[data-testid="session-sandbox-select"] option'),
   ).toHaveText(["Read only", "Workspace write", "Full access"]);
+});
+
+test("idle session does not stay stuck in syncing after transport opens", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 900 });
+  const marker = `IDLE_TRANSPORT_${Date.now()}`;
+  await mockSessionApi(page, `idle transport ${marker}`, marker);
+  await installMockSessionWebSocket(page, {
+    sessionID: "session_cli_1",
+    marker,
+    mode: "open-no-ready",
+  });
+  await unlock(page);
+
+  await expect(page.getByTestId("stream-status")).toHaveCount(0);
 });
 
 test("sidebar toggles from topbar and Cmd/Ctrl+B", async ({ page }) => {

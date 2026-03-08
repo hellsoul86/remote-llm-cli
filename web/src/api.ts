@@ -1437,6 +1437,7 @@ export async function resolveCodexV2PendingRequest(
 type StreamSessionEventsOptions = {
   after?: number;
   signal: AbortSignal;
+  onOpen?: () => void;
   onFrame: (frame: SessionStreamFrame) => void;
 };
 
@@ -1515,6 +1516,7 @@ async function streamSessionEventsViaWS(
 
     socket.onopen = () => {
       opened = true;
+      options.onOpen?.();
     };
 
     socket.onmessage = (event) => {
@@ -1599,6 +1601,7 @@ async function streamSessionEventsViaSSE(
   if (!res.body) {
     throw new Error("stream session events failed: empty stream body");
   }
+  options.onOpen?.();
 
   const decoder = new TextDecoder();
   const reader = res.body.getReader();
